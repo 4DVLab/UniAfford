@@ -1,6 +1,7 @@
 import os
 import json
 import numpy as np
+import open3d as o3d
 from collections import defaultdict
 
 
@@ -15,7 +16,7 @@ class PointCloud:
     all = defaultdict(list)
     
     
-    def __init__(self, points, obj_type, mask:np.ndarrayst=None, labels:list=None):
+    def __init__(self, points, obj_type, mask:np.ndarray=None, labels:list=None):
         PointCloud.current_id += 1
 
         self.points = points
@@ -82,8 +83,8 @@ class PointCloud:
                 for file in os.listdir(dir_path):
                     file_path = os.path.join(dir_path, file)
                     if os.path.isfile(file_path):
+                        print(f'loading {file_path}')
                         pc = cls.load_file(file_path)
-                        print(f'loaded {file_path}')
                         yield pc
 
         return iterator()
@@ -96,27 +97,46 @@ class PointCloud:
                 os.makedirs(dir_path, exist_ok=True)
             pc.save_to(os.path.join(dir_path, f'{pc.obj_type}_{pc.id}.csv'))
 
-        
+    def show(self):
+        if self.mask is not None and self.labels is not None and len(self.labels) > 0:
+            for idx, label in enumerate(self.labels):
+                colors = np.full((self.points.shape[0], 3), 0.6)  # 默认灰色
+                mask_col = self.mask[:, idx] if self.mask.shape[1] > idx else None
+                if mask_col is None:
+                    continue
+                label_mask = mask_col > 0
+                colors[label_mask] = np.array([1.0, 0.0, 0.0])  # 红色
+
+                pcd = o3d.geometry.PointCloud()
+                pcd.points = o3d.utility.Vector3dVector(self.points)
+                pcd.colors = o3d.utility.Vector3dVector(colors)
+                o3d.visualization.draw_geometries([pcd], window_name=f"Rendering label: {self.obj_type}-{self.id}-{label} (red)")
+        else:
+            # 无 mask/labels 时直接渲染
+            pcd = o3d.geometry.PointCloud()
+            pcd.points = o3d.utility.Vector3dVector(self.points)
+            o3d.visualization.draw_geometries([pcd], window_name=f"Rendering label: {self.obj_type}-{self.id}")
 
 class AGPIL_PC(PointCloud):
     current_id = 0
     header = [
-        'contain', # 1
-
-        'open', # 3
-        
-        'support', # 4
-        'lay', # 5
-        'sit', # 6
-
-        'wrapgrasp', # 7
-        'pour', # 8
-
-        'display',  # 10
-        'push', # 11
-
-        'press', # 14
-
+        'grasp',    # 1
+        'contain',  # 2
+        'lift',     # 3
+        'open',     # 4
+        'lay',      # 5
+        'sit',      # 6
+        'support',  # 7
+        'wrapgrasp',# 8
+        'pour',     # 9
+        'move',     # 10
+        'display',  # 11
+        'push',     # 12
+        'listen',   # 13
+        'wear',     # 14
+        'press',    # 15
+        'cut',      # 16
+        'stab',     # 17
     ]
     all = {
         k: list() for k in [
@@ -158,7 +178,7 @@ class AGPIL_PC(PointCloud):
         pc_obj.labels = [label for idx, label in enumerate(AGPIL_PC.header) if idx not in zero_col_idx]
 
         if zero_col_idx.size > 0:
-            data = np.delete(data, zero_col_idx, axis=1) 
+            data = np.delete(data, zero_col_idx+3, axis=1) 
         if data.shape[1] > 3:
             pc_obj.mask = data[:, 3:]
         
@@ -178,8 +198,8 @@ class AGPIL_PC(PointCloud):
                             for file in os.listdir(files_dir):
                                 file_path = os.path.join(files_dir, file)
                                 if os.path.isfile(file_path) and not file.startswith('.'):  # 忽略 .开头的文件
+                                    print(f'loading {file_path}')
                                     pc = cls.load_file(file_path, obj_type=obj_type)
-                                    print(f'loaded {file_path}')
                                     yield pc
         return iterator()
 
@@ -230,6 +250,7 @@ if __name__=="__main__":
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
     parser.add_argument("-d", "--dataset", type=str, help="按照预设定数据集整理",
                          default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet'])
+    parser.add_argument('-s', '--show', type=str, help='渲染点云文件')
 
     args = parser.parse_args()
 
