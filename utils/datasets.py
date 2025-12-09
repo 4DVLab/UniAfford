@@ -89,13 +89,13 @@ class PointCloud:
         return iterator()
     
     @classmethod
-    def load_and_save(cls, dataset_root_path):
-        for pc in cls.load_all():
-            dir_path = os.path.join(dataset_root_path, pc.obj_type, 'PointCloud')
+    def load_and_save(cls, input_root, output_root):
+        for pc in cls.load_all(input_root):
+            dir_path = os.path.join(output_root, pc.obj_type, 'PointCloud')
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path, exist_ok=True)
             pc.save_to(os.path.join(dir_path, f'{e.obj_type}_{e.id}.csv')) 
-
+            del pc
 
         
 
@@ -238,8 +238,7 @@ if __name__=="__main__":
     if 'pc' in selected_modalities:
         match args.dataset:
             case 'AGPIL':
-                AGPIL_PC.load_all(input_dir)
-                AGPIL_PC.save_all(output_dir)
+                AGPIL_PC.load_and_save(input_dir, output_dir)
             case 'PIADv2': ...
             case 'PIAD': ...
             case 'RAGNet': ...
