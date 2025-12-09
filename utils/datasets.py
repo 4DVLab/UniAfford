@@ -15,7 +15,7 @@ class PointCloud:
     all = defaultdict(list)
     
     
-    def __init__(self, points, obj_type, mask:list=None, labels:list=None):
+    def __init__(self, points, obj_type, mask:np.ndarrayst=None, labels:list=None):
         PointCloud.current_id += 1
 
         self.points = points
@@ -24,22 +24,20 @@ class PointCloud:
         PointCloud.all[obj_type].append(self)
         self.id = PointCloud.current_id
 
-        self.mask = mask if mask is not None else []        # 对应点的aff的值
-        self.labels = labels if labels is not None else []  # aff_mask对应列的标签
+        self.mask = mask       # 对应点的aff的值
+        self.labels = labels   # aff_mask对应列的标签
 
 
     def save_to(self, filepath):
         """统一保存为csv格式，第一行是标签，数据前三列是xyz，后面所有的列分别表示不同aff标注"""
-        points = np.asarray(self.points)
-        mask = np.asarray(self.mask) if self.mask is not None else None
+        header = ['x', 'y', 'z']
 
         # 拼接xyz和mask
-        if mask is not None:
-            data = np.concatenate([points, mask], axis=1)
+        if self.mask is not None:
+            data = np.concatenate([self.points, self.mask], axis=1)
+            header += self.labels
         else:
-            data = points
-
-        header = ['x', 'y', 'z'] + self.labels
+            data = self.points
 
         with open(filepath, 'w') as f:
             np.savetxt(f, data, delimiter=',', header=','.join(header))
@@ -56,8 +54,10 @@ class PointCloud:
             data = np.loadtxt(f, delimiter=',', skiprows=1)
  
         pc_obj = PointCloud(points = data[:, :3], obj_type=obj_type)
-        pc_obj.mask = data[:, 3:] if data.shape[1] > 3 else []
-        pc_obj.labels = header[3:] if len(header) > 3 else []
+        if data.shape[1] > 3:
+            pc_obj.mask = data[:, 3:] 
+        if len(header) > 3:
+            pc_obj.labels = header[3:] 
 
         return pc_obj
 
@@ -94,14 +94,30 @@ class PointCloud:
             dir_path = os.path.join(output_root, pc.obj_type, 'PointCloud')
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path, exist_ok=True)
-            pc.save_to(os.path.join(dir_path, f'{e.obj_type}_{e.id}.csv')) 
-            del pc
+            pc.save_to(os.path.join(dir_path, f'{pc.obj_type}_{pc.id}.csv'))
 
         
 
 class AGPIL_PC(PointCloud):
     current_id = 0
-    header = list(range(17))
+    header = [
+        'contain', # 1
+
+        'open', # 3
+        
+        'support', # 4
+        'lay', # 5
+        'sit', # 6
+
+        'wrapgrasp', # 7
+        'pour', # 8
+
+        'display',  # 10
+        'push', # 11
+
+        'press', # 14
+
+    ]
     all = {
         k: list() for k in [
             'Bag', 'Bed', 'Bottle', 'Bowl', 'Chair',
@@ -112,7 +128,7 @@ class AGPIL_PC(PointCloud):
         ]
     }
 
-    def __init__(self, points, obj_type, mask: list = None, labels: list = None):
+    def __init__(self, points, obj_type, mask: np.ndarray = None, labels: list = None):
         super().__init__(points, obj_type, mask, labels)
         AGPIL_PC.current_id += 1
         AGPIL_PC.all[obj_type].append(self)
@@ -135,7 +151,6 @@ class AGPIL_PC(PointCloud):
 
         data = np.asarray(data, dtype=float)
         pc_obj = AGPIL_PC(points = data[:, :3], obj_type=obj_type)
-        pc_obj.mask = data[:, 3:]
         
         # 筛选出 mask 中全 0 的列索引（按列判断，忽略前三列 xyz）
         zero_col_idx = np.where(np.all(data[:, 3:] == 0, axis=0))[0]
@@ -143,9 +158,10 @@ class AGPIL_PC(PointCloud):
         pc_obj.labels = [label for idx, label in enumerate(AGPIL_PC.header) if idx not in zero_col_idx]
 
         if zero_col_idx.size > 0:
-            data = np.delete(data, zero_col_idx, axis=1)          
-        pc_obj.mask = data[:, 3:] if data.shape[1] > 3 else []
-
+            data = np.delete(data, zero_col_idx, axis=1) 
+        if data.shape[1] > 3:
+            pc_obj.mask = data[:, 3:]
+        
         return pc_obj
 
     @classmethod
