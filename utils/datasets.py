@@ -74,14 +74,30 @@ class PointCloud:
     
     @classmethod
     def load_all(cls, dataset_root_path):
-        for dir in os.listdir(dataset_root_path):
-            dir_path = os.path.join(dataset_root_path, dir)
-            if not os.path.isdir(dir_path):
-                continue
-            for file in os.listdir(dir_path):
-                file_path = os.path.join(dir_path, file)
-                if os.path.isfile(file_path):
-                    cls.load_file(file_path)
+        def iterator():
+            for dir in os.listdir(dataset_root_path):
+                dir_path = os.path.join(dataset_root_path, dir)
+                if not os.path.isdir(dir_path):
+                    continue
+                for file in os.listdir(dir_path):
+                    file_path = os.path.join(dir_path, file)
+                    if os.path.isfile(file_path):
+                        pc = cls.load_file(file_path)
+                        print(f'loaded {file_path}')
+                        yield pc
+
+        return iterator()
+    
+    @classmethod
+    def load_and_save(cls, dataset_root_path):
+        for pc in cls.load_all():
+            dir_path = os.path.join(dataset_root_path, pc.obj_type, 'PointCloud')
+            if not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+            pc.save_to(os.path.join(dir_path, f'{e.obj_type}_{e.id}.csv')) 
+
+
+        
 
 class AGPIL_PC(PointCloud):
     current_id = 0
@@ -134,21 +150,22 @@ class AGPIL_PC(PointCloud):
 
     @classmethod
     def load_all(cls, dataset_root_path):
-        for obj_type in list(cls.all):
-            for view in os.listdir(dataset_root_path):
-                for s in ['Seen', 'Unseen']:
-                    for t in ['Test', 'Train']:
-                        files_dir = os.path.join(dataset_root_path, view, s, 'Point', t, obj_type)
-                        if not os.path.isdir(files_dir):
-                            continue
+        def iterator():
+            for obj_type in list(cls.all):
+                for view in os.listdir(dataset_root_path):
+                    for s in ['Seen', 'Unseen']:
+                        for t in ['Test', 'Train']:
+                            files_dir = os.path.join(dataset_root_path, view, s, 'Point', t, obj_type)
+                            if not os.path.isdir(files_dir):
+                                continue
 
-                        for file in os.listdir(files_dir):
-                            file_path = os.path.join(files_dir, file)
-                            if os.path.isfile(file_path) and not file.startswith('.'):
-                                cls.load_file(file_path, obj_type=obj_type)
-                                print(f'loaded {file_path}')
-
-
+                            for file in os.listdir(files_dir):
+                                file_path = os.path.join(files_dir, file)
+                                if os.path.isfile(file_path) and not file.startswith('.'):  # 忽略 .开头的文件
+                                    pc = cls.load_file(file_path, obj_type=obj_type)
+                                    print(f'loaded {file_path}')
+                                    yield pc
+        return iterator()
 
 class Image:
     global_id = 0
