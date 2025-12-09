@@ -121,12 +121,13 @@ class AGPIL_PC(PointCloud):
         pc_obj = AGPIL_PC(points = data[:, :3], obj_type=obj_type)
         pc_obj.mask = data[:, 3:]
         
-        # 筛选出data中全0的列的索引并删除
-        zero_col_idx = np.where(np.all(data[3:] == 0, axis=0))[0]
-        pc_obj.labels = [label for idx, label in enumerate(AGPIL_PC.all.keys()) if idx not in zero_col_idx]
+        # 筛选出 mask 中全 0 的列索引（按列判断，忽略前三列 xyz）
+        zero_col_idx = np.where(np.all(data[:, 3:] == 0, axis=0))[0]
+        # 根据列索引过滤掉对应的标签；此处先用 header 作为占位标签
+        pc_obj.labels = [label for idx, label in enumerate(AGPIL_PC.header) if idx not in zero_col_idx]
 
         if zero_col_idx.size > 0:
-            data = np.delete(data, zero_col_idx + 3, axis=1)  # 忽略前三列            
+            data = np.delete(data, zero_col_idx, axis=1)          
         pc_obj.mask = data[:, 3:] if data.shape[1] > 3 else []
 
         return pc_obj
@@ -143,7 +144,7 @@ class AGPIL_PC(PointCloud):
 
                         for file in os.listdir(files_dir):
                             file_path = os.path.join(files_dir, file)
-                            if os.path.isfile(file_path):
+                            if os.path.isfile(file_path) and not file.startswith('.'):
                                 cls.load_file(file_path, obj_type=obj_type)
                                 print(f'loaded {file_path}')
 
