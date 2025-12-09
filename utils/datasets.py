@@ -122,8 +122,8 @@ class AGPIL_PC(PointCloud):
         pc_obj.mask = data[:, 3:]
         
         # 筛选出data中全0的列的索引并删除
-        zero_col_idx = np.where(np.all(data[2:] == 0, axis=0))[0]
-        pc_obj.labels = [label for idx, label in enumerate(pc_obj.labels) if idx not in zero_col_idx]
+        zero_col_idx = np.where(np.all(data[3:] == 0, axis=0))[0]
+        pc_obj.labels = [label for idx, label in enumerate(AGPIL_PC.all.keys()) if idx not in zero_col_idx]
 
         if zero_col_idx.size > 0:
             data = np.delete(data, zero_col_idx + 3, axis=1)  # 忽略前三列            
@@ -135,16 +135,17 @@ class AGPIL_PC(PointCloud):
     def load_all(cls, dataset_root_path):
         for obj_type in list(cls.all):
             for view in os.listdir(dataset_root_path):
-                for t in ['test', 'train']:
-                    files_dir = os.path.join(dataset_root_path, view, 'Point', t, obj_type)
-                    if not os.path.isdir(files_dir):
-                        continue
+                for s in ['Seen', 'Unseen']:
+                    for t in ['Test', 'Train']:
+                        files_dir = os.path.join(dataset_root_path, view, s, 'Point', t, obj_type)
+                        if not os.path.isdir(files_dir):
+                            continue
 
-                    for file in os.listdir(files_dir):
-                        file_path = os.path.join(files_dir, file)
-                        if os.path.isfile(file_path):
-                            cls.load_file(file_path, obj_type=obj_type)
-                            print(f'loaded {file_path}')
+                        for file in os.listdir(files_dir):
+                            file_path = os.path.join(files_dir, file)
+                            if os.path.isfile(file_path):
+                                cls.load_file(file_path, obj_type=obj_type)
+                                print(f'loaded {file_path}')
 
 
 
