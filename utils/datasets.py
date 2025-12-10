@@ -1,3 +1,4 @@
+from csv import Error
 import os
 import json
 import numpy as np
@@ -12,18 +13,16 @@ DEAFULT_INTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"
 
 
 class PointCloud:
-    current_id = 0
     all = defaultdict(list)
-    
+    id = defaultdict(int)
     
     def __init__(self, points, obj_type, mask:np.ndarray=None, labels:list=None):
-        PointCloud.current_id += 1
-
         self.points = points
         self.obj_type = obj_type
         
         PointCloud.all[obj_type].append(self)
-        self.id = PointCloud.current_id
+        PointCloud.id[obj_type] += 1
+        self.id = PointCloud.id[obj_type]
 
         self.mask = mask       # 对应点的aff的值
         self.labels = labels   # aff_mask对应列的标签
@@ -100,12 +99,21 @@ class PointCloud:
     def show(self):
         if self.mask is not None and self.labels is not None and len(self.labels) > 0:
             for idx, label in enumerate(self.labels):
-                colors = np.full((self.points.shape[0], 3), 0.6)  # 默认灰色
-                mask_col = self.mask[:, idx] if self.mask.shape[1] > idx else None
-                if mask_col is None:
-                    continue
-                label_mask = mask_col > 0
-                colors[label_mask] = np.array([1.0, 0.0, 0.0])  # 红色
+                if self.mask.shape[1] <= idx: break
+
+                mask_col = self.mask[:, idx]
+                
+                
+                # 初始化颜色数组：背景色为深灰色（强烈对比）
+                colors = np.full((self.points.shape[0], 3), [0.1, 0.1, 0.1])  # 深灰色背景
+                
+                # 有mask值的点：红色渐变，mask值越大颜色越浓（越亮）
+                mask_mask = mask_col > 0  # 找到所有非零mask的点
+                if mask_mask.any():
+                    # 红色通道：从深红(0.3)到亮红(1.0)，根据归一化的mask值
+                    colors[mask_mask, 0] = 0.3 + 0.7 * mask_col[mask_mask]  # 红色通道
+                    colors[mask_mask, 1] = 0.0  # 绿色通道保持为0
+                    colors[mask_mask, 2] = 0.0  # 蓝色通道保持为0
 
                 pcd = o3d.geometry.PointCloud()
                 pcd.points = o3d.utility.Vector3dVector(self.points)
@@ -118,25 +126,11 @@ class PointCloud:
             o3d.visualization.draw_geometries([pcd], window_name=f"Rendering label: {self.obj_type}-{self.id}")
 
 class AGPIL_PC(PointCloud):
-    current_id = 0
     header = [
-        'grasp',    # 1
-        'contain',  # 2
-        'lift',     # 3
-        'open',     # 4
-        'lay',      # 5
-        'sit',      # 6
-        'support',  # 7
-        'wrapgrasp',# 8
-        'pour',     # 9
-        'move',     # 10
-        'display',  # 11
-        'push',     # 12
-        'listen',   # 13
-        'wear',     # 14
-        'press',    # 15
-        'cut',      # 16
-        'stab',     # 17
+        'grasp', 'contain', 'lift', 'open', 'lay',
+        'sit', 'support', 'wrapgrasp', 'pour', 'move',
+        'display', 'push', 'listen', 'wear', 'press',
+        'cut', 'stab',     
     ]
     all = {
         k: list() for k in [
@@ -148,11 +142,12 @@ class AGPIL_PC(PointCloud):
         ]
     }
 
+    id = defaultdict(int)
+
     def __init__(self, points, obj_type, mask: np.ndarray = None, labels: list = None):
         super().__init__(points, obj_type, mask, labels)
-        AGPIL_PC.current_id += 1
         AGPIL_PC.all[obj_type].append(self)
-        
+        AGPIL_PC.id[obj_type] += 1
 
 
     @staticmethod
@@ -204,7 +199,7 @@ class AGPIL_PC(PointCloud):
         return iterator()
 
 class Image:
-    global_id = 0
+    all = defaultdict(list)
     
     def __init__(self, img:np.ndarray):
         self.img = img
@@ -237,6 +232,7 @@ def resolve_path(path_str: str):
     return path_str if os.path.isabs(path_str) else os.path.abspath(os.path.join(os.getcwd(), path_str))
 
 
+
 if __name__=="__main__":
     # 单独运行时作为数据处理工具
     import argparse
@@ -250,7 +246,8 @@ if __name__=="__main__":
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
     parser.add_argument("-d", "--dataset", type=str, help="按照预设定数据集整理",
                          default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet'])
-    parser.add_argument('-s', '--show', type=str, help='渲染点云文件')
+    parser.add_argument('-s', '--show', type=str, nargs="+", help='直接渲染点云文件的路径，选择时只执行渲染操作', default=[])
+    parser.add_argument('-r', '--rewrite', type=str, help='是否按id从1开始重写已有数据集', default=False)
 
     args = parser.parse_args()
 
@@ -264,15 +261,34 @@ if __name__=="__main__":
     if os.path.exists(info_file):
         with open(info_file, 'r') as f:
             info_dict = json.load(f)
+            if args.rewrite:
+                # 重新初始化类起始id
+                pc_id_dict = info_dict.get('PointCloud', {})
+                if pc_id_dict:
+                    PointCloud.id = defaultdict(int, pc_id_dict)
     else:
         info_dict = {}
 
-
+    # 整理模态输入
     selected_modalities = set(args.modality)
     if 'all' in selected_modalities:
         selected_modalities = {'pc', 'img', 'img_mask', 'ins'}
+    
 
-    if 'pc' in selected_modalities:
+    if args.show:
+        for f in args.show:
+            file_path = resolve_path(f)
+            match args.dataset:
+                case 'AGPIL':
+                    pc = AGPIL_PC.load_file(file_path)
+                case 'PIADv2': ...
+                case None:
+                    pc = PointCloud.load_file(file_path)
+                case e:
+                    raise Error(f'Selected dataset "{args.dataset}" is not supported!!')
+            pc.show()
+
+    else:
         match args.dataset:
             case 'AGPIL':
                 AGPIL_PC.load_and_save(input_dir, output_dir)
@@ -281,17 +297,23 @@ if __name__=="__main__":
             case 'RAGNet': ...
             case e:...
 
-    if 'img' in selected_modalities:
-        pass
-    if 'ins' in selected_modalities:
-        pass
+
+        if 'pc' in selected_modalities:
+            pass
+        if 'img' in selected_modalities:
+            pass
+        if 'ins' in selected_modalities:
+            pass
 
 
-    # 保存信息文件
-    info_dict['PointCloud'] = {k: [pc.id for pc in v] for k, v in PointCloud.all.items()}
+        # 保留最大的id
+        for k, v in PointCloud.all.items():
+            info_dict['PointCloud'][k] = max(v[-1], info_dict.get('PointCloud', {}).get(k, 0))
 
-    with open(info_file, 'w') as f:
-        json.dump(info_dict, f, ensure_ascii=False, indent=2)
+
+        # 保存信息文件
+        with open(info_file, 'w') as f:
+            json.dump(info_dict, f, ensure_ascii=False, indent=2)
 
 
 
