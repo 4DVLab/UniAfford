@@ -559,7 +559,7 @@ def load_info(output_dir=DEFAULT_OUTPUT_DIR, rewrite=False):
     if os.path.exists(info_file):
         with open(info_file, 'r') as f:
             loaded_dict = json.load(f)
-            info_dict = defaultdict(dict, loaded_dict)
+            info_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(int)), loaded_dict)
             if rewrite:
                 # 恢复 PointCloud.count
                 if pc_id_dict := info_dict.get('PointCloud', {}):
@@ -568,7 +568,7 @@ def load_info(output_dir=DEFAULT_OUTPUT_DIR, rewrite=False):
                 if img_id_dict := info_dict.get('Image', {}):
                     Image.count = defaultdict(lambda: defaultdict(int), img_id_dict)
     else:
-        info_dict = defaultdict(lambda: defaultdict(int))
+        info_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
 
 
 def update_info():
