@@ -8,7 +8,7 @@ from collections import defaultdict
 
 # 自定义参数
 DEFAULT_OUTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 输出的数据集位置
-DEFAULT_INTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 加载的数据集位置
+DEFAULT_INPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 加载的数据集位置
 
 # 全局信息文件路径与缓存，模块导入时即初始化
 info_root = DEFAULT_OUTPUT_DIR
@@ -20,6 +20,21 @@ info_dict = defaultdict(dict)
 class PointCloud:
     all = defaultdict(list)
     count = defaultdict(lambda: defaultdict(int))
+    """
+    count like: dict{
+        'Bed': {
+            'ID': 514,
+            'sit': 114,
+            'lay': '19',
+            ...
+        },
+        Chair: {
+            'ID': 81,
+            'sit': 9,
+        }
+        ...
+    }
+    """
     
     def __init__(self, points, obj_type, mask:np.ndarray=None, labels:list=None):
         self.points = points
@@ -83,7 +98,7 @@ class PointCloud:
     def load_all(cls, dataset_root_path):
         def iterator():
             for obj_type in os.listdir(dataset_root_path):
-                dir_path = os.path.join(dataset_root_path, obj_type)
+                dir_path = os.path.join(dataset_root_path, obj_type, 'PointCloud')
                 if not os.path.isdir(dir_path):
                     continue
                 for file in os.listdir(dir_path):
@@ -200,7 +215,7 @@ class AGPIL_PC(PointCloud):
                             for file in os.listdir(files_dir):
                                 file_path = os.path.join(files_dir, file)
                                 if os.path.isfile(file_path) and not file.startswith('.'):  # 忽略 .开头的文件
-                                    print(f'loading {file_path}')
+                                    print(f'loading PC{file_path}')
                                     pc = cls.load_file(file_path, obj_type=obj_type)
                                     yield pc
         return iterator()
@@ -556,33 +571,31 @@ def load_info(output_dir=DEFAULT_OUTPUT_DIR, rewrite=False):
     info_root = output_dir
     info_file = os.path.join(info_root, 'info.json')
 
+    info_dict = {
+        'PointCloud': defaultdict(lambda: defaultdict(int)),  # 对应PointCloud.count
+        'Image': defaultdict(lambda: defaultdict(int)),
+        'Instrument': defaultdict(lambda: defaultdict(int)),
+    }
     if os.path.exists(info_file):
         with open(info_file, 'r') as f:
             loaded_dict = json.load(f)
-            info_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(int)), loaded_dict)
+            for k, v in info_dict.items():
+                info_dict[k] = defaultdict(lambda: defaultdict(int), loaded_dict.get(k, {}))
+
             if rewrite:
-                # 恢复 PointCloud.count
-                if pc_id_dict := info_dict.get('PointCloud', {}):
-                    PointCloud.count = defaultdict(lambda: defaultdict(int), pc_id_dict)
-                # 恢复 Image.count
-                if img_id_dict := info_dict.get('Image', {}):
-                    Image.count = defaultdict(lambda: defaultdict(int), img_id_dict)
-    else:
-        info_dict = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+                # 恢复 cls.count计数
+                PointCloud.count = info_dict['PointCloud']
+                Image.count = info_dict['Image']
 
 
 def update_info():
     global info_dict
     # 更新 PointCloud.count（保留最大的ID）
-    if 'PointCloud' not in info_dict:
-        info_dict['PointCloud'] = defaultdict(int, {'ID':0})
     for k, v in PointCloud.count.items():
         current_max = info_dict['PointCloud'][k]['ID']
         info_dict['PointCloud'][k] = max(v['ID'], current_max)
     
     # 更新 Image.id（保留最大的id）
-    if 'Image' not in info_dict:
-        info_dict['Image'] = defaultdict(int, {'ID':0})
     for k, v in Image.count.items():
         current_max = info_dict['Image'][k]['ID']
         info_dict['Image'][k] = max(v['ID'], current_max)
@@ -598,7 +611,7 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser(description="根据不同的数据集选择不同的处理方式，整合为同一个数据集")
-    parser.add_argument("-i", "--input_dir", type=str, help="输入数据集位置", required=True)
+    parser.add_argument("-i", "--input_dir", type=str, help="输入数据集位置", default=DEFAULT_INPUT_DIR)
     parser.add_argument('-o', "--output_dir", type=str, help="输出数据集的绝对位置", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
     parser.add_argument("-t", "--type_of_obj", type=str, help="物体类型", default=None)
