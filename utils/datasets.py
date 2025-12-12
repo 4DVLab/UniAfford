@@ -530,6 +530,11 @@ class HANDAL_IMG(Image):
 
         return iterator()
 
+    @classmethod
+    def load_and_save(cls, input_root, output_root, obj_type, aff_type='grasp'):
+        for img in cls.load_all(input_root, obj_type=obj_type, aff_type=aff_type):
+            dir_path = os.path.join(output_root, img.obj_type, 'Image')
+            img.save_to(dir_path)
 
 class RAGNet(Image):...
 
@@ -594,7 +599,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="根据不同的数据集选择不同的处理方式，整合为同一个数据集")
     parser.add_argument("-i", "--input_dir", type=str, help="输入数据集位置", required=True)
     parser.add_argument('-o', "--output_dir", type=str, help="输出数据集的绝对位置", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument("-a", "--aff_name", type=str, help="affordance种类", default=None)
+    parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
     parser.add_argument("-t", "--type_of_obj", type=str, help="物体类型", default=None)
     parser.add_argument("-m", "--modality", type=str, nargs="+", help="手动添加数据的模态，可选一个或多个",
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
@@ -650,7 +655,8 @@ if __name__ == "__main__":
                 case None:
                     Image.load_and_save(input_dir, output_dir)
                 case 'HANDAL':
-                    HANDAL_IMG.load_and_save(input_dir, output_dir)
+                    assert args.obj_type is not None and args.aff_type is not None
+                    HANDAL_IMG.load_and_save(input_dir, output_dir, obj_type=args.type_of_obj, aff_type=args.aff_type)
                 case e:
                     raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
