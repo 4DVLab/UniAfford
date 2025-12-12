@@ -76,11 +76,10 @@ class PointCloud:
             header = first_line.split(',') if first_line else []
             data = np.loadtxt(f, delimiter=',', skiprows=1)
 
-        pc_obj = PointCloud(points = data[:, :3], obj_type=obj_type)
-        if data.shape[1] > 3:
-            pc_obj.mask = data[:, 3:] 
         if len(header) > 3:
-            pc_obj.labels = header[3:] 
+            pc_obj = PointCloud(points = data[:, :3], mask=data[:, 3:], obj_type=obj_type, labels=header[3:])
+        else:
+            pc_obj = PointCloud(points = data[:, :3], obj_type=obj_type)
 
         return pc_obj
 
@@ -582,7 +581,7 @@ def load_info(output_dir=DEFAULT_OUTPUT_DIR, rewrite=False):
             for k, v in info_dict.items():
                 info_dict[k] = defaultdict(lambda: defaultdict(int), loaded_dict.get(k, {}))
 
-            if rewrite:
+            if not rewrite:
                 # 恢复 cls.count计数
                 PointCloud.count = info_dict['PointCloud']
                 Image.count = info_dict['Image']
