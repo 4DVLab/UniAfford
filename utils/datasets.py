@@ -29,8 +29,9 @@ class PointCloud:
         PointCloud.count[obj_type]['ID'] += 1
         self.id = PointCloud.count[obj_type]['ID']
 
-        for l in labels:
-            PointCloud.count[obj_type][l] += 1
+        if labels is not None:
+            for l in labels:
+                PointCloud.count[obj_type][l] += 1
 
         self.mask = mask       # 对应点的aff的值
         self.labels = labels   # aff_mask对应列的标签
