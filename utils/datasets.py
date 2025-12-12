@@ -75,7 +75,7 @@ class PointCloud:
             first_line = f.readline().strip()
             header = first_line.split(',') if first_line else []
             data = np.loadtxt(f, delimiter=',', skiprows=1)
- 
+
         pc_obj = PointCloud(points = data[:, :3], obj_type=obj_type)
         if data.shape[1] > 3:
             pc_obj.mask = data[:, 3:] 
@@ -105,7 +105,7 @@ class PointCloud:
                     file_path = os.path.join(dir_path, file)
                     if os.path.isfile(file_path):
                         print(f'loading PC: {file_path}')
-                        pc = cls.load_file(file_path)
+                        pc = cls.load_file(file_path, obj_type=obj_type)
                         yield pc
 
         return iterator()
@@ -590,15 +590,17 @@ def load_info(output_dir=DEFAULT_OUTPUT_DIR, rewrite=False):
 
 def update_info():
     global info_dict
-    # 更新 PointCloud.count（保留最大的ID）
-    for k, v in PointCloud.count.items():
-        current_max = info_dict['PointCloud'][k]['ID']
-        info_dict['PointCloud'][k] = max(v['ID'], current_max)
+    # 更新 PointCloud.count（保留最大的计数）
+    for obj, v in PointCloud.count.items():
+        for aff, count in v.items():
+            current_max = info_dict['PointCloud'][obj][aff]
+            info_dict['PointCloud'][obj][aff] = max(count, current_max)
     
     # 更新 Image.id（保留最大的id）
-    for k, v in Image.count.items():
-        current_max = info_dict['Image'][k]['ID']
-        info_dict['Image'][k] = max(v['ID'], current_max)
+    for obj, v in Image.count.items():
+        for aff, count in v.items():
+            current_max = info_dict['Image'][obj][aff]
+            info_dict['Image'][obj][aff] = max(count, current_max)
 
     # 保存信息文件
     with open(info_file, 'w') as f:
