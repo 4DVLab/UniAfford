@@ -76,19 +76,19 @@ class PointCloud:
                 os.makedirs(dir_path, exist_ok=True)
 
             for e in v:
-                e.save_to(os.path.join(dir_path, f'{e.obj_type}_{e.id}.csv')) # 保存时命名为 {obj_type}_{id}.csv
+                e.save_to(os.path.join(dir_path, f'{e.obj_type}_{e.count}.csv')) # 保存时命名为 {obj_type}_{id}.csv
     
     @classmethod
     def load_all(cls, dataset_root_path):
         def iterator():
-            for dir in os.listdir(dataset_root_path):
-                dir_path = os.path.join(dataset_root_path, dir)
+            for obj_type in os.listdir(dataset_root_path):
+                dir_path = os.path.join(dataset_root_path, obj_type)
                 if not os.path.isdir(dir_path):
                     continue
                 for file in os.listdir(dir_path):
                     file_path = os.path.join(dir_path, file)
                     if os.path.isfile(file_path):
-                        print(f'loading {file_path}')
+                        print(f'loading PC: {file_path}')
                         pc = cls.load_file(file_path)
                         yield pc
 
@@ -262,14 +262,14 @@ class PIADv2_PC(PointCloud):
 
 class Image:
     all = defaultdict(list)
-    id = defaultdict(int)
+    count = defaultdict(lambda: defaultdict(int))
     
     def __init__(self, img:np.ndarray,
             obj_type,
-            labels=None,
+            labels:list=None,
             aff_mask:list[np.ndarray]=None,
-            obj_mask=None,
-            visible_mask=None
+            obj_mask:np.ndarray=None,
+            visible_mask:np.ndarray=None
         ):
         """ 
         Args:
@@ -281,58 +281,167 @@ class Image:
         self.dtype = 'No-mask' if aff_mask is None else 'Segmented'
         self.obj_type = obj_type
 
-        Image.id[self.obj_type] += 1
-        self.id = Image.id[self.obj_type]
+        Image.count[self.obj_type]['ID'] += 1
+        self.id = Image.count[self.obj_type]['ID']
 
         self.mask = aff_mask if aff_mask is not None else []
-        self.obj_mask = obj_mask if obj_mask is not None else np.asarray([])
-        self.visible_mask = visible_mask if visible_mask is not None else np.asarray([])
+        self.obj_mask = obj_mask
+        self.visible_mask = visible_mask
 
     def save_to(self, dir_path):
-        # TODO: 修改保存目录、id匹配
-        # dir_path 应该是目录，生成两个文件：原图 和 mask 合成图
+        # dir_path 应该是目录，生成两个文件：原图 和 aff_mask，并在obj_mask目录下并排保存图片的物体mask和可见部分mask（如有）
         if not os.path.exists(dir_path):
             os.makedirs(dir_path, exist_ok=True)
 
         # 保存img原图
-        img_path = os.path.join(dir_path, 'rgb', f'{self.obj_type}_{self.id}.png')
-        img_to_save = self.img
+        rgb_dir = os.path.join(dir_path, 'rgb')
+        os.makedirs(rgb_dir, exist_ok=True)
+        img_path = os.path.join(rgb_dir, f'{self.obj_type}_{self.id}.png')
         # # 确保img是uint8格式和三通道
         # if img_to_save.dtype != np.uint8:
         #     img_to_save = np.clip(img_to_save, 0, 255).astype(np.uint8)
         # if img_to_save.ndim == 2:  # 灰度图转三通道
         #     img_to_save = cv2.cvtColor(img_to_save, cv2.COLOR_GRAY2BGR)
-        cv2.imwrite(img_path, img_to_save)
+        cv2.imwrite(img_path, self.img)
 
         # 保存aff_mask
-        mask_path = os.path.join(dir_path, 'mask', f'{self.obj_type}_{self.id}_mask.png')
         if len(self.mask) != 0:
-            # 若mask为list，每个mask单独保存 TODO
-            if isinstance(self.mask, list):
-                for idx, mask in enumerate(self.mask):
-                    single_mask_path = os.path.join(
-                        dir_path, 'mask', f'{self.obj_type}_{self.id}_mask_{idx}.png'
-                    )
-                    cv2.imwrite(single_mask_path, mask)
-            else:
-                cv2.imwrite(mask_path, self.mask)
+            # 每个mask单独保存
+            for idx, mask in enumerate(self.mask):
+                mask_label_dir = os.path.join(dir_path, 'mask', self.labels[idx])
+                os.makedirs(mask_label_dir, exist_ok=True)
+                single_mask_path = os.path.join(
+                    mask_label_dir, f'{self.obj_type}_{self.id}_{self.labels[idx]}.png'
+                )
+                cv2.imwrite(single_mask_path, mask)
 
         # 保存obj_mask和visib_mask（如有）
+        obj_mask_dir = os.path.join(dir_path, 'obj_mask')
         if self.obj_mask is not None and self.obj_mask.size != 0:
-            obj_mask_path = os.path.join(dir_path, 'mask', f'{self.obj_type}_{self.id}_obj_mask.png')
+            os.makedirs(obj_mask_dir, exist_ok=True)
+            obj_mask_path = os.path.join(obj_mask_dir, f'{self.obj_type}_{self.id}_obj_mask.png')
             cv2.imwrite(obj_mask_path, self.obj_mask)
         if self.visible_mask is not None and self.visible_mask.size != 0:
-            vis_mask_path = os.path.join(dir_path, 'mask', f'{self.obj_type}_{self.id}_visible_mask.png')
+            os.makedirs(obj_mask_dir, exist_ok=True)
+            vis_mask_path = os.path.join(obj_mask_dir, f'{self.obj_type}_{self.id}_visible_mask.png')
             cv2.imwrite(vis_mask_path, self.visible_mask)
 
 
     @classmethod
     def load_file(cls, filepath, obj_type=None):
-        ...
+        """
+        根据保存结构加载图片和mask
+        
+        Args:
+            filepath: RGB图片路径
+            obj_type: 物体类型，如果为None则从文件路径推断
+        
+        Returns:
+            Image对象
+        """
+        # 确定目录路径（图片的父目录rgb的父目录Image）
+        dir_path = os.path.dirname(os.path.dirname(filepath))
+        rgb_filename = os.path.basename(filepath)
+        
+        # 从文件名提取 obj_type 和 id: {obj_type}_{id}.png
+        base_name = os.path.splitext(rgb_filename)[0]
+        parts = base_name.rsplit('_', 1)
+        if len(parts) == 2:
+            inferred_obj_type = parts[0]
+            inferred_id = parts[1]
+        else:
+            raise ValueError(f"Cannot parse obj_type and id from filename: {rgb_filename}")
+        
+        obj_type = obj_type if obj_type is not None else inferred_obj_type
+        
+        # 加载RGB图片
+        img = cv2.imread(filepath)
+        if img is None:
+            raise ValueError(f"Failed to load image: {filepath}")
+        
+        # 加载affordance masks
+        aff_mask = []
+        labels = []
+        mask_dir = os.path.join(dir_path, 'mask')
+        if os.path.exists(mask_dir):
+            # 遍历mask目录下的所有label子目录
+            for label_dir in os.listdir(mask_dir):
+                label_path = os.path.join(mask_dir, label_dir)
+                if not os.path.isdir(label_path):
+                    continue
+                
+                # 查找对应的mask文件: {obj_type}_{id}_{label}.png
+                mask_filename = f'{obj_type}_{inferred_id}_{label_dir}.png'
+                mask_filepath = os.path.join(label_path, mask_filename)
+                
+                if os.path.exists(mask_filepath):
+                    mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
+                    if mask is not None:
+                        aff_mask.append(mask)
+                        labels.append(label_dir)
+        
+        # 加载obj_mask
+        obj_mask = None
+        obj_mask_dir = os.path.join(dir_path, 'obj_mask')
+        if os.path.exists(obj_mask_dir):
+            obj_mask_path = os.path.join(obj_mask_dir, f'{obj_type}_{inferred_id}_obj_mask.png')
+            if os.path.exists(obj_mask_path):
+                obj_mask = cv2.imread(obj_mask_path, cv2.IMREAD_GRAYSCALE)
+        
+        # 加载visible_mask
+        visible_mask = None
+        if os.path.exists(obj_mask_dir):
+            vis_mask_path = os.path.join(obj_mask_dir, f'{obj_type}_{inferred_id}_visible_mask.png')
+            if os.path.exists(vis_mask_path):
+                visible_mask = cv2.imread(vis_mask_path, cv2.IMREAD_GRAYSCALE)
+        
+        img_obj = Image(
+            img=img,
+            obj_type=obj_type,
+            labels=labels,
+            aff_mask=aff_mask,
+            obj_mask=obj_mask,
+            visible_mask=visible_mask
+        )
+        
+        return img_obj
 
     @classmethod
-    def load_all(cls, dir_path):
-        ...
+    def load_all(cls, dataset_root_path, with_obj_mask=False):
+        """
+        从保存的数据集目录结构中加载所有图片
+        
+        Args:
+            dataset_root_path: 数据集根目录，结构为 {obj_type}/rgb/{obj_type}_{id}.png
+            with_obj_mask: 是否加载obj_mask（已自动处理，此参数保留兼容性）
+        """
+        def iterator():
+            for obj_type in os.listdir(dataset_root_path):
+                obj_type_dir = os.path.join(dataset_root_path, obj_type)
+                if not os.path.isdir(obj_type_dir):
+                    continue
+                
+                rgb_dir = os.path.join(obj_type_dir, 'rgb')
+                if not os.path.exists(rgb_dir):
+                    continue
+                
+                # 遍历rgb目录下的所有图片文件
+                rgb_files = sorted([
+                    f for f in os.listdir(rgb_dir)
+                    if f.lower().endswith(('.png', '.jpg'))
+                ])
+                
+                for rgb_file in rgb_files:
+                    rgb_path = os.path.join(rgb_dir, rgb_file)
+                    try:
+                        print(f'loading IMG: {rgb_path}')
+                        img = cls.load_file(rgb_path, obj_type=obj_type)
+                        yield img
+                    except Exception as e:
+                        print(f"Failed to load {rgb_path}: {e}")
+                        continue
+        
+        return iterator()
 
 class BoxedImage(Image):
     def __init__(self, img, box:np.ndarray=None, labels=None):
@@ -352,7 +461,8 @@ class HeatImage(Image):
 class HANDAL_IMG(Image):
     all = {}
     @classmethod
-    def load_file(cls, filepath, obj_type):...
+    def load_file(cls, filepath, obj_type):
+        raise SyntaxError('懒得写，直接使用 HANDAL_IMG.load_all')
 
     @classmethod
     def load_all(cls, dir_path, obj_type, aff_type):
@@ -430,21 +540,34 @@ def load_info(output_dir=DEFAULT_OUTPUT_DIR, rewrite=False):
 
     if os.path.exists(info_file):
         with open(info_file, 'r') as f:
-            info_dict = defaultdict(dict, json.load(f))
+            loaded_dict = json.load(f)
+            info_dict = defaultdict(dict, loaded_dict)
             if rewrite:
+                # 恢复 PointCloud.count
                 if pc_id_dict := info_dict.get('PointCloud', {}):
                     PointCloud.count = defaultdict(lambda: defaultdict(int), pc_id_dict)
+                # 恢复 Image.count
                 if img_id_dict := info_dict.get('Image', {}):
-                    Image.id = defaultdict(lambda: defaultdict(int), img_id_dict)
+                    Image.count = defaultdict(lambda: defaultdict(int), img_id_dict)
     else:
         info_dict = defaultdict(lambda: defaultdict(int))
 
 
 def update_info():
     global info_dict
-    # 保留最大的id
+    # 更新 PointCloud.count（保留最大的ID）
+    if 'PointCloud' not in info_dict:
+        info_dict['PointCloud'] = defaultdict(int, {'ID':0})
     for k, v in PointCloud.count.items():
-        info_dict['PointCloud'][k] = max(v["ID"], info_dict['PointCloud'][k])
+        current_max = info_dict['PointCloud'][k]['ID']
+        info_dict['PointCloud'][k] = max(v['ID'], current_max)
+    
+    # 更新 Image.id（保留最大的id）
+    if 'Image' not in info_dict:
+        info_dict['Image'] = defaultdict(int, {'ID':0})
+    for k, v in Image.count.items():
+        current_max = info_dict['Image'][k]['ID']
+        info_dict['Image'][k] = max(v['ID'], current_max)
 
     # 保存信息文件
     with open(info_file, 'w') as f:
