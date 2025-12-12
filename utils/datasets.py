@@ -289,7 +289,7 @@ class Image:
         self.visible_mask = visible_mask
 
     def save_to(self, dir_path):
-        # dir_path 应该是目录，生成两个文件：原图 和 aff_mask，并在obj_mask目录下并排保存图片的物体mask和可见部分mask（如有）
+        # dir_path 应该是目录，生成2~4个文件：原图 和 aff_mask，并在obj_mask目录下并排保存图片的物体mask和可见部分mask（如有）
         if not os.path.exists(dir_path):
             os.makedirs(dir_path, exist_ok=True)
 
@@ -325,7 +325,6 @@ class Image:
             os.makedirs(obj_mask_dir, exist_ok=True)
             vis_mask_path = os.path.join(obj_mask_dir, f'{self.obj_type}_{self.id}_visible_mask.png')
             cv2.imwrite(vis_mask_path, self.visible_mask)
-
 
     @classmethod
     def load_file(cls, filepath, obj_type=None):
@@ -443,6 +442,13 @@ class Image:
         
         return iterator()
 
+    @classmethod
+    def load_and_save(cls, input_root, output_root):
+        for img in cls.load_all(input_root):
+            dir_path = os.path.join(output_root, img.obj_type, 'Image')
+            img.save_to(dir_path)
+
+
 class BoxedImage(Image):
     def __init__(self, img, box:np.ndarray=None, labels=None):
         super().__init__(img, labels=labels)
@@ -461,11 +467,17 @@ class HeatImage(Image):
 class HANDAL_IMG(Image):
     all = {}
     @classmethod
-    def load_file(cls, filepath, obj_type):
+    def load_file(cls, filepath, obj_type=None):
         raise SyntaxError('懒得写，直接使用 HANDAL_IMG.load_all')
 
     @classmethod
-    def load_all(cls, dir_path, obj_type, aff_type):
+    def load_all(cls, dir_path, obj_type, aff_type='grasp'):
+        """
+        Args:
+            dir_path: 指HANDAL数据集中一个压缩包解压后的位置
+            obj_type: 手动指定这个压缩包下的物体种类
+            aff_type: 默认只有抓取这一个动作
+        """
         def iterator():
             """需要手动指定种类和文件目录"""
             for t in ['test', 'train']:
@@ -618,19 +630,30 @@ if __name__ == "__main__":
             pc.show()
 
     else:
-        match args.dataset:
-            case 'AGPIL':
-                AGPIL_PC.load_and_save(input_dir, output_dir)
-            case 'PIADv2': ...
-            case 'PIAD': ...
-            case 'RAGNet': ...
-            case e:
-                raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
-
         if 'pc' in selected_modalities:
-            pass
+            match args.dataset:
+                case None:
+                    PointCloud.load_and_save(input_dir, output_dir)
+                case 'AGPIL':
+                    AGPIL_PC.load_and_save(input_dir, output_dir)
+                case 'PIADv2':
+                    ...
+                case 'PIAD':
+                    ...
+                case 'RAGNet':
+                    ...
+                case e:
+                    raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
+
         if 'img' in selected_modalities:
-            pass
+            match args.dataset:
+                case None:
+                    Image.load_and_save(input_dir, output_dir)
+                case 'HANDAL':
+                    HANDAL_IMG.load_and_save(input_dir, output_dir)
+                case e:
+                    raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
+
         if 'ins' in selected_modalities:
             pass
 
