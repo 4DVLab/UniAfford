@@ -13,9 +13,13 @@ DEFAULT_INPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 加载的数据
 # 全局信息文件路径与缓存，模块导入时即初始化
 info_root = DEFAULT_OUTPUT_DIR
 info_file = os.path.join(info_root, 'info.json')
-info_dict = defaultdict(dict)
+info_dict = {
+    'PointCloud': defaultdict(lambda: defaultdict(int)),  # 对应PointCloud.count
+    'Image': defaultdict(lambda: defaultdict(int)),
+    'Instrument': defaultdict(lambda: defaultdict(int)),
+}
 
-
+"""  ----------------------------------------------- PointCloud classes ----------------------------------------------  """
 
 class PointCloud:
     all = defaultdict(list)
@@ -117,13 +121,17 @@ class PointCloud:
                 os.makedirs(dir_path, exist_ok=True)
             pc.save_to(os.path.join(dir_path, f'{pc.obj_type}_{pc.id}.csv'))
 
-    def show(self):
+    def show(self, selected_labels:list=None):
+        """
+        Args:
+            selected_labels: 只选择部分标签，否则都显示
+        """
         if self.mask is not None and self.labels is not None and len(self.labels) > 0:
             for idx, label in enumerate(self.labels):
-                if self.mask.shape[1] <= idx: break
+                if selected_labels is not None and label not in selected_labels: continue
+                if self.mask.shape[1] <= idx: raise ValueError(f'Error in {self.obj_type}-{self.id}: mask的列数{self.mask.shape}和label的维度 {label} 不同')
 
                 mask_col = self.mask[:, idx]
-                
                 
                 # 初始化颜色数组：背景色为深灰色（强烈对比）
                 colors = np.full((self.points.shape[0], 3), [0.1, 0.1, 0.1])  # 深灰色背景
@@ -166,7 +174,7 @@ class AGPIL_PC(PointCloud):
     count = defaultdict(lambda: defaultdict(int))
 
     def __init__(self, points, obj_type, mask: np.ndarray = None, labels: list = None):
-        super().__init__(points, obj_type, mask, labels)
+        super().__init__(points, obj_type=obj_type, mask=mask, labels=labels)
         AGPIL_PC.all[obj_type].append(self)
         AGPIL_PC.count[obj_type]['ID'] += 1
 
@@ -186,12 +194,12 @@ class AGPIL_PC(PointCloud):
             
 
         data = np.asarray(data, dtype=float)
-        pc_obj = AGPIL_PC(points = data[:, :3], obj_type=obj_type)
-        
+
         # 筛选出 mask 中全 0 的列索引（按列判断，忽略前三列 xyz）
         zero_col_idx = np.where(np.all(data[:, 3:] == 0, axis=0))[0]
         # 根据列索引过滤掉对应的标签；此处先用 header 作为占位标签
-        pc_obj.labels = [label for idx, label in enumerate(AGPIL_PC.aff_type) if idx not in zero_col_idx]
+        labels = [label for idx, label in enumerate(AGPIL_PC.aff_type) if idx not in zero_col_idx]
+        pc_obj = AGPIL_PC(points = data[:, :3], obj_type=obj_type, labels=labels)
 
         if zero_col_idx.size > 0:
             data = np.delete(data, zero_col_idx+3, axis=1) 
@@ -273,7 +281,7 @@ class PIADv2_PC(PointCloud):
         return iterator()
 
 
-
+"""  ----------------------------------------------- Image classes ----------------------------------------------  """
 
 class Image:
     all = defaultdict(list)
@@ -292,7 +300,12 @@ class Image:
             obj_mask: 整个物体的区域信息（含被遮挡部分）
         """
         self.img = img
-        self.labels=labels if labels is not None else []
+        self.labels = []
+        if labels:
+            for l in labels:
+                Image.count[obj_type][l] += 1
+            self.labels = labels
+
         self.dtype = 'No-mask' if aff_mask is None else 'Segmented'
         self.obj_type = obj_type
 
@@ -325,9 +338,7 @@ class Image:
             for idx, mask in enumerate(self.mask):
                 mask_label_dir = os.path.join(dir_path, 'mask', self.labels[idx])
                 os.makedirs(mask_label_dir, exist_ok=True)
-                single_mask_path = os.path.join(
-                    mask_label_dir, f'{self.obj_type}_{self.id}_{self.labels[idx]}.png'
-                )
+                single_mask_path = os.path.join(mask_label_dir, f'{self.obj_type}_{self.id}_{self.labels[idx]}.png')
                 cv2.imwrite(single_mask_path, mask)
 
         # 保存obj_mask和visib_mask（如有）
@@ -463,7 +474,6 @@ class Image:
             dir_path = os.path.join(output_root, img.obj_type, 'Image')
             img.save_to(dir_path)
 
-
 class BoxedImage(Image):
     def __init__(self, img, box:np.ndarray=None, labels=None):
         super().__init__(img, labels=labels)
@@ -474,13 +484,11 @@ class BoxedImage(Image):
         self.dtype = 'Boxed'
 
 class HeatImage(Image):
-    def __init__(self, img:np.ndarray, aff_mask:np.ndarray=None, labels=None, obj_mask:np.ndarray=None):
-        super().__init__(img, aff_mask=aff_mask, labels=labels, obj_mask=obj_mask)
+    def __init__(self, img:np.ndarray, obj_type, aff_mask:np.ndarray=None, labels=None, obj_mask:np.ndarray=None):
+        super().__init__(img, obj_type=obj_type, aff_mask=aff_mask, labels=labels, obj_mask=obj_mask)
         self.dtype = 'HeatMap'
 
-
 class HANDAL_IMG(Image):
-    all = {}
     @classmethod
     def load_file(cls, filepath, obj_type=None):
         raise SyntaxError('懒得写，直接使用 HANDAL_IMG.load_all')
@@ -536,11 +544,11 @@ class HANDAL_IMG(Image):
                             img,
                             obj_type=obj_type,
                             labels=[aff_type],
-                            aff_mask=aff_mask,
+                            aff_mask=[aff_mask],
                             obj_mask=obj_mask,
                             visible_mask=visib_mask,
                         )
-
+                        print(f'loading IMG: {img_path}')
                         yield obj
 
         return iterator()
@@ -551,9 +559,13 @@ class HANDAL_IMG(Image):
             dir_path = os.path.join(output_root, img.obj_type, 'Image')
             img.save_to(dir_path)
 
+class AGD20k_IMG(Image):...
+    # TODO: 热力图的标注转换
+
 class RAGNet(Image):...
 
 
+"""  ----------------------------------------------- utils function ----------------------------------------------  """
 
 def resolve_path(path_str: str):
     """兼容相对/绝对路径，返回绝对路径。"""
@@ -570,16 +582,12 @@ def load_info(output_dir=DEFAULT_OUTPUT_DIR, rewrite=False):
     info_root = output_dir
     info_file = os.path.join(info_root, 'info.json')
 
-    info_dict = {
-        'PointCloud': defaultdict(lambda: defaultdict(int)),  # 对应PointCloud.count
-        'Image': defaultdict(lambda: defaultdict(int)),
-        'Instrument': defaultdict(lambda: defaultdict(int)),
-    }
     if os.path.exists(info_file):
         with open(info_file, 'r') as f:
             loaded_dict = json.load(f)
             for k, v in info_dict.items():
-                info_dict[k] = defaultdict(lambda: defaultdict(int), loaded_dict.get(k, {}))
+                for obj_type, vals in  loaded_dict.get(k, {}).items():
+                    info_dict[k][obj_type] = defaultdict(int, vals)
 
             if not rewrite:
                 # 恢复 cls.count计数
@@ -615,11 +623,11 @@ if __name__ == "__main__":
     parser.add_argument("-i", "--input_dir", type=str, help="输入数据集位置", default=DEFAULT_INPUT_DIR)
     parser.add_argument('-o', "--output_dir", type=str, help="输出数据集的绝对位置", default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
-    parser.add_argument("-t", "--type_of_obj", type=str, help="物体类型", default=None)
+    parser.add_argument("-t", "--obj_type", type=str, help="物体类型", default=None)
     parser.add_argument("-m", "--modality", type=str, nargs="+", help="手动添加数据的模态，可选一个或多个",
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
     parser.add_argument("-d", "--dataset", type=str, help="按照预设定数据集整理",
-                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL'])
+                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K'])
     parser.add_argument('-s', '--show', type=str, nargs="+", help='直接渲染点云文件的路径，选择时只执行渲染操作', default=[])
     parser.add_argument('-r', '--rewrite', action='store_true', help='是否按id从1开始重写已有数据集')
 
@@ -628,6 +636,10 @@ if __name__ == "__main__":
     # 兼容相对/绝对路径并载入信息文件
     input_dir = resolve_path(args.input_dir)
     output_dir = resolve_path(args.output_dir)
+    if not os.path.isdir(input_dir):
+        raise ValueError(fr'{input_dir} is not a valid directory')
+    os.makedirs(output_dir, exist_ok=True)
+
     load_info(output_dir, args.rewrite)
 
     # 整理模态输入
@@ -671,7 +683,9 @@ if __name__ == "__main__":
                     Image.load_and_save(input_dir, output_dir)
                 case 'HANDAL':
                     assert args.obj_type is not None and args.aff_type is not None
-                    HANDAL_IMG.load_and_save(input_dir, output_dir, obj_type=args.type_of_obj, aff_type=args.aff_type)
+                    HANDAL_IMG.load_and_save(input_dir, output_dir, obj_type=args.obj_type, aff_type=args.aff_type)
+                case 'AGD20K' | 'AGD20k': ...
+
                 case e:
                     raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
