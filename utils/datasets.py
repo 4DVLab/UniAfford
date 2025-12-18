@@ -763,7 +763,10 @@ if __name__ == "__main__":
                 case 'AGPIL':
                     AGPIL_PC.load_and_save(input_dir, output_dir)
                 case 'PIADv2':
-                    PIADv2_PC.load_and_save(input_dir, output_dir)
+                    PIADv2_PC.load_all(input_dir)
+                    PointCloud.deduplicate()
+                    PointCloud.save_all(output_dir)
+
                 case 'PIAD':
                     ...
                 case 'RAGNet':
