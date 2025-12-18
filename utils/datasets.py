@@ -4,7 +4,7 @@ import numpy as np
 import open3d as o3d
 import cv2
 from collections import defaultdict
-
+import hashlib
 
 # 自定义参数
 DEFAULT_OUTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 输出的数据集位置
@@ -55,7 +55,10 @@ class PointCloud:
         self.mask = mask       # 对应点的aff的值
         self.labels = labels   # aff_mask对应列的标签
 
+        self.is_sorted = False
+        self.sort()            # 排序点云
 
+    """  ---------------------------------------- 读写相关 ---------------------------------------------  """
     def save_to(self, filepath):
         """统一保存为csv格式，第一行是标签，数据前三列是xyz，后面所有的列分别表示不同aff标注"""
         header = ['x', 'y', 'z']
@@ -100,7 +103,6 @@ class PointCloud:
                     id += 1 # 重新按顺序分配id
                     e.save_to(os.path.join(dir_path, f'{e.obj_type}_{id}.csv')) # 保存时命名为 {obj_type}_{id}.csv
 
-
     @classmethod
     def load_all(cls, dataset_root_path):
         def iterator():
@@ -124,6 +126,32 @@ class PointCloud:
                 os.makedirs(dir_path, exist_ok=True)
             pc.save_to(os.path.join(dir_path, f'{pc.obj_type}_{pc.id}.csv'))
             pc.free_memory()
+
+    """  ---------------------------------------- 工具 ---------------------------------------------  """
+    def __eq__(self, other):
+        if not isinstance(other, PointCloud):
+            raise TypeError(f"{type(other)}不是点云，不可比较")
+
+        if self.points.ndim != other.points.ndim or self.points.shape != other.points.shape:
+            return False
+
+        return self.hash == other.hash
+
+    def __del__(self):
+        # 更新count
+        PointCloud.count[self.obj_type]["ID"] -= 1
+        for l in self.labels:
+            PointCloud.count[self.obj_type][l] -= 1
+
+        self.free_memory()
+
+    def __hash__(self):
+        self.sort(force=False)
+
+        points = self.points.tobytes()
+        hash_obj = hashlib.sha256()
+        hash_obj.update(points)
+        return hash_obj
 
     def show(self, selected_labels:list=None):
         """
@@ -158,66 +186,15 @@ class PointCloud:
             pcd.points = o3d.utility.Vector3dVector(self.points)
             o3d.visualization.draw_geometries([pcd], window_name=f"Rendering label: {self.obj_type}-{self.id}")
 
-    @staticmethod
-    def _is_point_cloud_equal(
-            pc1: np.ndarray,
-            pc2: np.ndarray,
-            rtol: float = 1e-5,
-            atol: float = 1e-8,
-            check_order: bool = True
-    ) -> bool:
-        """
-        TODO: review 快速判断两个点云数组是否相等
+    def sort(self, force=True):
+        if self.is_sorted and not force: return False
+        else:
+            sort_idx = np.lexsort((self.points[:, 2], self.points[:, 1], self.points[:, 0]))
+            self.points = self.points[sort_idx]
+            self.mask = self.mask[sort_idx]
 
-        Args:
-            pc1: 点云数组1 (N×D)
-            pc2: 点云数组2 (M×D)
-            rtol: 相对误差阈值（浮点比较）
-            atol: 绝对误差阈值（浮点比较）
-            check_order: 是否要求点的顺序完全一致（False则忽略顺序，仅判断点集相等）
-
-        Returns:
-            布尔值，True表示相等，False表示不相等
-        """
-        # 1. 基础校验：是否为NumPy数组、是否非空
-        if not (isinstance(pc1, np.ndarray) and isinstance(pc2, np.ndarray)):
-            return False
-        if pc1.size == 0 and pc2.size == 0:
+            self.is_sorted = True
             return True
-        if pc1.size == 0 or pc2.size == 0:
-            return False
-
-        # 2. 形状校验（维度数、特征维度必须一致）
-        if pc1.ndim != pc2.ndim or pc1.shape[1:] != pc2.shape[1:]:
-            return False
-
-        # 3. 点数不同直接不相等
-        if pc1.shape[0] != pc2.shape[0]:
-            return False
-
-        # 4. 顺序一致的情况：直接逐元素浮点比较（最快）
-        if check_order:
-            # np.allclose 是浮点数组相等判断的最优选择（兼顾精度）
-            return np.allclose(pc1, pc2, rtol=rtol, atol=atol)
-
-        # 5. 忽略点顺序的情况：排序后比较（点集相等）
-        # 步骤：按行排序 → 逐行比较
-        # 注意：排序会增加少量开销，但比嵌套循环快几个数量级
-        pc1_sorted = np.sort(pc1, axis=0)
-        pc2_sorted = np.sort(pc2, axis=0)
-        return np.allclose(pc1_sorted, pc2_sorted, rtol=rtol, atol=atol)
-
-    def __eq__(self, other):
-        ...
-        # TODO：
-
-    def __del__(self):
-        # 更新count
-        PointCloud.count[self.obj_type]["ID"] -= 1
-        for l in self.labels:
-            PointCloud.count[self.obj_type][l] -= 1
-
-        self.free_memory()
 
     def free_memory(self):
         """释放自身占用的内存（不更改计数，用于不重复加载的情况）"""
@@ -230,9 +207,21 @@ class PointCloud:
         PointCloud.all[self.obj_type][self.id - 1] = None
 
     def _merge(self, other):
-        """合并两个点云标注并更新label、计数（默认点云形状相等）"""
-        ...
+        """合并两个点云标注并更新label、计数（默认点云hash相等）"""
+        for i, l in enumerate(other.labels):
+            if l not in self.labels:
+                self.labels.append(l)
+                self.mask = np.hstack((self.mask, other.mask[:, i]))
+        del other
+        return self
 
+    @classmethod
+    def deduplicate(cls):
+        """根据hash值去重合并数据"""
+        for obj_type, ls in cls.all.items():
+            loaded = dict()
+            for pc in ls:
+                loaded[pc.hash] = pc._merge(loaded[pc.hash])
 
 class AGPIL_PC(PointCloud):
     aff_type = [
