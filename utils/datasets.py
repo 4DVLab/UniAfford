@@ -347,7 +347,7 @@ class PIADv2_PC(PointCloud):
     def load_all(cls, dataset_root_path):
         """
         Args:
-            dataset_root_path: PIADv2数据集的位置，下层目录为 Seen\Unseen_aff\Unseen_obj(任一）
+            dataset_root_path: PIADv2数据集的位置，下层目录为 Seen,Unseen_aff,Unseen_obj(任一）
         """
         def iterator():
             for s in ['Seen', 'Unseen_aff', 'Unseen_obj']:
@@ -362,7 +362,10 @@ class PIADv2_PC(PointCloud):
                             for aff in os.listdir(os.path.join(obj_dir, sub_dataset)):
                                 file_dir = os.path.join(obj_dir, sub_dataset, aff)
                                 for file in os.listdir(file_dir):
-                                    yield cls.load_file(os.path.join(file_dir, file), obj_type=obj_type, aff_type=aff)
+                                    file_path = os.path.join(file_dir, file)
+                                    if os.path.isfile(file_path) and file.endswith('.npy'):
+                                        print(f'loading PC{file_path}')
+                                        yield cls.load_file(file_path, obj_type=obj_type, aff_type=aff)
                 break # PIADv2的Seen,Unseen_aff,Unseen_obj三个数据集只是同一个数据集的不同划分，任意处理一个就行
         return iterator()
 
