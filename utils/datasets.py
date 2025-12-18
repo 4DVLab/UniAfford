@@ -112,8 +112,7 @@ class PointCloud:
                     file_path = os.path.join(dir_path, file)
                     if os.path.isfile(file_path):
                         print(f'loading PC: {file_path}')
-                        pc = cls.load_file(file_path, obj_type=obj_type)
-                        yield pc
+                        yield cls.load_file(file_path, obj_type=obj_type)
 
         return iterator()
     
@@ -124,6 +123,7 @@ class PointCloud:
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path, exist_ok=True)
             pc.save_to(os.path.join(dir_path, f'{pc.obj_type}_{pc.id}.csv'))
+            pc.free_memory()
 
     def show(self, selected_labels:list=None):
         """
@@ -303,8 +303,7 @@ class AGPIL_PC(PointCloud):
                                 file_path = os.path.join(files_dir, file)
                                 if os.path.isfile(file_path) and not file.startswith('.'):  # 忽略 .开头的文件
                                     print(f'loading PC{file_path}')
-                                    pc = cls.load_file(file_path, obj_type=obj_type)
-                                    yield pc
+                                    yield cls.load_file(file_path, obj_type=obj_type)
         return iterator()
 
 class PIADv2_PC(PointCloud):
@@ -366,6 +365,7 @@ class PIADv2_PC(PointCloud):
                                     if os.path.isfile(file_path) and file.endswith('.npy'):
                                         print(f'loading PC{file_path}')
                                         yield cls.load_file(file_path, obj_type=obj_type, aff_type=aff)
+
                 break # PIADv2的Seen,Unseen_aff,Unseen_obj三个数据集只是同一个数据集的不同划分，任意处理一个就行
         return iterator()
 
@@ -562,6 +562,21 @@ class Image:
         for img in cls.load_all(input_root):
             dir_path = os.path.join(output_root, img.obj_type, 'Image')
             img.save_to(dir_path)
+            img.free_memory()
+
+    def __del__(self):
+        # 更新count
+        Image.count[self.obj_type]["ID"] -= 1
+        for l in self.labels:
+            Image.count[self.obj_type][l] -= 1
+
+        self.free_memory()
+
+    def free_memory(self):
+        self.mask = None
+        self.obj_mask = None
+        self.visible_mask = None
+        self.labels = None
 
 class BoxedImage(Image):
     def __init__(self, img, box:np.ndarray=None, labels=None):
