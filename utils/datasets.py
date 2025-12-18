@@ -738,11 +738,12 @@ if __name__ == "__main__":
         for f in args.show:
             file_path = resolve_path(f)
             match args.dataset:
-                case 'AGPIL':
-                    pc = AGPIL_PC.load_file(file_path)
-                case 'PIADv2': ...
                 case None:
                     pc = PointCloud.load_file(file_path)
+                case 'AGPIL':
+                    pc = AGPIL_PC.load_file(file_path)
+                case 'PIADv2':
+                    pc = PIADv2_PC.load_file(file_path)
                 case e:
                     raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
             pc.show()
@@ -755,7 +756,7 @@ if __name__ == "__main__":
                 case 'AGPIL':
                     AGPIL_PC.load_and_save(input_dir, output_dir)
                 case 'PIADv2':
-                    ...
+                    PIADv2_PC.load_and_save(input_dir, output_dir)
                 case 'PIAD':
                     ...
                 case 'RAGNet':
