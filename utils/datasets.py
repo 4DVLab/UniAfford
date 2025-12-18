@@ -59,6 +59,7 @@ class PointCloud:
 
         self.is_sorted = False
         self.sort()            # 排序点云
+        self.hash = hash(self) # 创建哈希
 
     """  ---------------------------------------- 读写相关 ---------------------------------------------  """
     def save_to(self, filepath):
@@ -148,12 +149,18 @@ class PointCloud:
         self.free_memory()
 
     def __hash__(self):
+        if self.hash: return self.hash
+
         self.sort(force=False)
 
         points = self.points.tobytes()
         hash_obj = hashlib.sha256()
         hash_obj.update(points)
-        return hash_obj
+        # 转换为整数
+        hash_hex = hash_obj.hexdigest()
+        hash_int = int(hash_hex, 16)
+        self.hash = hash_int
+        return hash_int
 
     def show(self, selected_labels:list=None):
         """
