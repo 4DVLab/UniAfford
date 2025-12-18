@@ -94,9 +94,13 @@ class PointCloud:
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path, exist_ok=True)
 
+            id = 0
             for e in v:
-                e.save_to(os.path.join(dir_path, f'{e.obj_type}_{e.count}.csv')) # 保存时命名为 {obj_type}_{id}.csv
-    
+                if e is not None:
+                    id += 1 # 重新按顺序分配id
+                    e.save_to(os.path.join(dir_path, f'{e.obj_type}_{id}.csv')) # 保存时命名为 {obj_type}_{id}.csv
+
+
     @classmethod
     def load_all(cls, dataset_root_path):
         def iterator():
@@ -154,13 +158,89 @@ class PointCloud:
             pcd.points = o3d.utility.Vector3dVector(self.points)
             o3d.visualization.draw_geometries([pcd], window_name=f"Rendering label: {self.obj_type}-{self.id}")
 
+    @staticmethod
+    def _is_point_cloud_equal(
+            pc1: np.ndarray,
+            pc2: np.ndarray,
+            rtol: float = 1e-5,
+            atol: float = 1e-8,
+            check_order: bool = True
+    ) -> bool:
+        """
+        TODO: review 快速判断两个点云数组是否相等
+
+        Args:
+            pc1: 点云数组1 (N×D)
+            pc2: 点云数组2 (M×D)
+            rtol: 相对误差阈值（浮点比较）
+            atol: 绝对误差阈值（浮点比较）
+            check_order: 是否要求点的顺序完全一致（False则忽略顺序，仅判断点集相等）
+
+        Returns:
+            布尔值，True表示相等，False表示不相等
+        """
+        # 1. 基础校验：是否为NumPy数组、是否非空
+        if not (isinstance(pc1, np.ndarray) and isinstance(pc2, np.ndarray)):
+            return False
+        if pc1.size == 0 and pc2.size == 0:
+            return True
+        if pc1.size == 0 or pc2.size == 0:
+            return False
+
+        # 2. 形状校验（维度数、特征维度必须一致）
+        if pc1.ndim != pc2.ndim or pc1.shape[1:] != pc2.shape[1:]:
+            return False
+
+        # 3. 点数不同直接不相等
+        if pc1.shape[0] != pc2.shape[0]:
+            return False
+
+        # 4. 顺序一致的情况：直接逐元素浮点比较（最快）
+        if check_order:
+            # np.allclose 是浮点数组相等判断的最优选择（兼顾精度）
+            return np.allclose(pc1, pc2, rtol=rtol, atol=atol)
+
+        # 5. 忽略点顺序的情况：排序后比较（点集相等）
+        # 步骤：按行排序 → 逐行比较
+        # 注意：排序会增加少量开销，但比嵌套循环快几个数量级
+        pc1_sorted = np.sort(pc1, axis=0)
+        pc2_sorted = np.sort(pc2, axis=0)
+        return np.allclose(pc1_sorted, pc2_sorted, rtol=rtol, atol=atol)
+
+    def __eq__(self, other):
+        ...
+        # TODO：
+
+    def __del__(self):
+        # 更新count
+        PointCloud.count[self.obj_type]["ID"] -= 1
+        for l in self.labels:
+            PointCloud.count[self.obj_type][l] -= 1
+
+        self.free_memory()
+
+    def free_memory(self):
+        """释放自身占用的内存（不更改计数，用于不重复加载的情况）"""
+        # 删除内部数组
+        self.points = None
+        self.mask = None
+        self.labels = None
+
+        # 删除self的记录
+        PointCloud.all[self.obj_type][self.id - 1] = None
+
+    def _merge(self, other):
+        """合并两个点云标注并更新label、计数（默认点云形状相等）"""
+        ...
+
+
 class AGPIL_PC(PointCloud):
     aff_type = [
         'grasp', 'contain', 'lift', 'open', 'lay',
         'sit', 'support', 'wrapgrasp', 'pour', 'move',
         'display', 'push', 'listen', 'wear', 'press',
         'cut', 'stab',     
-    ]
+    ] # 17
     all = {
         k: list() for k in [
             'Bag', 'Bed', 'Bottle', 'Bowl', 'Chair',
@@ -168,7 +248,7 @@ class AGPIL_PC(PointCloud):
             'Faucet', 'Hat', 'Keyboard', 'Knife', 'Laptop',
             'Microwave', 'Mug', 'Refrigerator', 'Scissors', 'StorageFurniture',
             'Table', 'TrashCan', 'Vase',
-        ]
+        ] # 23
     }
 
     count = defaultdict(lambda: defaultdict(int))
@@ -232,40 +312,34 @@ class PIADv2_PC(PointCloud):
         'grasp', 'contain', 'lift', 'open', 'lay',
         'sit', 'support', 'wrapgrasp', 'pour', 'move',
         'display', 'push', 'listen', 'wear', 'press',
-        'cut', 'stab',
-    ]
+        'cut', 'stab', 'carry', 'ride', 'clean',
+        'play', 'beat', 'speak', 'pull'
+    ]  # 24
     all = {
         k: list() for k in [
-            'Bag', 'Bed', 'Bottle', 'Bowl', 'Chair',
+            'Backpack', 'Bag', 'Baseballbat', 'Bed', 'Bicycle',
+            'Bottle', 'Bowl', 'Broom', 'Bucket', 'Chair',
             'Clock', 'Dishwasher', 'Display', 'Door', 'Earphone',
-            'Faucet', 'Hat', 'Keyboard', 'Knife', 'Laptop',
-            'Microwave', 'Mug', 'Refrigerator', 'Scissors', 'StorageFurniture',
-            'Table', 'TrashCan', 'Vase',
-        ]
+            'Faucet', 'Fork', 'Glasses', 'Guitar', 'Hammer',
+            'Hat', 'Kettle', 'Keyboard', 'Knife', 'Laptop',
+            'Microphone', 'Microwave', 'Mop', 'Motorcycle', 'Mug',
+            'Refrigerator', 'Scissors', 'Skateboard', 'Spoon', 'StorageFurniture',
+            'Suitcase', 'Surfboard', 'Table', 'Tennisracket', 'Toothbrush',
+            'TrashCan', 'Umbrella', 'Vase'
+        ] # 43
     }
 
     count = defaultdict(lambda: defaultdict(int))
 
     def __init__(self, points, obj_type, mask: np.ndarray = None, labels: list = None):
         super().__init__(points, obj_type, mask, labels)
-        AGPIL_PC.all[obj_type].append(self)
-        AGPIL_PC.count[obj_type]['ID'] += 1
+        PIADv2_PC.all[obj_type].append(self)
+        PIADv2_PC.count[obj_type]['ID'] += 1
 
     @staticmethod
-    def load_file(filepath, obj_type=None) -> 'PointCloud':
-        """
-        TODO
-        """
-
-        data = []
-        with open(filepath, 'r') as f:
-            for line in f:
-                parts = line.strip().split()
-                data.append(list(map(float, parts[2:])))
-
-        data = np.asarray(data, dtype=float)
-        pc_obj = PIADv2_PC(points=data[:, :3], obj_type=obj_type)
-
+    def load_file(filepath, obj_type=None, aff_type=None) -> 'PointCloud':
+        data = np.load(filepath)
+        pc_obj = PIADv2_PC(points=data[:, :3], obj_type=obj_type, mask=data[:, 3:],labels=[aff_type])
 
         return pc_obj
 
@@ -273,11 +347,23 @@ class PIADv2_PC(PointCloud):
     def load_all(cls, dataset_root_path):
         """
         Args:
-            dataset_root_path:
+            dataset_root_path: PIADv2数据集的位置，下层目录为 Seen\Unseen_aff\Unseen_obj(任一）
         """
         def iterator():
-            ...
+            for s in ['Seen', 'Unseen_aff', 'Unseen_obj']:
+                if not os.path.isdir(os.path.join(dataset_root_path, s)): continue
+                for t in ['test', 'train', 'val']:
+                    dirpath = os.path.join(dataset_root_path, s, 'Point', t)
+                    if not os.path.isdir(dirpath): continue
 
+                    for obj_type in os.listdir(dirpath):
+                        obj_dir = os.path.join(dirpath, obj_type)
+                        for sub_dataset in os.listdir(obj_dir):
+                            for aff in os.listdir(os.path.join(obj_dir, sub_dataset)):
+                                file_dir = os.path.join(obj_dir, sub_dataset, aff)
+                                for file in os.listdir(file_dir):
+                                    yield cls.load_file(os.path.join(file_dir, file), obj_type=obj_type, aff_type=aff)
+                break # PIADv2的Seen,Unseen_aff,Unseen_obj三个数据集只是同一个数据集的不同划分，任意处理一个就行
         return iterator()
 
 
@@ -565,7 +651,7 @@ class AGD20k_IMG(Image):...
 class RAGNet(Image):...
 
 
-"""  ----------------------------------------------- utils function ----------------------------------------------  """
+"""  ----------------------------------------------- utils functions ----------------------------------------------  """
 
 def resolve_path(path_str: str):
     """兼容相对/绝对路径，返回绝对路径。"""
