@@ -8,17 +8,10 @@ import cv2
 from collections import defaultdict
 
 
-# 自定义参数
+# 全局参数
 DEFAULT_OUTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 输出的数据集位置（用于数据转换，训练推理时可忽略）
-DEFAULT_INPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 加载的数据集位置（一般用于训练）
+DEFAULT_INPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 加载的数据集位置（训练的输入数据位置，或转换数据集的输入位置）
 
-# 全局信息文件路径与缓存，模块导入时即初始化
-info_file = os.path.join(DEFAULT_INPUT_DIR, 'info.json')
-info_dict = {
-    'PointCloud': defaultdict(lambda: defaultdict(int)),  # 对应PointCloud.count
-    'Image': defaultdict(lambda: defaultdict(int)),
-    'Instrument': defaultdict(lambda: defaultdict(int)),
-}
 
 """  ----------------------------------------------- utils functions ----------------------------------------------  """
 
@@ -26,49 +19,6 @@ def resolve_path(path_str: str):
     """兼容相对/绝对路径，返回绝对路径。"""
     if path_str is None: return None
     return path_str if os.path.isabs(path_str) else os.path.abspath(os.path.join(os.getcwd(), path_str))
-
-
-def load_info(info_file=info_file, continue_numbering=True):
-    """
-    载入 info.json，并按需恢复各类 id 计数器，不改变info.json输出位置
-    在模块导入时即可调用，方便包内函数直接使用全局缓存。
-    """
-    global info_dict
-
-    if os.path.exists(info_file):
-        with open(info_file, 'r') as f:
-            loaded_dict = json.load(f)
-            for k, v in info_dict.items():
-                for obj_type, vals in loaded_dict.get(k, {}).items():
-                    info_dict[k][obj_type] = defaultdict(int, vals)
-
-            if continue_numbering:
-                # 恢复 cls.count计数
-                PointCloud.count = info_dict['PointCloud']
-                Image.count = info_dict['Image']
-    else:
-        warnings.warn(f"没有找到info.json: {info_file}, 初始化info_dict")
-
-
-def save_info(output_dir=DEFAULT_OUTPUT_DIR):
-    global info_file, info_dict
-    info_file = os.path.join(output_dir, 'info.json')
-
-    # 更新 PointCloud.count（保留最大的计数）
-    for obj, v in PointCloud.count.items():
-        for aff, count in v.items():
-            current_max = info_dict['PointCloud'][obj][aff]
-            info_dict['PointCloud'][obj][aff] = max(count, current_max)
-
-    # 更新 Image.id（保留最大的计数）
-    for obj, v in Image.count.items():
-        for aff, count in v.items():
-            current_max = info_dict['Image'][obj][aff]
-            info_dict['Image'][obj][aff] = max(count, current_max)
-
-    # 保存信息文件
-    with open(info_file, 'w') as f:
-        json.dump(info_dict, f, ensure_ascii=False, indent=2)
 
 
 """  ----------------------------------------------- PointCloud classes ----------------------------------------------  """
@@ -273,7 +223,7 @@ class PointCloud:
         for obj_type, ls in cls.all.items():
             loaded = dict()
             for pc in ls:
-                loaded[pc.hash] = pc._merge(loaded[pc.hash])
+                loaded[pc] = pc._merge(loaded[pc])
 
 class AGPIL_PC(PointCloud):
     aff_type = [
@@ -709,16 +659,15 @@ class AGD20k_IMG(Image):...
 
 class RAGNet(Image):...
 
-
-
+"""  -------------------------------------------- 单独运行时作为数据处理工具 -----------------------------------------------  """
 if __name__ == "__main__":
-    # 单独运行时作为数据处理工具
     import argparse
 
     parser = argparse.ArgumentParser(description="根据不同的数据集选择不同的处理方式，整合为同一个数据集")
     parser.add_argument("-i", "--input_dir", type=str, help="输入数据集位置", default=DEFAULT_INPUT_DIR)
     parser.add_argument('-o', "--output_dir", type=str, help="输出数据集的绝对位置", default=DEFAULT_OUTPUT_DIR)
-    parser.add_argument('-info', '--info_file', default=DEFAULT_INPUT_DIR, help='单独给出info.json的文件位置，默认为数据集输入位置')
+    parser.add_argument('-info', '--info_file', default=None, help='指定info.json的文件位置并继承编号ID，否则初始化ID')
+
     parser.add_argument("-m", "--modality", type=str, nargs="+", help="手动添加数据的模态，可选一个或多个",
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
     parser.add_argument("-d", "--dataset", type=str, help="按照预设定数据集整理",
@@ -726,21 +675,44 @@ if __name__ == "__main__":
     parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
     parser.add_argument("-t", "--obj_type", type=str, help="物体类型", default=None)
     parser.add_argument('-s', '--show', type=str, nargs="+", help='直接渲染点云文件的路径，选择时只执行渲染操作', default=[])
-    parser.add_argument('-c', '--continue_numbering', action='store_true', default=True, help='是否继续原有info.json的id编号，默认是')
 
     args = parser.parse_args()
 
-    # 兼容相对/绝对路径并载入信息文件
+
+    # 兼容相对/绝对路径
     input_dir = resolve_path(args.input_dir)
     output_dir = resolve_path(args.output_dir)
-    info_file = resolve_path(args.info_file)
 
     if not os.path.isdir(input_dir):
         raise ValueError(fr'{input_dir} is not a valid directory')
     os.makedirs(output_dir, exist_ok=True)
 
-    # 如果要增加某个数据集同时继续编号，则将已有的info.json复制到input_dir位置就行，懒得再加一个参数了
-    load_info(info_file, args.continue_numbering)
+
+    # 数据集的统计信息，只在构建数据集的时候使用
+    info_file = os.path.join(DEFAULT_INPUT_DIR, 'info.json')
+    info_dict = {
+        'PointCloud': defaultdict(lambda: defaultdict(int)),  # 对应PointCloud.count
+        'Image': defaultdict(lambda: defaultdict(int)),
+        'Instrument': defaultdict(lambda: defaultdict(int)),
+    }
+
+    # 如果要增加某个数据集同时继续编号，则需要指定--info_file加载输出数据集位置下的info.json
+    if args.info_file is not None:
+        info_file = resolve_path(args.info_file)
+
+        if os.path.exists(info_file):
+            with open(info_file, 'r') as f:
+                loaded_dict = json.load(f)
+                for k, v in info_dict.items():
+                    for obj_type, vals in loaded_dict.get(k, {}).items():
+                        info_dict[k][obj_type] = defaultdict(int, vals)
+
+                # 恢复 cls.count计数
+                PointCloud.count = info_dict['PointCloud']
+                Image.count = info_dict['Image']
+        else:
+            warnings.warn(f"没有找到info.json: {info_file}, 使用初始info_dict")
+
 
     # 整理模态输入
     selected_modalities = set(args.modality)
@@ -770,7 +742,7 @@ if __name__ == "__main__":
                 case 'AGPIL':
                     AGPIL_PC.load_and_save(input_dir, output_dir)
                 case 'PIADv2':
-                    PIADv2_PC.load_all(input_dir)
+                    tmp = list(PIADv2_PC.load_all(input_dir))
                     PointCloud.deduplicate()
                     PointCloud.save_all(output_dir)
 
@@ -796,8 +768,26 @@ if __name__ == "__main__":
         if 'ins' in selected_modalities:
             pass
 
+
+    """  ----------------------------------- 保存信息文件 -------------------------------------  """
+    info_file = os.path.join(output_dir, 'info.json')
+
+    # 更新 PointCloud.count（保留最大的计数）
+    for obj, v in PointCloud.count.items():
+        for aff, count in v.items():
+            current_max = info_dict['PointCloud'][obj][aff]
+            info_dict['PointCloud'][obj][aff] = max(count, current_max)
+
+    # 更新 Image.id（保留最大的计数）
+    for obj, v in Image.count.items():
+        for aff, count in v.items():
+            current_max = info_dict['Image'][obj][aff]
+            info_dict['Image'][obj][aff] = max(count, current_max)
+
     # 保存信息文件
-    save_info()
+    with open(info_file, 'w') as f:
+        json.dump(info_dict, f, ensure_ascii=False, indent=2)
+
 
 
 
