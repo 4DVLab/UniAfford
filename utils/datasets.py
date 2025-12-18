@@ -59,7 +59,7 @@ class PointCloud:
 
         self.is_sorted = False
         self.sort()            # 排序点云
-        self.hash = hash(self) # 创建哈希
+        self.hash = None
 
     """  ---------------------------------------- 读写相关 ---------------------------------------------  """
     def save_to(self, filepath):
@@ -149,7 +149,7 @@ class PointCloud:
         self.free_memory()
 
     def __hash__(self):
-        if self.hash: return self.hash
+        if self.hash is not None: return self.hash
 
         self.sort(force=False)
 
