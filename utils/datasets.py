@@ -219,7 +219,7 @@ class PointCloud:
         for i, l in enumerate(other.labels):
             if l not in self.labels:
                 self.labels.append(l)
-                self.mask = np.hstack((self.mask, other.mask[:, i]))
+                self.mask = np.hstack((self.mask, other.mask[:, [i]]))
         del other
         return self
 
