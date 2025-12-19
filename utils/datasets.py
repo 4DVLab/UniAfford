@@ -60,6 +60,7 @@ class PointCloud:
         self.is_sorted = False
         self.sort()            # 排序点云
         self.hash = None
+        hash(self)
 
     """  ---------------------------------------- 读写相关 ---------------------------------------------  """
     def save_to(self, filepath):
@@ -230,7 +231,7 @@ class PointCloud:
         for obj_type, ls in cls.all.items():
             loaded = dict()
             for pc in ls:
-                loaded[pc] = pc._merge(loaded[pc])
+                loaded[pc.hash] = pc._merge(loaded[pc.hash])
 
 class AGPIL_PC(PointCloud):
     aff_type = [
