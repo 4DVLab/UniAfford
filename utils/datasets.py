@@ -1,7 +1,6 @@
 import os
 import json
 import warnings
-import hashlib
 import numpy as np
 import open3d as o3d
 import cv2
@@ -59,7 +58,7 @@ class PointCloud:
 
         self.is_sorted = False
         self.sort()            # 排序点云
-        self.hash = None
+        self._hash = None
         hash(self)
 
     """  ---------------------------------------- 读写相关 ---------------------------------------------  """
@@ -139,7 +138,7 @@ class PointCloud:
         if self.points.ndim != other.points.ndim or self.points.shape != other.points.shape:
             return False
 
-        return self.hash == other.hash
+        return hash(self) == hash(other)
 
     def __del__(self):
         # 更新count
@@ -150,18 +149,17 @@ class PointCloud:
         self.free_memory()
 
     def __hash__(self):
-        if self.hash is not None: return self.hash
+        if self._hash is None:
+            self.sort(force=False)
+            data = (
+                self.points.shape,
+                self.points.dtype.str,  # e.g., '<f8', '|i4'
+                self.points.tobytes()
+            )
+            self._hash = hash(data)
 
-        self.sort(force=False)
+        return self._hash
 
-        points = self.points.tobytes()
-        hash_obj = hashlib.sha256()
-        hash_obj.update(points)
-        # 转换为整数
-        hash_hex = hash_obj.hexdigest()
-        hash_int = int(hash_hex, 16)
-        self.hash = hash_int
-        return hash_int
 
     def show(self, selected_labels:list=None):
         """
@@ -231,7 +229,7 @@ class PointCloud:
         for obj_type, ls in cls.all.items():
             loaded = dict()
             for pc in ls:
-                loaded[pc.hash] = pc._merge(loaded[pc.hash])
+                loaded[pc] = pc._merge(loaded[pc])
 
 class AGPIL_PC(PointCloud):
     aff_type = [
