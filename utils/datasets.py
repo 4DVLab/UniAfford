@@ -40,14 +40,14 @@ class PointCloud:
         ...
     }
     """
-    
-    def __init__(self, points, obj_type, mask:np.ndarray=None, labels:list=None):
+
+    def __init__(self, points, obj_type, mask:np.ndarray=None, labels:list=None, given_id:int=None):
         self.points = points
         self.obj_type = obj_type
         
         PointCloud.all[obj_type].append(self)
         PointCloud.count[obj_type]['ID'] += 1
-        self.id = PointCloud.count[obj_type]['ID']
+        self.id = PointCloud.count[obj_type]['ID'] if given_id is None else given_id
 
         if labels is not None:
             for l in labels:
@@ -77,8 +77,11 @@ class PointCloud:
             np.savetxt(f, data, delimiter=',', header=','.join(header))
     
     @staticmethod
-    def load_file(filepath, obj_type=None) -> 'PointCloud':
-        """加载时重新分配id"""
+    def load_file(filepath, obj_type=None, keep_id=False) -> 'PointCloud':
+        """
+        Args:
+            keep_id: 是否保持文件的id，默认False加载时重新分配id
+        """
         obj_type = os.path.basename(os.path.dirname(filepath)) if obj_type is None else obj_type
 
         with open(filepath, 'r') as f:
@@ -91,6 +94,9 @@ class PointCloud:
         else:
             pc_obj = PointCloud(points = data[:, :3], obj_type=obj_type)
 
+        if keep_id:
+            file_name = os.path.basename(filepath).strip('.csv')
+            pc_obj.id = int(file_name.split('_')[1])
         return pc_obj
 
     @classmethod
@@ -366,6 +372,51 @@ class PIADv2_PC(PointCloud):
                 break # PIADv2的Seen,Unseen_aff,Unseen_obj三个数据集只是同一个数据集的不同划分，任意处理一个就行
         return iterator()
 
+class LASO_PC(PointCloud):
+    aff_type = [
+        'lay', 'sit', 'support', 'grasp', 'lift',
+        'contain', 'open', 'wrap_grasp', 'pour', 'move',
+        'display', 'push', 'pull', 'listen', 'wear',
+        'press', 'cut', 'stab'
+    ]  # 18
+    all = {
+        k: list() for k in [
+            "Bag", "Bed", "Bowl", "Clock", "Dishwasher",
+            "Display", "Door", "Earphone", "Faucet", "Hat",
+            "StorageFurniture", "Keyboard", "Knife", "Laptop", "Microwave",
+            "Mug", "Refrigerator", "Chair", "Scissors", "Table",
+            "TrashCan", "Vase", "Bottle"
+        ]# 23
+    }
+
+    count = defaultdict(lambda: defaultdict(int))
+
+    def __init__(self, points, obj_type, mask: np.ndarray = None, labels: list = None):
+        super().__init__(points, obj_type, mask, labels)
+        LASO_PC.all[obj_type].append(self)
+        LASO_PC.count[obj_type]['ID'] += 1
+
+    def load_file(self, obj_type=None, aff_type=None):
+        raise NotImplementedError('懒得写，直接使用 LASO_PC.load_all')
+
+    @classmethod
+    def load_all(cls, dataset_root_path):
+        import pickle # load only needed
+        def iterator():
+            for t in ['test', 'train', 'val']:
+                with open(os.path.join(dataset_root_path, f'objects_{t}.pkl'), 'rb') as f:
+                    obj_points = pickle.load(f)
+                with open(os.path.join(dataset_root_path, f'anno_{t}.pkl'), 'rb') as f:
+                    obj_aff = pickle.load(f)
+
+                for i, e in enumerate(zip(obj_points, obj_aff)):
+                    print(f'loading PC: {file_path}')
+                    yield cls(points=obj_points[i], obj_type=e[1]['class'], mask=e[1]['mask'], labels=[e[1]['affordance'],])
+
+        return iterator()
+
+
+
 
 """  ----------------------------------------------- Image classes ----------------------------------------------  """
 
@@ -378,7 +429,8 @@ class Image:
             labels:list=None,
             aff_mask:list[np.ndarray]=None,
             obj_mask:np.ndarray=None,
-            visible_mask:np.ndarray=None
+            visible_mask:np.ndarray=None,
+            given_id:int=None,
         ):
         """ 
         Args:
@@ -396,7 +448,7 @@ class Image:
         self.obj_type = obj_type
 
         Image.count[self.obj_type]['ID'] += 1
-        self.id = Image.count[self.obj_type]['ID']
+        self.id = Image.count[self.obj_type]['ID'] if given_id is None else given_id
 
         self.mask = aff_mask if aff_mask is not None else []
         self.obj_mask = obj_mask
@@ -592,7 +644,7 @@ class HeatImage(Image):
 class HANDAL_IMG(Image):
     @classmethod
     def load_file(cls, filepath, obj_type=None):
-        raise SyntaxError('懒得写，直接使用 HANDAL_IMG.load_all')
+        raise NotImplementedError('懒得写，直接使用 HANDAL_IMG.load_all')
 
     @classmethod
     def load_all(cls, dir_path, obj_type, aff_type='grasp'):
@@ -660,7 +712,7 @@ class HANDAL_IMG(Image):
             dir_path = os.path.join(output_root, img.obj_type, 'Image')
             img.save_to(dir_path)
 
-class AGD20k_IMG(Image):...
+class AGD20k_IMG(HeatImage):...
     # TODO: 热力图的标注转换
 
 class RAGNet(Image):...
@@ -751,9 +803,10 @@ if __name__ == "__main__":
                     tmp = list(PIADv2_PC.load_all(input_dir))
                     PointCloud.deduplicate()
                     PointCloud.save_all(output_dir)
-
                 case 'PIAD':
                     ...
+                case 'LASO':
+                    LASO_PC.load_and_save(input_dir, output_dir)
                 case 'RAGNet':
                     ...
                 case e:
