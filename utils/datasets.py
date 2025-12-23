@@ -319,7 +319,7 @@ class AGPIL_PC(PointCloud):
         return pc_obj
 
     @classmethod
-    def load_all(cls, dataset_root_path, keep_id=False):
+    def load_all(cls, dataset_root_path, **kwargs):
         def iterator():
             for obj_type in list(cls.all):
                 for view in os.listdir(dataset_root_path):
@@ -373,7 +373,7 @@ class PIADv2_PC(PointCloud):
         return pc_obj
 
     @classmethod
-    def load_all(cls, dataset_root_path, keep_id=False):
+    def load_all(cls, dataset_root_path, **kwargs):
         """
         Args:
             dataset_root_path: PIADv2数据集的位置，下层目录为 Seen,Unseen_aff,Unseen_obj(任一）
@@ -428,7 +428,7 @@ class LASO_PC(PointCloud):
         raise NotImplementedError('懒得写，直接使用 LASO_PC.load_all')
 
     @classmethod
-    def load_all(cls, dataset_root_path):
+    def load_all(cls, dataset_root_path, **kwargs):
         raise NotImplementedError('暂未实现')
         import pickle # load only needed
         def iterator():
@@ -772,7 +772,7 @@ class Image:
         return img_obj
 
     @classmethod
-    def load_all(cls, dataset_root_path, keep_id: bool=False):
+    def load_all(cls, dataset_root_path, keep_id=False):
         """
         从保存的数据集目录结构中加载所有图片
         
@@ -887,7 +887,7 @@ class HANDAL_IMG(Image):
         raise NotImplementedError('懒得写，直接使用 HANDAL_IMG.load_all')
 
     @classmethod
-    def load_all(cls, dir_path, obj_type, aff_type='grasp'):
+    def load_all(cls, dir_path, obj_type, aff_type='grasp', **kwargs):
         """
         Args:
             dir_path: 指HANDAL数据集中一个压缩包解压后的位置
@@ -947,8 +947,8 @@ class HANDAL_IMG(Image):
         return iterator()
 
     @classmethod
-    def load_and_save(cls, input_root, output_root, obj_type, aff_type='grasp'):
-        for img in cls.load_all(input_root, obj_type=obj_type, aff_type=aff_type):
+    def load_and_save(cls, input_root, output_root, obj_type, aff_type='grasp', **kwargs):
+        for img in cls.load_all(input_root, obj_type=obj_type, aff_type=aff_type, **kwargs):
             dir_path = os.path.join(output_root, img.obj_type, 'Image')
             img.save_to(dir_path)
 
@@ -972,12 +972,12 @@ class RAGNet(Image):
         # 'rlbench_train.pkl',
     ]
     @classmethod
-    def load_all(cls, dataset_root_path):
+    def load_all(cls, dataset_root_path, **kwargs):
         """
         同时加载图片和文本数据集（绑定id）
         """
-
         import pickle
+
         def iterator():
             for sub_dataset in RAGNet.sub_dataset:
                 with open(os.path.join(dataset_root_path, sub_dataset), 'rb') as f:
@@ -985,8 +985,11 @@ class RAGNet(Image):
                 for obj in pickled_data:
                     obj['frame_path'] = os.path.join(dataset_root_path, obj['frame_path'][7:])
                     obj['mask_path'] = os.path.join(dataset_root_path, obj['mask_path'][7:])
+                    img = cv2.imread(obj['frame_path'])
+                    if img is None: continue
+                    print(f'loading IMG: {obj['frame_path']}')
                     img_obj = RAGNet(
-                        img=cv2.imread(obj['frame_path']),
+                        img=img,
                         labels=['None'],  # BUG: 数据集里没有明确指定aff类型，无法分类保存
                         obj_mask=None,
                         aff_mask=[cv2.imread(obj['mask_path'], cv2.IMREAD_GRAYSCALE)],
@@ -1002,7 +1005,6 @@ class RAGNet(Image):
 
                     yield img_obj
         return iterator()
-
 
 
 
