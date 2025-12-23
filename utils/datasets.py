@@ -824,6 +824,7 @@ class Image:
         self.free_memory()
 
     def free_memory(self):
+        self.img=None
         self.mask = None
         self.obj_mask = None
         self.visible_mask = None
@@ -985,12 +986,14 @@ class RAGNet(Image):
                 for obj in pickled_data:
                     obj['frame_path'] = os.path.join(dataset_root_path, obj['frame_path'][7:])
                     obj['mask_path'] = os.path.join(dataset_root_path, obj['mask_path'][7:])
+
                     img = cv2.imread(obj['frame_path'])
                     if img is None: continue
                     print(f'loading IMG: {obj['frame_path']}')
+
                     img_obj = RAGNet(
                         img=img,
-                        labels=['None'],  # BUG: 数据集里没有明确指定aff类型，无法分类保存
+                        labels=['None'],  # HACK: 数据集里没有明确指定aff类型，无法分类保存
                         obj_mask=None,
                         aff_mask=[cv2.imread(obj['mask_path'], cv2.IMREAD_GRAYSCALE)],
                         obj_type = obj['task_object_class'].capitalize()
@@ -999,7 +1002,7 @@ class RAGNet(Image):
                     Instruction(
                         obj['answer'],
                         obj_type=obj_type,
-                        aff_type=None,  # HACK: 数据集里没有明确指定aff类型，需要再做处理
+                        aff_type='None',  # HACK: 数据集里没有明确指定aff类型，需要再做处理
                         given_id=img_obj.id
                     )
 
@@ -1076,17 +1079,25 @@ class Instruction:
             if obj_type is not None and o not in obj_type: continue
 
             file_path = os.path.join(dataset_root_dir, o, 'Instruction.csv')
-            with open(file_path, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+
+            file_exists = os.path.exists(file_path)
+
+            # 打开文件：存在则追加，不存在则新建
+            with open(file_path, 'a' if file_exists else 'w', newline='', encoding='utf-8') as f:
+                writer = csv.writer(f)
+
+                # 续写时跳过表头
+                if not file_exists:
+                    writer.writerow(fieldnames)
 
                 for inst in Instruction.all[o]:
-                    writer.writerow({
-                        'ins': inst.ins,
-                        'obj_type': inst.obj_type,
-                        'aff_type': inst.aff_type,
-                        'id': inst.id,
-                    })
+                    writer.writerow([
+                        inst.ins,
+                        inst.obj_type,
+                        inst.aff_type,
+                        inst.id,
+                    ])
 
 
 
