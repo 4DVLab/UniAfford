@@ -1,9 +1,15 @@
+"""
+注意所有的'Note'注释
+"""
+
+
 import os
 import json
 import warnings
 import numpy as np
 import open3d as o3d
 import cv2
+import csv
 from collections import defaultdict
 
 
@@ -77,7 +83,7 @@ class PointCloud:
             np.savetxt(f, data, delimiter=',', header=','.join(header))
     
     @staticmethod
-    def load_file(filepath, obj_type=None, keep_id=False) -> 'PointCloud':
+    def load_file(filepath, obj_type=None, keep_id: bool=False) -> 'PointCloud':
         """
         Args:
             keep_id: 是否保持文件的id，默认False加载时重新分配id
@@ -89,14 +95,23 @@ class PointCloud:
             header = first_line.split(',') if first_line else []
             data = np.loadtxt(f, delimiter=',', skiprows=1)
 
-        if len(header) > 3:
-            pc_obj = PointCloud(points = data[:, :3], mask=data[:, 3:], obj_type=obj_type, labels=header[3:])
-        else:
-            pc_obj = PointCloud(points = data[:, :3], obj_type=obj_type)
-
         if keep_id:
             file_name = os.path.basename(filepath).strip('.csv')
-            pc_obj.id = int(file_name.split('_')[1])
+            given_id = int(file_name.split('_')[1])
+        else:
+            given_id = None
+
+        if len(header) > 3:
+            pc_obj = PointCloud(points=data[:, :3],
+                                mask=data[:, 3:],
+                                obj_type=obj_type,
+                                labels=header[3:],
+                                given_id=given_id)
+        else:
+            pc_obj = PointCloud(points=data[:, :3],
+                                obj_type=obj_type,
+                                given_id=given_id)
+
         return pc_obj
 
     @classmethod
@@ -113,7 +128,14 @@ class PointCloud:
                     e.save_to(os.path.join(dir_path, f'{e.obj_type}_{id}.csv')) # 保存时命名为 {obj_type}_{id}.csv
 
     @classmethod
-    def load_all(cls, dataset_root_path):
+    def load_all(cls, dataset_root_path, keep_id: bool=False):
+        """
+        从统一格式的数据集中批量加载 PointCloud
+
+        Args:
+            dataset_root_path: 根目录，结构为 {obj_type}/PointCloud/{obj_type}_{id}.csv
+            keep_id: 是否保持文件名中的 id，而不是重新分配
+        """
         def iterator():
             for obj_type in os.listdir(dataset_root_path):
                 dir_path = os.path.join(dataset_root_path, obj_type, 'PointCloud')
@@ -123,7 +145,7 @@ class PointCloud:
                     file_path = os.path.join(dir_path, file)
                     if os.path.isfile(file_path):
                         print(f'loading PC: {file_path}')
-                        yield cls.load_file(file_path, obj_type=obj_type)
+                        yield cls.load_file(file_path, obj_type=obj_type, keep_id=keep_id)
 
         return iterator()
     
@@ -179,8 +201,8 @@ class PointCloud:
 
                 mask_col = self.mask[:, idx]
                 
-                # 初始化颜色数组：背景色为深灰色（强烈对比）
-                colors = np.full((self.points.shape[0], 3), [0.1, 0.1, 0.1])  # 深灰色背景
+                # 白色背景
+                colors = np.full((self.points.shape[0], 3), [0.8, 0.8, 0.8])
                 
                 # 有mask值的点：红色渐变，mask值越大颜色越浓（越亮）
                 mask_mask = mask_col > 0  # 找到所有非零mask的点
@@ -209,6 +231,11 @@ class PointCloud:
 
             self.is_sorted = True
             return True
+
+    @classmethod
+    def sort_by_id(cls):
+        for obj_type in cls.all.keys():
+            cls.all[obj_type].sort(key=lambda x: x.id)
 
     def free_memory(self):
         """释放自身占用的内存（不更改计数，用于不重复加载的情况）"""
@@ -372,6 +399,7 @@ class PIADv2_PC(PointCloud):
                 break # PIADv2的Seen,Unseen_aff,Unseen_obj三个数据集只是同一个数据集的不同划分，任意处理一个就行
         return iterator()
 
+# discard
 class LASO_PC(PointCloud):
     aff_type = [
         'lay', 'sit', 'support', 'grasp', 'lift',
@@ -401,6 +429,7 @@ class LASO_PC(PointCloud):
 
     @classmethod
     def load_all(cls, dataset_root_path):
+        raise NotImplementedError('暂未实现')
         import pickle # load only needed
         def iterator():
             for t in ['test', 'train', 'val']:
@@ -415,7 +444,7 @@ class LASO_PC(PointCloud):
 
         return iterator()
 
-
+class AffNet_PC(PointCloud):...
 
 
 """  ----------------------------------------------- Image classes ----------------------------------------------  """
@@ -454,6 +483,11 @@ class Image:
         self.obj_mask = obj_mask
         self.visible_mask = visible_mask
 
+    @classmethod
+    def sort_by_id(cls):
+        for obj_type in cls.all.keys():
+            cls.all[obj_type].sort(key=lambda x: x.id)
+
     def save_to(self, dir_path):
         # dir_path 应该是目录，生成2~4个文件：原图 和 aff_mask，并在obj_mask目录下并排保存图片的物体mask和可见部分mask（如有）
         if not os.path.exists(dir_path):
@@ -490,8 +524,170 @@ class Image:
             vis_mask_path = os.path.join(obj_mask_dir, f'{self.obj_type}_{self.id}_visible_mask.png')
             cv2.imwrite(vis_mask_path, self.visible_mask)
 
+    def show(self, selected_labels:list=None, overlay=True, wait_key=True):
+        """
+        使用OpenCV显示图片和mask信息
+        
+        Args:
+            selected_labels: 只显示指定的标签，如果为None则显示所有标签
+            overlay: 是否在原图上叠加显示mask（彩色叠加），否则单独显示mask
+            wait_key: 是否等待按键（True则按任意键关闭，False则显示1秒后自动关闭）
+        """
+        # 确保图片是uint8格式
+        img_display = self.img.copy()
+        if img_display.dtype != np.uint8:
+            img_display = np.clip(img_display, 0, 255).astype(np.uint8)
+        
+        # 显示原图
+        cv2.imshow(f'Original - {self.obj_type}_{self.id}', img_display)
+        
+        # 显示affordance masks
+        if len(self.mask) > 0:
+            for idx, mask in enumerate(self.mask):
+                label = self.labels[idx] if idx < len(self.labels) else f'mask_{idx}'
+                
+                # 如果指定了selected_labels，跳过不在列表中的
+                if selected_labels is not None and label not in selected_labels:
+                    continue
+                
+                # 确保mask是uint8格式
+                mask_display = mask.copy()
+                if mask_display.dtype != np.uint8:
+                    mask_display = (mask_display * 255).clip(0, 255).astype(np.uint8)
+                
+                if overlay:
+                    # 在原图上叠加显示mask（使用红色半透明叠加）
+                    mask_colored = cv2.applyColorMap(mask_display, cv2.COLORMAP_JET)
+                    overlay_img = cv2.addWeighted(img_display, 0.7, mask_colored, 0.3, 0)
+                    cv2.imshow(f'Overlay - {self.obj_type}_{self.id}_{label}', overlay_img)
+                else:
+                    # 单独显示mask
+                    cv2.imshow(f'Mask - {self.obj_type}_{self.id}_{label}', mask_display)
+        
+        # 显示obj_mask
+        if self.obj_mask is not None and self.obj_mask.size != 0:
+            obj_mask_display = self.obj_mask.copy()
+            if obj_mask_display.dtype != np.uint8:
+                obj_mask_display = (obj_mask_display * 255).clip(0, 255).astype(np.uint8)
+            
+            if overlay:
+                # 在原图上叠加显示（使用绿色）
+                mask_colored = np.zeros_like(img_display)
+                mask_colored[:, :, 1] = obj_mask_display  # 绿色通道
+                overlay_img = cv2.addWeighted(img_display, 0.7, mask_colored, 0.3, 0)
+                cv2.imshow(f'Overlay - {self.obj_type}_{self.id}_obj_mask', overlay_img)
+            else:
+                cv2.imshow(f'Obj Mask - {self.obj_type}_{self.id}', obj_mask_display)
+        
+        # 显示visible_mask
+        if self.visible_mask is not None and self.visible_mask.size != 0:
+            vis_mask_display = self.visible_mask.copy()
+            if vis_mask_display.dtype != np.uint8:
+                vis_mask_display = (vis_mask_display * 255).clip(0, 255).astype(np.uint8)
+            
+            if overlay:
+                # 在原图上叠加显示（使用蓝色）
+                mask_colored = np.zeros_like(img_display)
+                mask_colored[:, :, 0] = vis_mask_display  # 蓝色通道
+                overlay_img = cv2.addWeighted(img_display, 0.7, mask_colored, 0.3, 0)
+                cv2.imshow(f'Overlay - {self.obj_type}_{self.id}_visible_mask', overlay_img)
+            else:
+                cv2.imshow(f'Visible Mask - {self.obj_type}_{self.id}', vis_mask_display)
+        
+        # 等待按键或自动关闭
+        if wait_key:
+            print(f"显示图片: {self.obj_type}_{self.id} - 按任意键关闭所有窗口")
+            cv2.waitKey(0)
+        else:
+            cv2.waitKey(1000)  # 显示1秒
+        
+        cv2.destroyAllWindows()
+
+    def resize(self, size, interpolation=cv2.INTER_LINEAR):
+        """
+        将图片及所有mask缩放到指定大小，返回新的Image对象
+        
+        Args:
+            size: 目标尺寸，可以是：
+                - (width, height) 元组
+                - 单个整数（等比例缩放，保持宽高比）
+                - (width, height) 字符串，如 "224x224"
+            interpolation: 插值方法，默认 cv2.INTER_LINEAR
+                - cv2.INTER_NEAREST: 最近邻插值（适合mask）
+                - cv2.INTER_LINEAR: 双线性插值（适合图片）
+                - cv2.INTER_CUBIC: 双三次插值
+                - cv2.INTER_AREA: 区域插值（适合缩小）
+        
+        Returns:
+            Image: 新的缩放后的Image对象（原对象不变）
+        """
+        # 解析size参数
+        if isinstance(size, str):
+            # 处理 "224x224" 格式
+            parts = size.lower().split('x')
+            if len(parts) == 2:
+                size = (int(parts[0]), int(parts[1]))
+            else:
+                raise ValueError(f"Invalid size format: {size}")
+        elif isinstance(size, (int, float)):
+            # 单个数字，等比例缩放
+            scale = size / max(self.img.shape[:2])
+            new_width = int(self.img.shape[1] * scale)
+            new_height = int(self.img.shape[0] * scale)
+            size = (new_width, new_height)
+        elif isinstance(size, (tuple, list)) and len(size) == 2:
+            size = tuple(size)
+        else:
+            raise ValueError(f"Invalid size parameter: {size}")
+        
+        # 缩放原图（创建副本）
+        resized_img = cv2.resize(self.img.copy(), size, interpolation=interpolation)
+        
+        # 缩放affordance masks（使用最近邻插值保持mask的离散性）
+        mask_interpolation = cv2.INTER_NEAREST if interpolation == cv2.INTER_LINEAR else interpolation
+        resized_masks = []
+        if len(self.mask) > 0:
+            for mask in self.mask:
+                if mask is not None and mask.size > 0:
+                    resized_mask = cv2.resize(mask.copy(), size, interpolation=mask_interpolation)
+                    resized_masks.append(resized_mask)
+                else:
+                    resized_masks.append(None)
+        
+        # 缩放obj_mask
+        resized_obj_mask = None
+        if self.obj_mask is not None and self.obj_mask.size > 0:
+            resized_obj_mask = cv2.resize(self.obj_mask.copy(), size, interpolation=mask_interpolation)
+        
+        # 缩放visible_mask
+        resized_visible_mask = None
+        if self.visible_mask is not None and self.visible_mask.size > 0:
+            resized_visible_mask = cv2.resize(self.visible_mask.copy(), size, interpolation=mask_interpolation)
+        
+        # 创建新的Image对象
+        resized_image = Image(
+            img=resized_img,
+            obj_type=self.obj_type,
+            labels=self.labels.copy() if self.labels else None,
+            aff_mask=resized_masks if resized_masks else None,
+            obj_mask=resized_obj_mask,
+            visible_mask=resized_visible_mask,
+            given_id=self.id  # 保持相同的id
+        )
+        
+        # 由于使用了given_id，需要调整计数（因为__init__中已经增加了计数）
+        # 将计数恢复到原来的值（因为这是同一个对象的缩放版本，不应该增加计数）
+        Image.count[self.obj_type]['ID'] -= 1
+        # 如果labels相同，也需要减少label计数（因为__init__中已经增加了）
+        if resized_image.labels:
+            for label in resized_image.labels:
+                if Image.count[resized_image.obj_type][label] > 0:
+                    Image.count[resized_image.obj_type][label] -= 1
+        
+        return resized_image
+
     @classmethod
-    def load_file(cls, filepath, obj_type=None):
+    def load_file(cls, filepath, obj_type=None, keep_id: bool=False):
         """
         根据保存结构加载图片和mask
         
@@ -558,25 +754,29 @@ class Image:
             if os.path.exists(vis_mask_path):
                 visible_mask = cv2.imread(vis_mask_path, cv2.IMREAD_GRAYSCALE)
         
+        # 解析文件名中的id，用于可选的 keep_id
+        given_id = int(inferred_id) if keep_id else None
+
         img_obj = Image(
             img=img,
             obj_type=obj_type,
-            labels=labels,
-            aff_mask=aff_mask,
+            labels=labels if labels else None,
+            aff_mask=aff_mask if aff_mask else None,
             obj_mask=obj_mask,
-            visible_mask=visible_mask
+            visible_mask=visible_mask,
+            given_id=given_id,
         )
-        
+
         return img_obj
 
     @classmethod
-    def load_all(cls, dataset_root_path, with_obj_mask=False):
+    def load_all(cls, dataset_root_path, keep_id: bool=False):
         """
         从保存的数据集目录结构中加载所有图片
         
         Args:
             dataset_root_path: 数据集根目录，结构为 {obj_type}/rgb/{obj_type}_{id}.png
-            with_obj_mask: 是否加载obj_mask（已自动处理，此参数保留兼容性）
+            keep_id: 是否保持文件名中的 id，而不是重新分配
         """
         def iterator():
             for obj_type in os.listdir(dataset_root_path):
@@ -598,7 +798,7 @@ class Image:
                     rgb_path = os.path.join(rgb_dir, rgb_file)
                     try:
                         print(f'loading IMG: {rgb_path}')
-                        img = cls.load_file(rgb_path, obj_type=obj_type)
+                        img = cls.load_file(rgb_path, obj_type=obj_type, keep_id=keep_id)
                         yield img
                     except Exception as e:
                         print(f"Failed to load {rgb_path}: {e}")
@@ -628,20 +828,57 @@ class Image:
         self.labels = None
 
 class BoxedImage(Image):
-    def __init__(self, img, box:np.ndarray=None, labels=None):
-        super().__init__(img, labels=labels)
+    def __init__(self, img, obj_type, box:np.ndarray=None, labels=None, **kwargs):
+        """
+        Args:
+            img: 图片数组
+            obj_type: 物体类型
+            box: 标注文本框的左上角(x1, y1)和右下角(x2, y2)组合成的数组(x1, y1, x2, y2)
+            labels: 标签列表
+            **kwargs: 其他传递给父类的参数
+        """
+        super().__init__(img, obj_type=obj_type, labels=labels, **kwargs)
 
         # 直接将box区域划作mask
-        self.mask = np.zeros_like(img)
-        self.mask[box[1]:box[3], box[0]:box[2]] = 1
+        if box is not None:
+            box_mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
+            box_mask[box[1]:box[3], box[0]:box[2]] = 1
+            if len(self.mask) == 0:
+                self.mask = [box_mask]
+            else:
+                self.mask.append(box_mask)
         self.dtype = 'Boxed'
 
 class HeatImage(Image):
     def __init__(self, img:np.ndarray, obj_type, aff_mask:np.ndarray=None, labels=None, obj_mask:np.ndarray=None):
         super().__init__(img, obj_type=obj_type, aff_mask=aff_mask, labels=labels, obj_mask=obj_mask)
         self.dtype = 'HeatMap'
+    # TODO: 热力图的标注转换
 
 class HANDAL_IMG(Image):
+    def __init__(self, img, obj_type, labels=None, aff_mask=None, obj_mask=None, visible_mask=None, **kwargs):
+        """
+        HANDAL数据集的Image子类
+        
+        Args:
+            img: 图片数组
+            obj_type: 物体类型
+            labels: 标签列表
+            aff_mask: affordance mask列表
+            obj_mask: 物体mask
+            visible_mask: 可见部分mask
+            **kwargs: 其他传递给父类的参数
+        """
+        super().__init__(
+            img=img,
+            obj_type=obj_type,
+            labels=labels,
+            aff_mask=aff_mask,
+            obj_mask=obj_mask,
+            visible_mask=visible_mask,
+            **kwargs
+        )
+    
     @classmethod
     def load_file(cls, filepath, obj_type=None):
         raise NotImplementedError('懒得写，直接使用 HANDAL_IMG.load_all')
@@ -713,9 +950,137 @@ class HANDAL_IMG(Image):
             img.save_to(dir_path)
 
 class AGD20k_IMG(HeatImage):...
-    # TODO: 热力图的标注转换
 
-class RAGNet(Image):...
+class RAGNet(Image):
+    sub_dataset = [
+        '3doi_easy_reasoning_val.pkl',
+        '3doi_val.pkl',
+        'egoobjects_easy_reasoning_train.pkl',
+        'egoobjects_hard_reasoning_train.pkl',
+        'egoobjects_train.pkl',
+        # 'graspnet_test_novel_val.pkl',
+        # 'graspnet_test_seen_val.pkl',
+        'graspnet_train.pkl',
+        # 'handal_easy_reasoning_val.pkl',
+        # 'handal_hard_reasoning_train.pkl',
+        # 'handal_hard_reasoning_val.pkl',
+        # 'handal_mini_val.pkl',
+        # 'openx_train.pkl',
+        # 'rlbench_train.pkl',
+    ]
+    @classmethod
+    def load_all(cls, dataset_root_path):
+        """
+        同时加载图片和文本数据集（绑定id）
+        """
+
+        import pickle
+        def iterator():
+            for sub_dataset in RAGNet.sub_dataset:
+                with open(os.path.join(dataset_root_path, sub_dataset), 'rb') as f:
+                    pickled_data = pickle.load(f)
+                for obj in pickled_data:
+                    obj['frame_path'] = os.path.join(dataset_root_path, obj['frame_path'][6:])
+                    obj['mask_path'] = os.path.join(dataset_root_path, obj['mask_path'][6:])
+                    img_obj = RAGNet(
+                        img=cv2.imread(obj['frame_path']),
+                        obj_mask=None,
+                        aff_mask=cv2.imread(obj['mask_path']),
+                        obj_type = obj['task_obj_class'].capitalize()
+                    )
+
+                    Instruction(
+                        obj['answer'],
+                        obj_type=obj_type,
+                        aff_type=None, #HACK: 数据集里没有明确指定aff类型，需要再做处理
+                        given_id=img_obj.id)
+
+                    yield img_obj
+        return iterator()
+
+
+
+
+"""  -------------------------------------------- 文本指令 -----------------------------------------------  """
+
+class Instruction:
+    all = defaultdict(list)
+    count = defaultdict(lambda: defaultdict(int))
+
+    def __init__(self, ins, obj_type:str=None, aff_type:str=None, given_id:int=None):
+        self.ins = ins
+        self.obj_type = obj_type
+
+        self.aff_type = aff_type
+        if aff_type is not None:
+            Instruction.count[obj_type][aff_type] += 1
+
+
+        Instruction.count[self.obj_type]['ID'] += 1  # Note: Ins的ID并不是最大的id，仅表示计数
+        self.id = Instruction.count[self.obj_type]['ID'] if given_id is None else given_id
+
+    @classmethod
+    def sort_by_id(cls):
+        for obj_type in cls.all.keys():
+            cls.all[obj_type].sort(key=lambda x: x.id)
+
+    @classmethod
+    def load(cls, file_path, keep_id=True):
+        # 加载csv文件，包含header
+        instructions = []
+        with open(file_path, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ins = row.get('ins')
+                obj_type = row.get('obj_type')
+                aff_type = row.get('aff_type')
+                if not keep_id:
+                    given_id = None
+                else:
+                    given_id = int(row.get('id'))
+
+                instructions.append(cls(ins, obj_type=obj_type, aff_type=aff_type, given_id=given_id))
+        return instructions
+
+    @classmethod
+    def load_all(cls, dataset_root_path, keep_id=True):
+        for obj_type in os.listdir(dataset_root_path):
+            file_path = os.path.join(dataset_root_path, obj_type, 'Instruction.csv')
+            if os.path.exists(file_path):
+                cls.load(file_path, keep_id=keep_id)
+
+
+    @classmethod
+    def save_all(cls, dataset_root_dir, obj_type:list[str]=None):
+        """
+        Args:
+            obj_type: 需要保存的指定的物品list['bag', 'knife',...]，默认保存所有
+
+        """
+        # 保存为csv文件，包含header
+        fieldnames = ['ins', 'obj_type', 'aff_type', 'id']
+        if isinstance(obj_type, str):
+            obj_type = [obj_type]
+
+        Instruction.sort_by_id()
+
+        for o in Instruction.all.keys():
+            if obj_type is not None and o not in obj_type: continue
+
+            file_path = os.path.join(dataset_root_dir, o, 'Instruction.csv')
+            with open(file_path, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+
+                for inst in Instruction.all[o]:
+                    writer.writerow({
+                        'ins': inst.ins,
+                        'obj_type': inst.obj_type,
+                        'aff_type': inst.aff_type,
+                        'id': inst.id,
+                    })
+
+
 
 """  -------------------------------------------- 单独运行时作为数据处理工具 -----------------------------------------------  """
 if __name__ == "__main__":
@@ -751,7 +1116,7 @@ if __name__ == "__main__":
     info_dict = {
         'PointCloud': defaultdict(lambda: defaultdict(int)),  # 对应PointCloud.count
         'Image': defaultdict(lambda: defaultdict(int)),
-        'Instrument': defaultdict(lambda: defaultdict(int)),
+        'Instruction': defaultdict(lambda: defaultdict(int)),
     }
 
     # 如果要增加某个数据集同时继续编号，则需要指定--info_file加载输出数据集位置下的info.json
@@ -768,6 +1133,7 @@ if __name__ == "__main__":
                 # 恢复 cls.count计数
                 PointCloud.count = info_dict['PointCloud']
                 Image.count = info_dict['Image']
+                Instruction.count = info_dict['Instruction']
         else:
             warnings.warn(f"没有找到info.json: {info_file}, 使用初始info_dict")
 
@@ -807,8 +1173,6 @@ if __name__ == "__main__":
                     ...
                 case 'LASO':
                     LASO_PC.load_and_save(input_dir, output_dir)
-                case 'RAGNet':
-                    ...
                 case e:
                     raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
@@ -819,17 +1183,18 @@ if __name__ == "__main__":
                 case 'HANDAL':
                     assert args.obj_type is not None and args.aff_type is not None
                     HANDAL_IMG.load_and_save(input_dir, output_dir, obj_type=args.obj_type, aff_type=args.aff_type)
+                case 'RAGNet':
+                    RAGNet.load_and_save(input_dir, output_dir, obj_type=args.obj_type)
                 case 'AGD20K' | 'AGD20k': ...
-
                 case e:
                     raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
         if 'ins' in selected_modalities:
-            pass
+            if args.dataset == 'RAGNet':
+                Instruction.save_all(output_dir)  # 直接保存之前加载的数据
 
 
     """  ----------------------------------- 保存信息文件 -------------------------------------  """
-    info_file = os.path.join(output_dir, 'info.json')
 
     # 更新 PointCloud.count（保留最大的计数）
     for obj, v in PointCloud.count.items():
@@ -843,11 +1208,11 @@ if __name__ == "__main__":
             current_max = info_dict['Image'][obj][aff]
             info_dict['Image'][obj][aff] = max(count, current_max)
 
-    # 保存信息文件
+    # 更新 Instruction.id （直接覆盖）
+    info_dict['Instruction'] = Instruction.count
+
+    info_file = os.path.join(output_dir, 'info.json')
     with open(info_file, 'w') as f:
         json.dump(info_dict, f, ensure_ascii=False, indent=2)
-
-
-
 
 
