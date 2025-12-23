@@ -475,6 +475,7 @@ class Image:
 
         self.dtype = 'No-mask' if aff_mask is None else 'Segmented'
         self.obj_type = obj_type
+        Image.all[obj_type].append(self)
 
         Image.count[self.obj_type]['ID'] += 1
         self.id = Image.count[self.obj_type]['ID'] if given_id is None else given_id
@@ -827,6 +828,7 @@ class Image:
         self.visible_mask = None
         self.labels = None
 
+
 class BoxedImage(Image):
     def __init__(self, img, obj_type, box:np.ndarray=None, labels=None, **kwargs):
         """
@@ -980,20 +982,22 @@ class RAGNet(Image):
                 with open(os.path.join(dataset_root_path, sub_dataset), 'rb') as f:
                     pickled_data = pickle.load(f)
                 for obj in pickled_data:
-                    obj['frame_path'] = os.path.join(dataset_root_path, obj['frame_path'][6:])
-                    obj['mask_path'] = os.path.join(dataset_root_path, obj['mask_path'][6:])
+                    obj['frame_path'] = os.path.join(dataset_root_path, obj['frame_path'][7:])
+                    obj['mask_path'] = os.path.join(dataset_root_path, obj['mask_path'][7:])
                     img_obj = RAGNet(
                         img=cv2.imread(obj['frame_path']),
+                        labels=None,  # HACK: 数据集里没有明确指定aff类型，需要再做处理
                         obj_mask=None,
                         aff_mask=cv2.imread(obj['mask_path']),
-                        obj_type = obj['task_obj_class'].capitalize()
+                        obj_type = obj['task_object_class'].capitalize()
                     )
 
                     Instruction(
                         obj['answer'],
                         obj_type=obj_type,
-                        aff_type=None, #HACK: 数据集里没有明确指定aff类型，需要再做处理
-                        given_id=img_obj.id)
+                        aff_type=None,  # HACK: 数据集里没有明确指定aff类型，需要再做处理
+                        given_id=img_obj.id
+                    )
 
                     yield img_obj
         return iterator()
@@ -1010,11 +1014,12 @@ class Instruction:
     def __init__(self, ins, obj_type:str=None, aff_type:str=None, given_id:int=None):
         self.ins = ins
         self.obj_type = obj_type
+        if obj_type is not None:
+            Instruction.all[obj_type].append(self)
 
         self.aff_type = aff_type
         if aff_type is not None:
             Instruction.count[obj_type][aff_type] += 1
-
 
         Instruction.count[self.obj_type]['ID'] += 1  # Note: Ins的ID并不是最大的id，仅表示计数
         self.id = Instruction.count[self.obj_type]['ID'] if given_id is None else given_id
@@ -1184,7 +1189,7 @@ if __name__ == "__main__":
                     assert args.obj_type is not None and args.aff_type is not None
                     HANDAL_IMG.load_and_save(input_dir, output_dir, obj_type=args.obj_type, aff_type=args.aff_type)
                 case 'RAGNet':
-                    RAGNet.load_and_save(input_dir, output_dir, obj_type=args.obj_type)
+                    RAGNet.load_and_save(input_dir, output_dir)
                 case 'AGD20K' | 'AGD20k': ...
                 case e:
                     raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
