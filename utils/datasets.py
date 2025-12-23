@@ -150,8 +150,8 @@ class PointCloud:
         return iterator()
     
     @classmethod
-    def load_and_save(cls, input_root, output_root):
-        for pc in cls.load_all(input_root):
+    def load_and_save(cls, input_root, output_root, keep_id=False):
+        for pc in cls.load_all(input_root, keep_id=keep_id):
             dir_path = os.path.join(output_root, pc.obj_type, 'PointCloud')
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path, exist_ok=True)
@@ -290,7 +290,7 @@ class AGPIL_PC(PointCloud):
 
 
     @staticmethod
-    def load_file(filepath, obj_type=None) -> 'PointCloud':
+    def load_file(filepath, obj_type=None, keep_id=False) -> 'PointCloud':
         """ Plain Text like:
         cefccd231c34f213eec1a3147175f806068 Bed x y z 0.233132 0.0 0.0 ...
         """
@@ -319,7 +319,7 @@ class AGPIL_PC(PointCloud):
         return pc_obj
 
     @classmethod
-    def load_all(cls, dataset_root_path):
+    def load_all(cls, dataset_root_path, keep_id=False):
         def iterator():
             for obj_type in list(cls.all):
                 for view in os.listdir(dataset_root_path):
@@ -373,7 +373,7 @@ class PIADv2_PC(PointCloud):
         return pc_obj
 
     @classmethod
-    def load_all(cls, dataset_root_path):
+    def load_all(cls, dataset_root_path, keep_id=False):
         """
         Args:
             dataset_root_path: PIADv2数据集的位置，下层目录为 Seen,Unseen_aff,Unseen_obj(任一）
@@ -467,6 +467,12 @@ class Image:
             obj_mask: 整个物体的区域信息（含被遮挡部分）
         """
         self.img = img
+        # 确保img是uint8格式和三通道
+        if img.dtype != np.uint8:
+            self.img = np.clip(img, 0, 255).astype(np.uint8)
+        if self.img.ndim == 2:  # 灰度图转三通道
+            self.img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
         self.labels = []
         if labels:
             for l in labels:
@@ -498,11 +504,6 @@ class Image:
         rgb_dir = os.path.join(dir_path, 'rgb')
         os.makedirs(rgb_dir, exist_ok=True)
         img_path = os.path.join(rgb_dir, f'{self.obj_type}_{self.id}.png')
-        # # 确保img是uint8格式和三通道
-        # if img_to_save.dtype != np.uint8:
-        #     img_to_save = np.clip(img_to_save, 0, 255).astype(np.uint8)
-        # if img_to_save.ndim == 2:  # 灰度图转三通道
-        #     img_to_save = cv2.cvtColor(img_to_save, cv2.COLOR_GRAY2BGR)
         cv2.imwrite(img_path, self.img)
 
         # 保存aff_mask
@@ -808,8 +809,8 @@ class Image:
         return iterator()
 
     @classmethod
-    def load_and_save(cls, input_root, output_root):
-        for img in cls.load_all(input_root):
+    def load_and_save(cls, input_root, output_root, keep_id=False):
+        for img in cls.load_all(input_root, keep_id=keep_id):
             dir_path = os.path.join(output_root, img.obj_type, 'Image')
             img.save_to(dir_path)
             img.free_memory()
@@ -956,7 +957,7 @@ class AGD20k_IMG(HeatImage):...
 class RAGNet(Image):
     sub_dataset = [
         '3doi_easy_reasoning_val.pkl',
-        '3doi_val.pkl',
+        # '3doi_val.pkl',
         'egoobjects_easy_reasoning_train.pkl',
         'egoobjects_hard_reasoning_train.pkl',
         'egoobjects_train.pkl',
@@ -986,9 +987,9 @@ class RAGNet(Image):
                     obj['mask_path'] = os.path.join(dataset_root_path, obj['mask_path'][7:])
                     img_obj = RAGNet(
                         img=cv2.imread(obj['frame_path']),
-                        labels=None,  # HACK: 数据集里没有明确指定aff类型，需要再做处理
+                        labels=['None'],  # BUG: 数据集里没有明确指定aff类型，无法分类保存
                         obj_mask=None,
-                        aff_mask=cv2.imread(obj['mask_path']),
+                        aff_mask=[cv2.imread(obj['mask_path'], cv2.IMREAD_GRAYSCALE)],
                         obj_type = obj['task_object_class'].capitalize()
                     )
 
@@ -1125,7 +1126,9 @@ if __name__ == "__main__":
     }
 
     # 如果要增加某个数据集同时继续编号，则需要指定--info_file加载输出数据集位置下的info.json
+    keep_id = False
     if args.info_file is not None:
+        keep_id =True
         info_file = resolve_path(args.info_file)
 
         if os.path.exists(info_file):
@@ -1167,7 +1170,7 @@ if __name__ == "__main__":
         if 'pc' in selected_modalities:
             match args.dataset:
                 case None:
-                    PointCloud.load_and_save(input_dir, output_dir)
+                    PointCloud.load_and_save(input_dir, output_dir, keep_id=keep_id)
                 case 'AGPIL':
                     AGPIL_PC.load_and_save(input_dir, output_dir)
                 case 'PIADv2':
@@ -1184,7 +1187,7 @@ if __name__ == "__main__":
         if 'img' in selected_modalities:
             match args.dataset:
                 case None:
-                    Image.load_and_save(input_dir, output_dir)
+                    Image.load_and_save(input_dir, output_dir, keep_id=keep_id)
                 case 'HANDAL':
                     assert args.obj_type is not None and args.aff_type is not None
                     HANDAL_IMG.load_and_save(input_dir, output_dir, obj_type=args.obj_type, aff_type=args.aff_type)
