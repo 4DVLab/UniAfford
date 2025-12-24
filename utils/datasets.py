@@ -983,6 +983,8 @@ class RAGNet(Image):
             for sub_dataset in RAGNet.sub_dataset:
                 with open(os.path.join(dataset_root_path, sub_dataset), 'rb') as f:
                     pickled_data = pickle.load(f)
+                    pickled_data.sort(key=lambda x: x['frame_path'])
+
                 for obj in pickled_data:
                     obj['frame_path'] = os.path.join(dataset_root_path, obj['frame_path'][7:])
                     obj['mask_path'] = os.path.join(dataset_root_path, obj['mask_path'][7:])
@@ -1001,7 +1003,7 @@ class RAGNet(Image):
                     if 'answer' in obj:
                         Instruction(
                             obj['answer'],
-                            obj_type=obj_type,
+                            obj_type=obj['task_object_class'].capitalize(),
                             aff_type='None',  # HACK: 数据集里没有明确指定aff类型，需要再做处理
                             given_id=img_obj.id
                         )
@@ -1093,7 +1095,7 @@ class Instruction:
 
                 for inst in Instruction.all[o]:
                     writer.writerow([
-                        inst.ins,
+                        f'"{inst.ins}"',  # 强制加上引号，防止出错
                         inst.obj_type,
                         inst.aff_type,
                         inst.id,
