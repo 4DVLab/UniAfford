@@ -998,13 +998,13 @@ class RAGNet(Image):
                         aff_mask=[cv2.imread(obj['mask_path'], cv2.IMREAD_GRAYSCALE)],
                         obj_type = obj['task_object_class'].capitalize()
                     )
-
-                    Instruction(
-                        obj['answer'],
-                        obj_type=obj_type,
-                        aff_type='None',  # HACK: 数据集里没有明确指定aff类型，需要再做处理
-                        given_id=img_obj.id
-                    )
+                    if 'answer' in obj:
+                        Instruction(
+                            obj['answer'],
+                            obj_type=obj_type,
+                            aff_type='None',  # HACK: 数据集里没有明确指定aff类型，需要再做处理
+                            given_id=img_obj.id
+                        )
 
                     yield img_obj
         return iterator()
@@ -1163,57 +1163,59 @@ if __name__ == "__main__":
     selected_modalities = set(args.modality)
     if 'all' in selected_modalities:
         selected_modalities = {'pc', 'img', 'img_mask', 'ins'}
-    
 
-    if args.show:
-        for f in args.show:
-            file_path = resolve_path(f)
-            match args.dataset:
-                case None:
-                    pc = PointCloud.load_file(file_path)
-                case 'AGPIL':
-                    pc = AGPIL_PC.load_file(file_path)
-                case 'PIADv2':
-                    pc = PIADv2_PC.load_file(file_path)
-                case e:
-                    raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
-            pc.show()
+    err = None
+    try:
+        if args.show:
+            for f in args.show:
+                file_path = resolve_path(f)
+                match args.dataset:
+                    case None:
+                        pc = PointCloud.load_file(file_path)
+                    case 'AGPIL':
+                        pc = AGPIL_PC.load_file(file_path)
+                    case 'PIADv2':
+                        pc = PIADv2_PC.load_file(file_path)
+                    case e:
+                        raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
+                pc.show()
 
-    else:
-        if 'pc' in selected_modalities:
-            match args.dataset:
-                case None:
-                    PointCloud.load_and_save(input_dir, output_dir, keep_id=keep_id)
-                case 'AGPIL':
-                    AGPIL_PC.load_and_save(input_dir, output_dir)
-                case 'PIADv2':
-                    tmp = list(PIADv2_PC.load_all(input_dir))
-                    PointCloud.deduplicate()
-                    PointCloud.save_all(output_dir)
-                case 'PIAD':
-                    ...
-                case 'LASO':
-                    LASO_PC.load_and_save(input_dir, output_dir)
-                case e:
-                    raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
+        else:
+            if 'pc' in selected_modalities:
+                match args.dataset:
+                    case None:
+                        PointCloud.load_and_save(input_dir, output_dir, keep_id=keep_id)
+                    case 'AGPIL':
+                        AGPIL_PC.load_and_save(input_dir, output_dir)
+                    case 'PIADv2':
+                        tmp = list(PIADv2_PC.load_all(input_dir))
+                        PointCloud.deduplicate()
+                        PointCloud.save_all(output_dir)
+                    case 'PIAD':
+                        ...
+                    case 'LASO':
+                        LASO_PC.load_and_save(input_dir, output_dir)
+                    case e:
+                        raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
-        if 'img' in selected_modalities:
-            match args.dataset:
-                case None:
-                    Image.load_and_save(input_dir, output_dir, keep_id=keep_id)
-                case 'HANDAL':
-                    assert args.obj_type is not None and args.aff_type is not None
-                    HANDAL_IMG.load_and_save(input_dir, output_dir, obj_type=args.obj_type, aff_type=args.aff_type)
-                case 'RAGNet':
-                    RAGNet.load_and_save(input_dir, output_dir)
-                case 'AGD20K' | 'AGD20k': ...
-                case e:
-                    raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
+            if 'img' in selected_modalities:
+                match args.dataset:
+                    case None:
+                        Image.load_and_save(input_dir, output_dir, keep_id=keep_id)
+                    case 'HANDAL':
+                        assert args.obj_type is not None and args.aff_type is not None
+                        HANDAL_IMG.load_and_save(input_dir, output_dir, obj_type=args.obj_type, aff_type=args.aff_type)
+                    case 'RAGNet':
+                        RAGNet.load_and_save(input_dir, output_dir)
+                    case 'AGD20K' | 'AGD20k': ...
+                    case e:
+                        raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
-        if 'ins' in selected_modalities:
-            if args.dataset == 'RAGNet':
-                Instruction.save_all(output_dir)  # 直接保存之前加载的数据
-
+            if 'ins' in selected_modalities:
+                if args.dataset == 'RAGNet':
+                    Instruction.save_all(output_dir)  # 直接保存之前加载的数据
+    except Exception as e:
+        err = e
 
     """  ----------------------------------- 保存信息文件 -------------------------------------  """
 
@@ -1237,3 +1239,4 @@ if __name__ == "__main__":
         json.dump(info_dict, f, ensure_ascii=False, indent=2)
 
 
+    if err: raise err
