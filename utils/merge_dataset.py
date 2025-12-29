@@ -54,7 +54,6 @@ def copy_obj(obj_path, obj_name):
                 with open(m_path, 'r', newline='', encoding='utf-8') as f:
                     reader = csv.DictReader(f)
                     for row in reader:
-                        # 确保ins字段有引号
                         processed_row = {
                             'ins': row.get("ins", ""),
                             'obj_type': row.get('obj_type', ''),

@@ -1097,7 +1097,8 @@ class Instruction:
 
                 for inst in Instruction.all[o]:
                     writer.writerow([
-                        f'"{inst.ins}"',  # 强制加上引号，防止出错
+                        # f'"{inst.ins}',  # 强制加上引号，防止出错
+                        inst.ins,  # 已经自动加上引号
                         inst.obj_type,
                         inst.aff_type,
                         inst.id,
