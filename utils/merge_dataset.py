@@ -4,6 +4,8 @@ import argparse
 from collections import defaultdict
 import shutil
 
+import json
+
 parser = argparse.ArgumentParser(description="将dataset.py处理的不同位置数据整合为同一个数据集")
 parser.add_argument('-i', '--input', type=str, nargs="+", help='输入数据集的根目录，按照物体-模态分类')
 parser.add_argument('-o', '--output', type=str, help='输出位置', default='/mnt/data/datasets/sorted_23d')
@@ -72,12 +74,27 @@ def copy_obj(obj_path, obj_name):
 
 # 收集物体模态信息
 obj_modalities = defaultdict(set)
+info_dict = {
+        'PointCloud': defaultdict(lambda: defaultdict(int)),
+        'Image': defaultdict(lambda: defaultdict(int)),
+        'Instruction': defaultdict(lambda: defaultdict(int)),
+    }
 
 if args.filter:
     print("正在收集物体模态信息...")
 
     # 遍历所有输入数据集目录
     for dataset_dir in args.input:
+        # 加载info数据
+        info_file = os.path.join(args.input, 'info.json')
+        if os.path.exists(info_file):
+            with open(info_file, 'r') as f:
+                loaded_dict = json.load(f)
+                for m, _ in info_dict.items():
+                    for obj_type, vals in loaded_dict.get(k, {}).items():
+                        for k, v in vals.items():
+                            info_dict[m][obj_type][k] = max(info_dict[m][obj_type][k], v)
+
         if not os.path.exists(dataset_dir):
             print(f"警告: 数据集目录不存在: {dataset_dir}")
             continue
@@ -112,6 +129,21 @@ if args.filter:
                 if os.path.isdir(obj_path):
                     print(f"复制物体: {obj_name}")
                     copy_obj(obj_path, obj_name)
+
+    with open(os.path.join(args.output, 'info.json'), 'w', encoding='utf-8') as f:
+        save_info = {
+            'PointCloud': defaultdict(lambda: defaultdict(int)),
+            'Image': defaultdict(lambda: defaultdict(int)),
+            'Instruction': defaultdict(lambda: defaultdict(int)),
+        }
+
+        for m,_ in info_dict:
+            for o in info_dict[m]:
+                if o in filtered_objects:
+                    save_info[m][o] = info_dict[m][o]
+
+        json.dump(save_info, f, ensure_ascii=False, indent=2)
+
 else:
     # 不过滤，复制所有数据
     print("复制所有数据（不过滤）...")
@@ -121,6 +153,9 @@ else:
             if os.path.isdir(obj_path):
                 print(f"复制物体: {obj_name}")
                 copy_obj(obj_path, obj_name)
+
+    with open(os.path.join(args.output, 'info.json'), 'w', encoding='utf-8') as f:
+        json.dump(info_dict, f, ensure_ascii=False, indent=2)
 
 print("数据处理完成!")
 print(f"输出目录: {args.output}")
