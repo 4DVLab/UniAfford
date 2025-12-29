@@ -56,7 +56,7 @@ def copy_obj(obj_path, obj_name):
                     for row in reader:
                         # 确保ins字段有引号
                         processed_row = {
-                            'ins': f'"{row.get("ins", "")}"',
+                            'ins': row.get("ins", ""),
                             'obj_type': row.get('obj_type', ''),
                             'aff_type': row.get('aff_type', ''),
                             'id': row.get('id', '')
