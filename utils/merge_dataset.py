@@ -14,6 +14,13 @@ args = parser.parse_args()
 # 确保输出目录存在
 os.makedirs(args.output, exist_ok=True)
 
+def clean_quotes(value:str):
+    """去除字段两边的引号"""
+    if not value: return ''
+    while len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        value = value[1:-1]
+    return value
+
 
 def copy_obj(obj_path, obj_name):
     """复制单个物体的数据到输出目录"""
@@ -55,7 +62,7 @@ def copy_obj(obj_path, obj_name):
                     reader = csv.DictReader(f)
                     for row in reader:
                         processed_row = {
-                            'ins': row.get("ins", ""),
+                            'ins': clean_quotes(row.get("ins", "")),  # 兼容之前的问题
                             'obj_type': row.get('obj_type', ''),
                             'aff_type': row.get('aff_type', ''),
                             'id': row.get('id', '')
