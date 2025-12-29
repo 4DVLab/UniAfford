@@ -5,7 +5,7 @@ from collections import defaultdict
 import shutil
 
 parser = argparse.ArgumentParser(description="将dataset.py处理的不同位置数据整合为同一个数据集")
-parser.add_argument('-d', '--dataset', type=str, nargs="+", help='输入数据集的根目录，按照物体-模态分类')
+parser.add_argument('-i', '--input', type=str, nargs="+", help='输入数据集的根目录，按照物体-模态分类')
 parser.add_argument('-o', '--output', type=str, help='输出位置', default='/mnt/data/datasets/sorted_23d')
 parser.add_argument('-f', '--filter', action='store_true', help='仅保留包含三元组的数据', default=True)
 
@@ -71,7 +71,7 @@ if args.filter:
     print("正在收集物体模态信息...")
 
     # 遍历所有输入数据集目录
-    for dataset_dir in args.dataset:
+    for dataset_dir in args.input:
         if not os.path.exists(dataset_dir):
             print(f"警告: 数据集目录不存在: {dataset_dir}")
             continue
@@ -99,7 +99,7 @@ if args.filter:
     print(f"筛选后保留 {len(filtered_objects)} 个物体")
 
     # 复制筛选后的数据
-    for dataset_dir in args.dataset:
+    for dataset_dir in args.input:
         for obj_name in os.listdir(dataset_dir):
             if obj_name in filtered_objects:
                 obj_path = os.path.join(dataset_dir, obj_name)
@@ -109,7 +109,7 @@ if args.filter:
 else:
     # 不过滤，复制所有数据
     print("复制所有数据（不过滤）...")
-    for dataset_dir in args.dataset:
+    for dataset_dir in args.input:
         for obj_name in os.listdir(dataset_dir):
             obj_path = os.path.join(dataset_dir, obj_name)
             if os.path.isdir(obj_path):
