@@ -993,7 +993,7 @@ class RAGNet(Image):
 
                     img = cv2.imread(obj['frame_path'])
                     if img is None: continue
-                    print(f'loading IMG: {obj['frame_path']}')
+                    print(f"loading IMG: {obj['frame_path']}")
 
                     img_obj = RAGNet(
                         img=img,

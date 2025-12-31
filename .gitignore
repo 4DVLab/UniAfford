@@ -115,16 +115,10 @@ logs/
 *.csv
 *.tsv
 
-# Images/outputs
-*.png
-*.jpg
-*.jpeg
-*.bmp
-*.gif
-
 # macOS / Windows noise
 .DS_Store
 Thumbs.db
 
 
 try.py
+runs/
