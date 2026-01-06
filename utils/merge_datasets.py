@@ -1,3 +1,8 @@
+"""
+将dataset.py处理的不同位置数据整合为同一个数据集（合并所有的Ins.csv）
+"""
+
+
 import csv
 import os
 import argparse

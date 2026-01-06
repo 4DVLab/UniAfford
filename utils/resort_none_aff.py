@@ -32,6 +32,7 @@ if __name__ == '__main__':
             input_base_dir = os.path.join(input_root, obj, 'Image')
             output_base_dir = os.path.join(output_root, obj, 'Image')
 
+            os.makedirs(output_base_dir, exist_ok=True)
             for row in reader:
                 if not row or len(row) < 4: continue
 
