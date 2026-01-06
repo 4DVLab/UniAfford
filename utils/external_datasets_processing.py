@@ -12,19 +12,11 @@ import numpy as np
 import cv2
 from collections import defaultdict
 from base_dataset import Instruction, Image, PointCloud
-
+from common import resolve_path
 
 # 全局参数
 DEFAULT_OUTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 输出的数据集位置（用于数据转换，训练推理时可忽略）
 DEFAULT_INPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 加载的数据集位置（输入数据位置，或转换数据集的输入位置）
-
-
-"""  ----------------------------------------------- utils functions ----------------------------------------------  """
-
-def resolve_path(path_str: str):
-    """兼容相对/绝对路径，返回绝对路径。"""
-    if path_str is None: return None
-    return path_str if os.path.isabs(path_str) else os.path.abspath(os.path.join(os.getcwd(), path_str))
 
 
 """  ----------------------------------------------- PointCloud classes ----------------------------------------------  """

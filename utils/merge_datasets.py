@@ -1,14 +1,14 @@
 """
 将dataset.py处理的不同位置数据整合为同一个数据集（合并所有的Ins.csv）
 """
-
-
 import csv
 import os
 import argparse
 from collections import defaultdict
 import shutil
 import json
+from common import clean_quotes
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="将dataset.py处理的不同位置数据整合为同一个数据集（合并所有的Ins.csv）")
@@ -20,13 +20,6 @@ if __name__ == '__main__':
 
     # 确保输出目录存在
     os.makedirs(args.output, exist_ok=True)
-
-    def clean_quotes(value:str):
-        """去除字段两边的引号"""
-        if not value: return ''
-        while len(value) >= 2 and value[0] == '"' and value[-1] == '"':
-            value = value[1:-1]
-        return value
 
 
     def copy_obj(obj_path, obj_name):
