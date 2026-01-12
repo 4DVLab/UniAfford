@@ -4,6 +4,7 @@
 """
 import os
 import random
+from tqdm import tqdm
 import json
 from typing import List, Tuple, Optional, Dict, Any
 from collections import defaultdict
@@ -141,12 +142,12 @@ class PointCloud:
                         e.save_to(os.path.join(dir_path, f'{e.obj_type}_{e.id}.csv'))
             else:
                 # 按顺序重新分配 id
-                id = 0
+                save_id = None
                 for e in v:
                     if e is not None:
-                        id += 1 # 重新按顺序分配id
-                        e.save_to(os.path.join(dir_path, f'{e.obj_type}_{id}.csv')) # 保存时命名为 {obj_type}_{id}.csv
-
+                        if save_id is None: save_id = e.id  # 以第一个非 None的pc对象的id作为起始id
+                        else: save_id += 1 
+                        e.save_to(os.path.join(dir_path, f'{e.obj_type}_{save_id}.csv')) # 保存时命名为 {obj_type}_{id}.csv
     @classmethod
     def load_all(cls,
             dataset_root_path,
@@ -233,14 +234,6 @@ class PointCloud:
 
         return hash(self) == hash(other)
 
-    def __del__(self):
-        # 更新count
-        PointCloud.count[self.obj_type]["ID"] -= 1
-        for l in self.labels:
-            PointCloud.count[self.obj_type][l] -= 1
-
-        self.free_memory()
-
     def __hash__(self):
         if self._hash is None:
             self.sort(force=False)
@@ -309,6 +302,14 @@ class PointCloud:
         self.mask = None
         self.labels = None
 
+    def __del__(self):
+        # 更新count
+        PointCloud.count[self.obj_type]["ID"] -= 1
+        for l in self.labels:
+            PointCloud.count[self.obj_type][l] -= 1
+
+        self.free_memory()
+
         # 删除self的记录
         PointCloud.all[self.obj_type][self.id - 1] = None
 
@@ -325,9 +326,9 @@ class PointCloud:
     @classmethod
     def deduplicate(cls):
         """根据hash值去重合并数据"""
-        for obj_type, ls in cls.all.items():
+        for obj_type, ls in tqdm(cls.all.items()):
             loaded = dict()
-            for pc in ls:
+            for pc in tqdm(ls):
                 loaded[pc] = pc._merge(loaded.get(pc, None))
 
 class Image:
@@ -790,6 +791,13 @@ class Image:
             img.save_to(dir_path, file_id=file_id)
             img.free_memory()
 
+    def free_memory(self):
+        self.img=None
+        self.mask = None
+        self.obj_mask = None
+        self.visible_mask = None
+        self.labels = None
+
     def __del__(self):
         # 更新count
         Image.count[self.obj_type]["ID"] -= 1
@@ -798,12 +806,8 @@ class Image:
 
         self.free_memory()
 
-    def free_memory(self):
-        self.img=None
-        self.mask = None
-        self.obj_mask = None
-        self.visible_mask = None
-        self.labels = None
+        # 删除self的记录
+        Image.all[self.obj_type][self.id - 1] = None
 
 class Instruction:
     all = defaultdict(list)
