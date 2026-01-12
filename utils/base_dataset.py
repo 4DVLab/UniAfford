@@ -48,9 +48,8 @@ class PointCloud:
         self.labels = labels   # aff_mask对应列的标签
 
         self.is_sorted = False
-        self.sort()            # 排序点云
         self._hash = None
-        hash(self)
+        
 
     """  ---------------------------------------- 读写相关 ---------------------------------------------  """
     def save_to(self, filepath):
@@ -328,6 +327,7 @@ class PointCloud:
         for obj_type, ls in cls.all.items():
             loaded = dict()
             for pc in ls:
+                pc.hash()
                 loaded[pc] = pc._merge(loaded[pc])
 
 class Image:
