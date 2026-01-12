@@ -314,11 +314,12 @@ class PointCloud:
 
     def _merge(self, other):
         """合并两个点云标注并更新label、计数（默认点云hash相等）"""
-        for i, l in enumerate(other.labels):
-            if l not in self.labels:
-                self.labels.append(l)
-                self.mask = np.hstack((self.mask, other.mask[:, [i]]))
-        del other
+        if isinstance(other, PointCloud):
+            for i, l in enumerate(other.labels):
+                if l not in self.labels:
+                    self.labels.append(l)
+                    self.mask = np.hstack((self.mask, other.mask[:, [i]]))
+            del other
         return self
 
     @classmethod
@@ -327,8 +328,7 @@ class PointCloud:
         for obj_type, ls in cls.all.items():
             loaded = dict()
             for pc in ls:
-                hash(pc)
-                loaded[pc] = pc._merge(loaded[pc])
+                loaded[pc] = pc._merge(loaded.get(pc, None))
 
 class Image:
     all = defaultdict(list)
