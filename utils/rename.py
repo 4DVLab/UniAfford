@@ -2,8 +2,9 @@
 重命名某一个物体的名称或aff的名称（未测试）
 """
 import os
+import shutil
 import argparse
-from base_datasets import Instruction, Image, PointCloud
+from base_dataset import Instruction, Image, PointCloud
 
 
 def rename_obj_type(dataset_root, obj_rename, aff_rename=None):
@@ -132,7 +133,6 @@ def rename_obj_type(dataset_root, obj_rename, aff_rename=None):
     
     # 4. 删除旧目录（仅当物体名发生变化时）
     if not same_name and os.path.exists(old_obj_dir):
-        import shutil
         shutil.rmtree(old_obj_dir)
         print(f"已删除旧目录: {old_obj_dir}")
 
