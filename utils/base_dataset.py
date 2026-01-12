@@ -327,7 +327,7 @@ class PointCloud:
         for obj_type, ls in cls.all.items():
             loaded = dict()
             for pc in ls:
-                pc.hash()
+                hash(pc)
                 loaded[pc] = pc._merge(loaded[pc])
 
 class Image:

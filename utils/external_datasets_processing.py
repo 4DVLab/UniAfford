@@ -1,6 +1,5 @@
 """
-!!WARNING: 由于数据构建过程是一个一个数据集处理的，故其余数据集的处理代码仅供参考，可能存在部分问题。
-    dataset.py文件只保证加载本数据集时不出现问题。
+!!WARNING: 由于数据构建过程是一个一个数据集处理的，故其余数据集的处理代码可能在更新迭代中存在部分问题，仅供参考。
     注意所有的'Note'注释。
 """
 
@@ -297,25 +296,25 @@ class HANDAL_IMG(Image):
                         img_path = os.path.join(base_path, 'rgb', fname)  # jpg
                         img = cv2.imread(img_path)
 
-                        # 物体部分（含被遮挡）
-                        obj_path = os.path.join(base_path, 'mask', f'{o_id}_000000.png')
-                        obj_mask = cv2.imread(obj_path)
+                        # # 物体部分（含被遮挡）
+                        # obj_path = os.path.join(base_path, 'mask', f'{o_id}_000000.png')
+                        # obj_mask = cv2.imread(obj_path)
 
                         # handle部分的mask
                         aff_path = os.path.join(base_path, 'mask_parts', f'{o_id}_000000_handle.png')
                         aff_mask = cv2.imread(aff_path)
 
-                        # 可见部分
-                        visib_path = os.path.join(base_path, 'mask_visib', f'{o_id}_000000.png')
-                        visib_mask = cv2.imread(visib_path)
+                        # # 可见部分
+                        # visib_path = os.path.join(base_path, 'mask_visib', f'{o_id}_000000.png')
+                        # visib_mask = cv2.imread(visib_path)
 
                         obj = HANDAL_IMG(
                             img,
                             obj_type=obj_type,
                             labels=[aff_type],
                             aff_mask=[aff_mask],
-                            obj_mask=obj_mask,
-                            visible_mask=visib_mask,
+                            # obj_mask=obj_mask,
+                            # visible_mask=visib_mask,
                         )
                         print(f'loading IMG: {img_path}')
                         yield obj
