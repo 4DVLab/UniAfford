@@ -397,12 +397,12 @@ class Image:
                     if e is not None:
                         e.save_to(dir_path)
             else:
-                # 按顺序重新分配 id
-                id_counter = 0
+                save_id = None
                 for e in v:
                     if e is not None:
-                        id_counter += 1
-                        e.save_to(dir_path, file_id=id_counter)
+                        if save_id is None: save_id = e.id  # 以第一个非 None的pc对象的id作为起始id
+                        else: save_id += 1
+                        e.save_to(dir_path, file_id=save_id)
 
     def save_to(self, dir_path, file_id: int=None):
         """
