@@ -33,7 +33,7 @@ class PointCloud:
     }
     """
 
-    def __init__(self, points, obj_type, mask:np.ndarray=None, labels:list=None, given_id:int=None):
+    def __init__(self, points, obj_type, mask:list[np.ndarray]=None, labels:list=None, given_id:int=None):
         self.points = points
         self.obj_type = obj_type
         
@@ -291,6 +291,10 @@ class PointCloud:
             return True
 
     @classmethod
+    def get_by_id(cls, obj_type, idx):
+        return cls.all[obj_type][idx-cls.all[obj_type][0].id]
+
+    @classmethod
     def sort_by_id(cls):
         for obj_type in cls.all.keys():
             cls.all[obj_type].sort(key=lambda x: x.id)
@@ -371,6 +375,11 @@ class Image:
         self.mask = aff_mask if aff_mask is not None else []
         self.obj_mask = obj_mask
         self.visible_mask = visible_mask
+
+
+    @classmethod
+    def get_by_id(cls, obj_type, idx):
+        return cls.all[obj_type][idx-cls.all[obj_type][0].id]
 
     @classmethod
     def sort_by_id(cls):
@@ -826,6 +835,11 @@ class Instruction:
         Instruction.count[self.obj_type]['ID'] += 1  # Note: Ins的ID并不是最大的id，仅表示计数
         self.id = Instruction.count[self.obj_type]['ID'] if given_id is None else given_id  # Ins的id和图片的id一一对应
 
+
+    @classmethod
+    def get_by_id(cls, obj_type, idx):
+        return cls.all[obj_type][idx-cls.all[obj_type][0].id]
+    
     @classmethod
     def sort_by_id(cls):
         for obj_type in cls.all.keys():
@@ -918,139 +932,68 @@ class JointDataSample:
     count = defaultdict(lambda: defaultdict(int))
     start_id = 0  # 所有样本集共用一个id序列编号，不再使用 count[obj_typr]['ID']作为编号
 
-    def __init__(self, instruction: Instruction, image: Image, pointcloud: PointCloud):
+    def __init__(self, ins: Instruction=None, img: Image=None, pc: PointCloud=None, img_mask_idx=None, pc_mask_idx=None):
         """
         Args:
-            instruction: Instruction 对象
-            image: Image 对象
-            pointcloud: PointCloud 对象
+            ins: Instruction 对象
+            imgimg: Image 对象
+            pc: PointCloud 对象
         """
-        self.instruction = instruction
-        self.image = image
-        self.pointcloud = pointcloud
+        self.ins = ins
+        self.img = img
+        self.img_mask_idx = img_mask_idx
+        self.pc = pc
+        self.pc_mask_idx = pc_mask_idx
         
-        # 验证一致性
-        assert instruction.obj_type == image.obj_type == pointcloud.obj_type, \
-            f"obj_type 不一致: {instruction.obj_type}, {image.obj_type}, {pointcloud.obj_type}"
-        assert instruction.aff_type == image.aff_type == pointcloud.aff_type, \
-            f"obj_type 不一致: {instruction.aff_type}, {image.aff_type}, {pointcloud.aff_type}"
 
-        
-        self.aff_type = instruction.aff_type
-        self.obj_type = instruction.obj_type
+        obj_type, aff_type = None, None
+        for e in (ins, img, pc):
+            if e is not None: 
+                obj_type = e.obj_type
+                aff_type = e.aff_type
+
+        self.aff_type = aff_type
+        self.obj_type = obj_type
         JointDataSample.start_id += 1
         self.id = JointDataSample.start_id
 
         JointDataSample.all[self.obj_type].append(self)
         JointDataSample.count[self.obj_type][self.aff_type] += 1
-        # 模态掩码状态：True 表示该模态可用，False 表示被 mask
-        self._mask_state = {
-            'ins': True,
-            'img': True,
-            'pc': True
+        # 模态可见状态：True 表示该模态可见，False 表示不可见（或无数据）
+        self.is_available = {
+            'ins': ins is not None,
+            'img': img is not None,
+            'pc': pc is not None,
         }
     
-    def __repr__(self):
-        mask_info = ""
-        masked_modalities = [k for k, v in self._mask_state.items() if not v]
-        if masked_modalities:
-            mask_info = f", masked={masked_modalities}"
-        return f"JointDataSample(obj_type={self.obj_type}, id={self.id}, aff_type={self.aff_type}{mask_info})"
-    
-    def apply_mask(self, modalities: List[str] = None, mask_prob: float = None, 
-                   min_available: int = 1) -> 'JointDataSample':
-        """
-        对指定模态应用掩码
-        
+    def apply_mask(self, mask_prob=(0.01, 0.02, 0.003)) -> 'JointDataSample':
+        """对指定模态应用掩码
         Args:
-            modalities: 要 mask 的模态列表，可选 ['ins', 'img', 'pc']
-                       如果为 None 且 mask_prob 不为 None，则随机选择模态进行 mask
-            mask_prob: 每个模态被 mask 的概率（0.0-1.0），仅当 modalities 为 None 时生效
-            min_available: 最少保留的可用模态数量（默认至少保留1个模态）
-        
-        Returns:
-            self，支持链式调用
+            mask_prob: ['ins', 'img', 'pc'] 每个模态被 mask 的概率（0.0-1.0）
         """
         all_modalities = ['ins', 'img', 'pc']
         
-        if modalities is not None:
-            # 指定模态进行 mask
-            for mod in modalities:
-                if mod in all_modalities:
-                    self._mask_state[mod] = False
-        elif mask_prob is not None:
-            # 随机 mask 模态
-            # 先随机决定每个模态是否被 mask
-            candidates_to_mask = []
-            for mod in all_modalities:
-                if random.random() < mask_prob:
-                    candidates_to_mask.append(mod)
-            
-            # 确保至少保留 min_available 个模态
-            max_mask_count = len(all_modalities) - min_available
-            if len(candidates_to_mask) > max_mask_count:
-                # 随机选择要 mask 的模态
-                candidates_to_mask = random.sample(candidates_to_mask, max_mask_count)
-            
-            for mod in candidates_to_mask:
-                self._mask_state[mod] = False
+        # 先随机决定每个模态是否被 mask
+        candidates_to_mask = []
+        for i, mod in enumerate(all_modalities):
+            if mask_prob[i] > 0 and random.random() < mask_prob[i]:
+                candidates_to_mask.append(mod)
+        
+        for mod in candidates_to_mask:
+            self.is_available[mod] = False
         
         return self
     
-    def reset_mask(self) -> 'JointDataSample':
-        """重置所有模态的掩码状态"""
-        self._mask_state = {
-            'ins': True,
-            'img': True,
-            'pc': True
-        }
-        return self
-    
-    def is_masked(self, modality: str) -> bool:
-        """检查指定模态是否被 mask"""
-        return not self._mask_state.get(modality, True)
-    
-    def get_available_modalities(self) -> List[str]:
-        """获取当前可用的模态列表"""
-        return [k for k, v in self._mask_state.items() if v]
-    
-    def get_masked_modalities(self) -> List[str]:
-        """获取当前被 mask 的模态列表"""
-        return [k for k, v in self._mask_state.items() if not v]
-    
-    def get_modality(self, modality):
-        """
-        获取指定模态数据（'ins', 'img', 'pc'），如果被 mask 则返回 None
-        支持单个字符串或字符串列表输入
-        """
-        def fetch_one(mod):
-            if not self._mask_state.get(mod, True):
-                return None
-            if mod == 'ins':
-                return self.instruction
-            elif mod == 'img':
-                return self.image
-            elif mod == 'pc':
-                return self.pointcloud
-            else:
-                raise ValueError(f"Unknown modality: {mod}")
-
-        if isinstance(modality, list):
-            return [fetch_one(mod) for mod in modality]
-        else:
-            return fetch_one(modality)
-        
     def get_data(self) -> Dict[str, Any]:
         """
         获取数据字典，被 mask 的模态返回 None
         """
         return {
-            'ins': self.get_modality('ins'),
-            'img': self.get_modality('img'),
-            'pc': self.get_modality('pc'),
-            'obj_type': self.obj_type,
-            'aff_type': self.aff_type,
-            'id': self.id,
+            'ins': self.ins.ins if self.is_available['ins'] else None,
+            'img': self.img.img if self.is_available['img'] else None,
+            'pc': self.pc.points if self.is_available['pc'] else None,
+            'img_gt': self.img.mask[self.img_mask_idx] if self.is_available['img'] else None,
+            'pc_gt': self.pc.mask[self.pc_mask_idx] if self.is_available['pc'] else None,
         }
 
 
@@ -1059,18 +1002,13 @@ class JointDataset:
     
     def __init__(self, 
                  dataset_root: str,
-                 obj_type: Optional[List[str]] = None,
-                 aff_type: Optional[List[str]] = None,
                  train_ratio: float = None,
                  val_ratio: float = None,
                  test_ratio: float = None,
                  random_seed: int = 42,
                  keep_id: bool = True,
                  balance_data: bool = True,
-                 mask_prob: float = 0.0,
-                 mask_modalities: Optional[List[str]] = None,
-                 min_available_modalities: int = 1,
-                 split_json_path: Optional[str] = None):
+                 mask_prob: float = (0, 0.01, 0.003)):
         """
         初始化数据集
         
@@ -1085,14 +1023,10 @@ class JointDataset:
             keep_id: 是否保持原有的 id
             balance_data: 是否平衡数据（当点云/图文对数量不一致时，复制较少的数据）
             mask_prob: 获取数据时每个模态被 mask 的概率（0.0-1.0）
-            mask_modalities: 固定要 mask 的模态列表，优先级高于 mask_prob
-            min_available_modalities: 最少保留的可用模态数量
-            split_json_path: 数据集分割JSON文件路径，如果存在则从中加载分割结果
         """
         
         # 设置随机种子
         random.seed(random_seed)
-        # 保证 train/val/test 的参数顺序不被搓乱，不改变三者变量的原始变量名（顺序 train, val, test）
 
         ratios = [train_ratio, val_ratio, test_ratio]
         none_count = sum(1 for r in ratios if r is None)
@@ -1111,18 +1045,12 @@ class JointDataset:
             f"比例之和必须为 1.0，当前为 {train_ratio + val_ratio + test_ratio}"
 
         self.dataset_root = os.path.abspath(dataset_root)
-        self.obj_type = obj_type
-        self.aff_type = aff_type
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
         self.random_seed = random_seed
         self.keep_id = keep_id
         self.balance_data = balance_data
-        self.mask_prob = mask_prob
-        self.mask_modalities = mask_modalities
-        self.min_available_modalities = min_available_modalities
-        self.split_json_path = split_json_path
         self.count = 0  # 三元组数据计数
 
         # 数据集分割
@@ -1137,16 +1065,17 @@ class JointDataset:
         self._test_ids: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
         
         # 检查是否存在分割JSON文件
+        split_json_path = os.path.join(dataset_root, 'dataset.json')
         if split_json_path and os.path.exists(split_json_path):
             print(f"从JSON文件加载数据集分割: {split_json_path}")
-            self._load_from_split_json()
+            self.load_from_split_json()
         else:
             # 加载数据并分割
-            self.load_all()
+            self.load_all_data()
             self.split_dataset()
         self.pair_samples()
     
-    def load_all(self):
+    def load_all_data(self):
         """加载 Instruction、Image、PointCloud 数据"""
         print(f"开始加载数据集: {self.dataset_root}")
         
@@ -1172,7 +1101,7 @@ class JointDataset:
                 
                 if matched_image:
                     for i, aff in enumerate(matched_image.labels):
-                        pair = (inst, matched_image.mask[i,:,:])  # NOTE: 一张图片可能对应多个inst（不同aff_type），因此使用时需要用对应的aff_type
+                        pair = (inst.id, (matched_image.id, i))  # NOTE: 一张图片可能对应多个inst（不同aff_type），因此使用时需要用对应的aff_type
                         text_image_pairs[obj_type][aff].append(pair)
                         self.count += 1
 
@@ -1184,8 +1113,8 @@ class JointDataset:
             for pc in pcs:
                 if pc is None or pc.labels is None:
                     continue
-                for label in pc.labels:
-                    pc_groups[obj_type][label].append(pc.id)
+                for idx, label in enumerate(pc.labels):
+                    pc_groups[obj_type][label].append((pc.id, idx))
         
         def _split_group(groups, inner, train_ratio, val_ratio):
             # 对每个分组进行分割
@@ -1233,8 +1162,169 @@ class JointDataset:
             
             return result
 
+        # 平衡每个 train/val/test 中的 pc 和图文数据
+        if self.balance_data:
+            print("平衡各分割集中的 pc 和图文数据...")  # Note: 是否必要？
+            
+            # 遍历所有 obj_type 和 aff_type 组合
+            all_obj_types = set(self._train_ids['ins'].keys()) | set(self._train_ids['pc'].keys())
+            
+            for obj_type in tqdm(all_obj_types):
+                # 获取该 obj_type 下所有的 aff_type
+                ins_aff_types = set(self._train_ids['ins'].get(obj_type, {}).keys())
+                pc_aff_types = set(self._train_ids['pc'].get(obj_type, {}).keys())
+                all_aff_types = ins_aff_types & pc_aff_types  # NOTE: 只平衡公共aff的数量
+                
+                for aff_type in tqdm(all_aff_types):
+                    # 对 train/val/test 分别进行平衡
+                    for split_ids in [self._train_ids, self._val_ids, self._test_ids]:
+                        # 获取当前分割中的 ins/img 和 pc 数量
+                        ins_list = split_ids['ins'].get(obj_type, {}).get(aff_type, [])
+                        img_list = split_ids['img'].get(obj_type, {}).get(aff_type, [])
+                        pc_list = split_ids['pc'].get(obj_type, {}).get(aff_type, [])
+                        
+                        # 跳过空列表
+                        if not ins_list or not pc_list:
+                            continue
+                        
+                        # 计算目标数量（取最大值）
+                        target_count = max(len(ins_list), len(pc_list))
+                        
+                        if target_count == 0:
+                            continue
+                        
+                        # 平衡 ins 和 img（它们是配对的，需要同步扩展）
+                        if ins_list and len(ins_list) < target_count:
+                            # 创建配对索引列表
+                            pair_indices = list(range(len(ins_list)))
+                            balanced_indices = _balance_by_copy(pair_indices, target_count)
+                            
+                            # 根据平衡后的索引重建列表
+                            split_ids['ins'][obj_type][aff_type] = [ins_list[i] for i in balanced_indices]
+                            split_ids['img'][obj_type][aff_type] = [img_list[i] for i in balanced_indices]
+                        
+                        # 平衡 pc
+                        if pc_list and len(pc_list) < target_count:
+                            split_ids['pc'][obj_type][aff_type] = _balance_by_copy(pc_list, target_count)
 
+            print("数据平衡完成")
+    
+    def pair_samples(self):
+        """
+        将 _train_ids, _val_ids, _test_ids 中的索引聚合成三元组数据
         
+        对于每个 (obj_type, aff_type) 组合，将 ins, img, pc 三种模态的数据按位置配对。
+        如果某个模态数据不足，用 None 补充。
+        
+        结果存储在 self.train_samples, self.val_samples, self.test_samples 中
+        """
+        def _pair_split(split_ids: Dict) -> List[JointDataSample]:
+            """
+            将单个分割集（train/val/test）的索引聚合成三元组
+            
+            Args:
+                split_ids: 分割索引字典，结构为 {modality: {obj_type: {aff_type: [ids]}}}
+            
+            Returns:
+                JointDataSample 列表
+            """
+            samples = []
+            
+            # 获取所有 obj_type（从三种模态中取并集）
+            all_obj_types = set()
+            for modality in ['ins', 'img', 'pc']:
+                if modality in split_ids:
+                    all_obj_types.update(split_ids[modality].keys())
+            
+            for obj_type in all_obj_types:
+                # 获取该 obj_type 下所有 aff_type（从三种模态中取并集）
+                all_aff_types = set()
+                for modality in ['ins', 'img', 'pc']:
+                    if modality in split_ids and obj_type in split_ids[modality]:
+                        all_aff_types.update(split_ids[modality][obj_type].keys())
+                
+                for aff_type in all_aff_types:
+                    # 获取各模态的索引列表
+                    ins_ids = split_ids.get('ins', {}).get(obj_type, {}).get(aff_type, [])
+                    img_ids = split_ids.get('img', {}).get(obj_type, {}).get(aff_type, [])
+                    pc_ids = split_ids.get('pc', {}).get(obj_type, {}).get(aff_type, [])
+                    
+                    # 计算最大长度
+                    max_len = max(len(ins_ids), len(img_ids), len(pc_ids))
+                    
+                    if max_len == 0:
+                        continue
+                    
+                    # 按位置配对，不足的用 None 补充
+                    for i in range(max_len):
+                        # 获取 Instruction
+                        ins = Instruction.get_by_id(obj_type, ins_ids[i]) if i < len(ins_ids) else None
+                        
+                        # 获取 Image 和 GT
+                        image, img_mask_idx = None, None 
+                        if i < len(img_ids):
+                            image = Image.get_by_id(obj_type,  img_ids[i][0])
+                            img_mask_idx = img_ids[i][1]
+                        
+                        # 获取 PointCloud 和 GT
+                        pc = None
+                        pc_mask_idx = None
+                        if i < len(pc_ids):
+                            pc = PointCloud.get_by_id(pc_ids[i][0])
+                            pc_mask_idx = pc_ids[i][1]
+                        
+                        # 至少有一个模态有数据才创建样本
+                        if ins is not None or image is not None or pc is not None:
+                            sample = JointDataSample(
+                                ins=ins,
+                                img=image,
+                                pc=pc,
+                                img_mask_idx=img_mask_idx,
+                                pc_mask_idx=pc_mask_idx
+                            )
+                            samples.append(sample)
+            
+            return samples
+        
+        print("聚合三元组数据...")
+        self.train_samples = _pair_split(self._train_ids)
+        self.val_samples = _pair_split(self._val_ids)
+        self.test_samples = _pair_split(self._test_ids)
+        
+        print(f"三元组聚合完成: train={len(self.train_samples)}, val={len(self.val_samples)}, test={len(self.test_samples)}")
+
+    def load_from_split_json(self, split_json_path: str):
+        """
+        从分割JSON文件加载数据集
+        """
+        if not os.path.exists(split_json_path):
+            raise FileNotFoundError(f"分割JSON文件不存在: {split_json_path}")
+        
+        # 加载JSON文件
+        with open(split_json_path, 'r', encoding='utf-8') as f:
+            split_data = json.load(f)
+        
+        # 从metadata中提取参数
+        metadata = split_data.get('metadata', {})
+
+        self.train_ratio = metadata['train_ratio']
+        self.val_ratio = metadata['val_ratio']
+        self.test_ratio = metadata['test_ratio']
+        self.random_seed = metadata['random_seed']
+        self.keep_id = metadata['keep_id']
+        self.balance_data = metadata['balance_data']
+        self.count = 0
+        
+        # 初始化样本列表
+        self.train_samples = []
+        self.val_samples = []
+        self.test_samples = []
+        
+        # 加载分割索引
+        self._train_ids = split_data.get('train', {})
+        self._val_ids = split_data.get('val', {})
+        self._test_ids = split_data.get('test', {})
+
     def save_split_json(self, save_path: str = None) -> str:
         """
         将数据集分割结果保存为JSON文件
@@ -1252,9 +1342,9 @@ class JointDataset:
                 "random_seed": 114514
             },
             "train": {
-                "ins": {"obj_type": {"aff_type": [id1, id2, ...]}},
-                "img": {"obj_type": {"aff_type": [id1, id2, ...]}},
-                "pc": {"obj_type": {"aff_type": [id1, id2, ...]}}
+                'ins': {obj_type: {aff_type: [id1, id2, ...]}},
+                'img': {obj_type: {aff_type: [(id, mask_idx), ...]}},
+                'pc': {obj_type: {aff_type: [(id, mask_idx), ...]}}
             },
             "val": {...},
             "test": {...}
@@ -1269,35 +1359,6 @@ class JointDataset:
         if save_path is None:
             save_path = os.path.join(self.dataset_root, 'dataset.json')
         
-        # 构建各集合的模态索引结构
-        def build_modality_index(samples: List[JointDataSample]) -> Dict[str, Dict[str, Dict[str, List[int]]]]:
-            """
-            构建模态索引结构: {modality: {obj_type: {aff_type: [ids]}}}
-            """
-            result = {
-                'ins': defaultdict(lambda: defaultdict(list)),
-                'img': defaultdict(lambda: defaultdict(list)),
-                'pc': defaultdict(lambda: defaultdict(list))
-            }
-            
-            for sample in samples:
-                obj_type = sample.obj_type
-                aff_type = sample.aff_type
-                
-                # 记录各模态的ID
-                if sample.instruction is not None:
-                    result['ins'][obj_type][aff_type].append(sample.instruction.id)
-                if sample.image is not None:
-                    result['img'][obj_type][aff_type].append(sample.image.id)
-                if sample.pointcloud is not None:
-                    result['pc'][obj_type][aff_type].append(sample.pointcloud.id)
-            
-            # 转换为普通dict以便JSON序列化
-            return {
-                modality: {
-                    obj: dict(affs) for obj, affs in objs.items()
-                } for modality, objs in result.items()
-            }
         
         # 构建JSON数据
         split_data = {
@@ -1311,9 +1372,9 @@ class JointDataset:
                 'test_ratio': self.test_ratio,
                 'random_seed': self.random_seed
             },
-            'train': build_modality_index(self.train_samples),
-            'val': build_modality_index(self.val_samples),
-            'test': build_modality_index(self.test_samples)
+            'train': self._train_ids,
+            'val': self._val_ids,
+            'test': self._test_ids
         }
         
         # 保存JSON文件
@@ -1321,9 +1382,8 @@ class JointDataset:
             json.dump(split_data, f, indent=4, ensure_ascii=False)
         
         print(f"数据集分割结果已保存至: {save_path}")
-        return save_path
     
-    def _apply_mask_to_samples(self, samples: List[JointDataSample]) -> List[JointDataSample]:
+    def random_mask(self, samples: List[JointDataSample], mask_prob=(0, 0.01, 0.003)) -> List[JointDataSample]:
         """
         对样本列表应用模态掩码
         
@@ -1334,65 +1394,205 @@ class JointDataset:
             应用掩码后的样本列表（原样本会被修改）
         """
         for sample in samples:
-            # 先重置掩码状态
-            sample.reset_mask()
-            
-            # 应用掩码
-            if self.mask_modalities is not None:
-                # 固定掩码指定的模态
-                sample.apply_mask(modalities=self.mask_modalities, 
-                                  min_available=self.min_available_modalities)
-            elif self.mask_prob > 0:
-                # 按概率随机掩码
-                sample.apply_mask(mask_prob=self.mask_prob,
-                                  min_available=self.min_available_modalities)
+            sample.apply_mask(mask_prob=mask_prob)
         
         return samples
     
-    def get_sample_with_mask(self, sample: JointDataSample, 
-                             modalities: List[str] = None,
-                             mask_prob: float = None) -> JointDataSample:
+    def __len__(self) -> int:
+        """返回数据集总样本数"""
+        return len(self.train_samples) + len(self.val_samples) + len(self.test_samples)
+    
+    def __getitem__(self, index: int) -> Dict[str, Any]:
         """
-        获取单个样本并应用指定的掩码
+        根据索引获取单个样本数据
+        
+        索引范围: [0, len(train) + len(val) + len(test))
+        按顺序依次为: train -> val -> test
         
         Args:
-            sample: 要处理的样本
-            modalities: 要 mask 的模态列表
-            mask_prob: 每个模态被 mask 的概率
+            index: 样本索引
         
         Returns:
-            应用掩码后的样本
+            包含样本数据的字典
         """
-        sample.reset_mask()
-        if modalities is not None:
-            sample.apply_mask(modalities=modalities, 
-                              min_available=self.min_available_modalities)
-        elif mask_prob is not None:
-            sample.apply_mask(mask_prob=mask_prob,
-                              min_available=self.min_available_modalities)
-        return sample
-    
-    def reset_all_masks(self):
-        """重置所有样本的掩码状态"""
-        for sample in self.samples:
-            sample.reset_mask()
-    
-    def get_statistics(self) -> Dict[str, Any]:
-        """获取数据集统计信息"""
-        stats = {
-            'total_samples': len(self.samples),
-            'train_samples': len(self.train_samples),
-            'val_samples': len(self.val_samples),
-            'test_samples': len(self.test_samples),
-            'obj_types': defaultdict(int),
-            'aff_types': defaultdict(int),
-        }
+        train_len = len(self.train_samples)
+        val_len = len(self.val_samples)
         
-        for sample in self.samples:
-            stats['obj_types'][sample.obj_type] += 1
-            stats['aff_types'][sample.aff_type] += 1
+        if index < 0:
+            index = len(self) + index
         
-        return stats
+        if index < train_len:
+            sample = self.train_samples[index]
+            split = 'train'
+        elif index < train_len + val_len:
+            sample = self.val_samples[index - train_len]
+            split = 'val'
+        else:
+            sample = self.test_samples[index - train_len - val_len]
+            split = 'test'
+        
+        data = sample.get_data()
+        data['split'] = split
+        data['index'] = index
+        data['obj_type'] = sample.obj_type
+        data['aff_type'] = sample.aff_type
+        return data
+    
+    def get_train_data(self, index: int = None, apply_mask: bool = False, mask_prob: Tuple[float, float, float] = (0.01, 0.02, 0.003)) -> Dict[str, Any]:
+        """
+        获取训练集数据
+        
+        Args:
+            index: 样本索引，如果为 None 则返回整个训练集
+            apply_mask: 是否应用随机掩码
+            mask_prob: 各模态 (ins, img, pc) 被掩码的概率
+        
+        Returns:
+            单个样本字典或样本字典列表
+        """
+        return self._get_split_data(self.train_samples, index, apply_mask, mask_prob)
+    
+    def get_val_data(self, index: int = None, apply_mask: bool = False, mask_prob: Tuple[float, float, float] = (0.01, 0.02, 0.003)) -> Dict[str, Any]:
+        """
+        获取验证集数据
+        
+        Args:
+            index: 样本索引，如果为 None 则返回整个验证集
+            apply_mask: 是否应用随机掩码
+            mask_prob: 各模态 (ins, img, pc) 被掩码的概率
+        
+        Returns:
+            单个样本字典或样本字典列表
+        """
+        return self._get_split_data(self.val_samples, index, apply_mask, mask_prob)
+    
+    def get_test_data(self, index: int = None, apply_mask: bool = False, mask_prob: Tuple[float, float, float] = (0.01, 0.02, 0.003)) -> Dict[str, Any]:
+        """
+        获取测试集数据
+        
+        Args:
+            index: 样本索引，如果为 None 则返回整个测试集
+            apply_mask: 是否应用随机掩码
+            mask_prob: 各模态 (ins, img, pc) 被掩码的概率
+        
+        Returns:
+            单个样本字典或样本字典列表
+        """
+        return self._get_split_data(self.test_samples, index, apply_mask, mask_prob)
+    
+    def _get_split_data(self, samples: List[JointDataSample], index: int = None, apply_mask: bool = False, mask_prob: Tuple[float, float, float] = (0.01, 0.02, 0.003)) -> Dict[str, Any]:
+        """
+        内部方法：从指定分割集获取数据
+        
+        Args:
+            samples: 样本列表
+            index: 样本索引，如果为 None 则返回整个列表
+            apply_mask: 是否应用随机掩码
+            mask_prob: 各模态 (ins, img, pc) 被掩码的概率
+        
+        Returns:
+            单个样本字典或样本字典列表
+        """
+        if index is not None:
+            # 获取单个样本
+            if index < 0:
+                index = len(samples) + index
+            if index < 0 or index >= len(samples):
+                raise IndexError(f"索引 {index} 超出范围 [0, {len(samples)})")
+            
+            sample = samples[index]
+            if apply_mask:
+                sample.apply_mask(mask_prob=mask_prob)
+            
+            data = sample.get_data()
+            data['obj_type'] = sample.obj_type
+            data['aff_type'] = sample.aff_type
+            data['sample_id'] = sample.id
+            return data
+        else:
+            # 获取整个列表
+            result = []
+            for i, sample in enumerate(samples):
+                if apply_mask:
+                    sample.apply_mask(mask_prob=mask_prob)
+                
+                data = sample.get_data()
+                data['obj_type'] = sample.obj_type
+                data['aff_type'] = sample.aff_type
+                data['sample_id'] = sample.id
+                result.append(data)
+            return result
+    
+    def get_batch(self, split: str, batch_size: int, shuffle: bool = True, apply_mask: bool = False, mask_prob: Tuple[float, float, float] = (0.01, 0.02, 0.003)):
+        """
+        获取批量数据的生成器
+        
+        Args:
+            split: 数据集分割类型 ('train', 'val', 'test')
+            batch_size: 批量大小
+            shuffle: 是否打乱数据
+            apply_mask: 是否应用随机掩码
+            mask_prob: 各模态 (ins, img, pc) 被掩码的概率
+        
+        Yields:
+            每次返回一个批次的数据列表
+        """
+        if split == 'train':
+            samples = self.train_samples
+        elif split == 'val':
+            samples = self.val_samples
+        elif split == 'test':
+            samples = self.test_samples
+        else:
+            raise ValueError(f"未知的分割类型: {split}，应为 'train', 'val' 或 'test'")
+        
+        indices = list(range(len(samples)))
+        if shuffle:
+            random.shuffle(indices)
+        
+        for start_idx in range(0, len(indices), batch_size):
+            batch_indices = indices[start_idx:start_idx + batch_size]
+            batch_data = []
+            
+            for idx in batch_indices:
+                sample = samples[idx]
+                if apply_mask:
+                    sample.apply_mask(mask_prob=mask_prob)
+                
+                data = sample.get_data()
+                data['obj_type'] = sample.obj_type
+                data['aff_type'] = sample.aff_type
+                data['sample_id'] = sample.id
+                batch_data.append(data)
+            
+            yield batch_data
+    
+    def print_statistics(self):
+        """打印数据集统计信息"""
+        print("\n" + "=" * 60)
+        print("数据集统计信息")
+        print("=" * 60)
+        print(f"数据集根目录: {self.dataset_root}")
+        print(f"总样本数: {len(self)}")
+        print(f"  - 训练集: {len(self.train_samples)} ({self.train_ratio * 100:.1f}%)")
+        print(f"  - 验证集: {len(self.val_samples)} ({self.val_ratio * 100:.1f}%)")
+        print(f"  - 测试集: {len(self.test_samples)} ({self.test_ratio * 100:.1f}%)")
+        print(f"随机种子: {self.random_seed}")
+        print(f"数据平衡: {'启用' if self.balance_data else '禁用'}")
+        
+        # 统计各物体类型和 affordance 类型的分布
+        obj_aff_count = defaultdict(lambda: defaultdict(int))
+        for sample in self.train_samples + self.val_samples + self.test_samples:
+            obj_aff_count[sample.obj_type][sample.aff_type] += 1
+        
+        print("\n物体类型和 Affordance 分布:")
+        for obj_type, aff_dict in sorted(obj_aff_count.items()):
+            print(f"  {obj_type}:")
+            for aff_type, count in sorted(aff_dict.items()):
+                print(f"    - {aff_type}: {count}")
+        print("=" * 60 + "\n")
+    
+    
     
 
 def main():
@@ -1416,41 +1616,25 @@ def main():
                        help='随机种子')
     parser.add_argument('--no-balance', action='store_true',
                        help='禁用数据平衡（默认启用）')
-    parser.add_argument('--mask-prob', type=float, default=0.0,
-                       help='每个模态被 mask 的概率（0.0-1.0）')
-    parser.add_argument('--mask-modalities', type=str, nargs='+', default=None,
-                       choices=['ins', 'img', 'pc'],
-                       help='固定要 mask 的模态列表')
-    parser.add_argument('--min-available', type=int, default=1,
-                       help='最少保留的可用模态数量')
-    parser.add_argument('--split-json', type=str, default=None,
-                       help='数据集分割JSON文件路径，如果存在则从中加载分割结果')
     parser.add_argument('--save-split', action='store_true',
                        help='保存数据集分割结果为JSON文件')
     parser.add_argument('--save-split-path', type=str, default=None,
                        help='保存分割结果的JSON文件路径（默认为 dataset_root/dataset.json）')
     parser.add_argument('--keep-id', action='store_true', default=True,
                        help='保持原有的ID（默认启用）')
-    parser.add_argument('--no-keep-id', action='store_false', dest='keep_id',
-                       help='不保持原有ID，重新分配')
     
     args = parser.parse_args()
     
     # 创建数据集
     dataset = JointDataset(
         dataset_root=args.dataset_root,
-        obj_type=args.obj_type,
-        aff_type=args.aff_type,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
         random_seed=args.seed,
         keep_id=args.keep_id,
         balance_data=not args.no_balance,
-        mask_prob=args.mask_prob,
-        mask_modalities=args.mask_modalities,
-        min_available_modalities=args.min_available,
-        split_json_path=args.split_json
+        mask_prob=args.mask_prob
     )
     
     # 保存分割结果
