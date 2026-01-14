@@ -29,7 +29,7 @@ if __name__ == '__main__':
     # 加载或创建 info_dict
     if args.info_file is not None:
         info_dict = load_info(args.info_file)
-        print(f"已从 {args.info_file} 加载编号信息，将继续编号")
+        print("开始继续编号")
     else:
         info_dict = create_info_dict()
         print("未指定 info 文件，从头开始编号")
