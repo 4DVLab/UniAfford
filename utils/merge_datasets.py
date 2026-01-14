@@ -1,5 +1,5 @@
 """
-将dataset.py处理的不同位置数据整合为同一个数据集（合并所有的Ins.csv）
+将dataset.py处理的不同位置数据整合为同一个数据集（合并所有的Ins.csv）但不处理info.json
 """
 import csv
 import os
@@ -8,13 +8,15 @@ from collections import defaultdict
 import shutil
 import json
 from common import clean_quotes
+from tqdm import tqdm
+from base_dataset import create_info_dict, load_info, save_info
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="将dataset.py处理的不同位置数据整合为同一个数据集（合并所有的Ins.csv）")
     parser.add_argument('-i', '--input', type=str, nargs="+", help='输入数据集的根目录，按照物体-模态分类')
-    parser.add_argument('-o', '--output', type=str, help='输出位置', default='/mnt/data/datasets/sorted_23d')
-    parser.add_argument('-f', '--filter', action='store_true', help='仅保留包含三元组的数据', default=True)
+    parser.add_argument('-o', '--output', type=str, help='输出位置', default='/mnt/data/datasets/2D-3D-JointAffordance/merged')
+    parser.add_argument('-f', '--filter', action='store_true', help='仅保留包含三元组的数据', default=False)
 
     args = parser.parse_args()
 
@@ -72,35 +74,31 @@ if __name__ == '__main__':
 
     # 收集物体模态信息
     obj_modalities = defaultdict(set)
-    info_dict = {
-            'PointCloud': defaultdict(lambda: defaultdict(int)),
-            'Image': defaultdict(lambda: defaultdict(int)),
-            'Instruction': defaultdict(lambda: defaultdict(int)),
-        }
+    info_dict = create_info_dict()
+
 
     if args.filter:
         print("正在收集物体模态信息...")
 
         # 遍历所有输入数据集目录
-        for dataset_dir in args.input:
+        for dataset_dir in tqdm(args.input, desc="扫描数据集"):
             # 加载info数据
-            info_file = os.path.join(args.input, 'info.json')
+            info_file = os.path.join(dataset_dir, 'info.json')
             if os.path.exists(info_file):
                 with open(info_file, 'r') as f:
                     loaded_dict = json.load(f)
                     for m, _ in info_dict.items():
-                        for obj_type, vals in loaded_dict.get(k, {}).items():
-                            for k, v in vals.items():
-                                info_dict[m][obj_type][k] = max(info_dict[m][obj_type][k], v)
+                        for obj_type, vals in loaded_dict.get(m, {}).items(): 
+                            for key, v in vals.items(): 
+                                info_dict[m][obj_type][key] = max(info_dict[m][obj_type][key], v)
 
             if not os.path.exists(dataset_dir):
                 print(f"警告: 数据集目录不存在: {dataset_dir}")
                 continue
 
-            for obj_name in os.listdir(dataset_dir):
+            obj_list = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
+            for obj_name in tqdm(obj_list, desc=f"扫描物体 ({os.path.basename(dataset_dir)})", leave=False):
                 obj_path = os.path.join(dataset_dir, obj_name)
-                if not os.path.isdir(obj_path):
-                    continue
 
                 # 获取该物体的所有模态
                 for modality in os.listdir(obj_path):
@@ -120,40 +118,25 @@ if __name__ == '__main__':
         print(f"筛选后保留 {len(filtered_objects)} 个物体")
 
         # 复制筛选后的数据
-        for dataset_dir in args.input:
-            for obj_name in os.listdir(dataset_dir):
-                if obj_name in filtered_objects:
-                    obj_path = os.path.join(dataset_dir, obj_name)
-                    if os.path.isdir(obj_path):
-                        print(f"复制物体: {obj_name}")
-                        copy_obj(obj_path, obj_name)
+        for dataset_dir in tqdm(args.input, desc="复制数据集"):
+            obj_list = [d for d in os.listdir(dataset_dir) if d in filtered_objects and os.path.isdir(os.path.join(dataset_dir, d))]
+            for obj_name in tqdm(obj_list, desc=f"复制物体 ({os.path.basename(dataset_dir)})", leave=False):
+                obj_path = os.path.join(dataset_dir, obj_name)
+                copy_obj(obj_path, obj_name)
 
-        with open(os.path.join(args.output, 'info.json'), 'w', encoding='utf-8') as f:
-            save_info = {
-                'PointCloud': defaultdict(lambda: defaultdict(int)),
-                'Image': defaultdict(lambda: defaultdict(int)),
-                'Instruction': defaultdict(lambda: defaultdict(int)),
-            }
-
-            for m,_ in info_dict:
-                for o in info_dict[m]:
-                    if o in filtered_objects:
-                        save_info[m][o] = info_dict[m][o]
-
-            json.dump(save_info, f, ensure_ascii=False, indent=2)
 
     else:
         # 不过滤，复制所有数据
         print("复制所有数据（不过滤）...")
-        for dataset_dir in args.input:
-            for obj_name in os.listdir(dataset_dir):
+        for dataset_dir in tqdm(args.input, desc="复制数据集"):
+            if not os.path.exists(dataset_dir):
+                print(f"警告: 数据集目录不存在: {dataset_dir}")
+                continue
+            
+            obj_list = [d for d in os.listdir(dataset_dir) if os.path.isdir(os.path.join(dataset_dir, d))]
+            for obj_name in tqdm(obj_list, desc=f"复制物体 ({os.path.basename(dataset_dir)})", leave=False):
                 obj_path = os.path.join(dataset_dir, obj_name)
-                if os.path.isdir(obj_path):
-                    print(f"复制物体: {obj_name}")
-                    copy_obj(obj_path, obj_name)
-
-        with open(os.path.join(args.output, 'info.json'), 'w', encoding='utf-8') as f:
-            json.dump(info_dict, f, ensure_ascii=False, indent=2)
+                copy_obj(obj_path, obj_name)
 
     print("数据处理完成!")
     print(f"输出目录: {args.output}")
