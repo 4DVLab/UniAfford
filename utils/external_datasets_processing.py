@@ -10,7 +10,7 @@ import warnings
 import numpy as np
 import cv2
 from collections import defaultdict
-from base_dataset import Instruction, Image, PointCloud
+from base_dataset import Instruction, Image, PointCloud, load_info, save_info, create_info_dict
 from common import resolve_path
 
 # 全局参数
@@ -416,33 +416,14 @@ if __name__ == "__main__":
     os.makedirs(output_dir, exist_ok=True)
 
 
-    # 数据集的统计信息，只在构建数据集的时候使用
-    info_file = os.path.join(DEFAULT_INPUT_DIR, 'info.json')
-    info_dict = {
-        'PointCloud': defaultdict(lambda: defaultdict(int)),  # 对应PointCloud.count
-        'Image': defaultdict(lambda: defaultdict(int)),
-        'Instruction': defaultdict(lambda: defaultdict(int)),
-    }
-
     # 如果要增加某个数据集同时继续编号，则需要指定--info_file加载输出数据集位置下的info.json
-    keep_id = False
     if args.info_file is not None:
-        keep_id =True
-        info_file = resolve_path(args.info_file)
-
-        if os.path.exists(info_file):
-            with open(info_file, 'r') as f:
-                loaded_dict = json.load(f)
-                for k, v in info_dict.items():
-                    for obj_type, vals in loaded_dict.get(k, {}).items():
-                        info_dict[k][obj_type] = defaultdict(int, vals)
-
-                # 恢复 cls.count计数
-                PointCloud.count = info_dict['PointCloud']
-                Image.count = info_dict['Image']
-                Instruction.count = info_dict['Instruction']
-        else:
-            warnings.warn(f"没有找到info.json: {info_file}, 使用初始info_dict")
+        keep_id = True
+        info_file_path = resolve_path(args.info_file)
+        info_dict = load_info(info_file_path)
+    else:
+        keep_id = False
+        info_dict = create_info_dict()
 
 
     # 整理模态输入
@@ -504,25 +485,6 @@ if __name__ == "__main__":
         err = e
 
     """  ----------------------------------- 保存信息文件 -------------------------------------  """
-
-    # 更新 PointCloud.count（保留最大的计数）
-    for obj, v in PointCloud.count.items():
-        for aff, count in v.items():
-            current_max = info_dict['PointCloud'][obj][aff]
-            info_dict['PointCloud'][obj][aff] = max(count, current_max)
-
-    # 更新 Image.id（保留最大的计数）
-    for obj, v in Image.count.items():
-        for aff, count in v.items():
-            current_max = info_dict['Image'][obj][aff]
-            info_dict['Image'][obj][aff] = max(count, current_max)
-
-    # 更新 Instruction.id （直接覆盖）
-    info_dict['Instruction'] = Instruction.count
-
-    info_file = os.path.join(output_dir, 'info.json')
-    with open(info_file, 'w') as f:
-        json.dump(info_dict, f, ensure_ascii=False, indent=2)
-
+    save_info(output_dir, info_dict)
 
     if err: raise err

@@ -4,6 +4,7 @@
 """
 import os
 import random
+import warnings
 from tqdm import tqdm
 import json
 from typing import List, Tuple, Optional, Dict, Any
@@ -12,6 +13,88 @@ import numpy as np
 import open3d as o3d
 import cv2
 import csv
+
+
+""" ------------------------------------ Info 信息管理工具 ----------------------------------- """
+
+def create_info_dict() -> Dict[str, Dict[str, Dict[str, int]]]:
+    """
+    创建一个空的 info_dict 结构
+    """
+    return {
+        'PointCloud': defaultdict(lambda: defaultdict(int)),
+        'Image': defaultdict(lambda: defaultdict(int)),
+        'Instruction': defaultdict(lambda: defaultdict(int)),
+    }
+
+def load_info(file_path: str) -> Dict[str, Dict[str, Dict[str, int]]]:
+    """
+    从 info.json 文件加载数据集统计信息，并恢复各类的计数器
+    """
+    info_dict = create_info_dict()
+    
+    if os.path.exists(file_path):
+        with open(file_path, 'r', encoding='utf-8') as f:
+            loaded_dict = json.load(f)
+            for k in info_dict.keys():
+                for obj_type, vals in loaded_dict.get(k, {}).items():
+                    info_dict[k][obj_type] = defaultdict(int, vals)
+            
+            # 恢复 cls.count 计数
+            PointCloud.count = info_dict['PointCloud']
+            Image.count = info_dict['Image']
+            Instruction.count = info_dict['Instruction']
+        
+        print(f"已从 {file_path} 加载统计信息")
+    else:
+        warnings.warn(f"没有找到 info.json: {file_path}, 使用初始 info_dict")
+    
+    return info_dict
+
+def save_info(output_dir: str, info_dict: Dict[str, Dict[str, Dict[str, int]]] = None) -> str:
+    """
+    保存数据集统计信息到 info.json 文件
+    
+    Args:
+        output_dir: 输出目录路径
+        info_dict: 可选，已有的 info_dict；如果为 None，则从当前类计数器创建
+    
+    Returns:
+        info_file: 保存的 info.json 文件路径
+    """
+    if info_dict is None:
+        info_dict = create_info_dict()
+    
+    # 更新 PointCloud.count（保留最大的计数）
+    for obj, v in PointCloud.count.items():
+        for aff, count in v.items():
+            current_max = info_dict['PointCloud'][obj][aff]
+            info_dict['PointCloud'][obj][aff] = max(count, current_max)
+    
+    # 更新 Image.count（保留最大的计数）
+    for obj, v in Image.count.items():
+        for aff, count in v.items():
+            current_max = info_dict['Image'][obj][aff]
+            info_dict['Image'][obj][aff] = max(count, current_max)
+    
+    # 更新 Instruction.count（直接覆盖）
+    for obj, v in Instruction.count.items():
+        info_dict['Instruction'][obj] = dict(v)
+    
+    # 转换 defaultdict 为普通 dict 以便 JSON 序列化
+    serializable_dict = {}
+    for modality, obj_dict in info_dict.items():
+        serializable_dict[modality] = {}
+        for obj_type, aff_dict in obj_dict.items():
+            serializable_dict[modality][obj_type] = dict(aff_dict)
+    
+    file_path = os.path.join(output_dir, 'info.json')
+    with open(file_path, 'w', encoding='utf-8') as f:
+        json.dump(serializable_dict, f, ensure_ascii=False, indent=2)
+    
+    print(f"统计信息已保存至: {file_path}")
+    return file_path
+
 
 """ ------------------------------------ 3种基础模态的支持 ----------------------------------- """
 class PointCloud:
