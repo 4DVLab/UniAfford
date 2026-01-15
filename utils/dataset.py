@@ -158,16 +158,28 @@ class _BaseDataset(Dataset):
         
         # 处理点云数据
         if data['pc'] is not None:
-            pts, n = data['pc'], len(data['pc'])
+            pts = data['pc']
+            # 确保 pts 是 (N, 3) 形状
+            if pts.ndim != 2 or pts.shape[1] != 3:
+                pts = pts.reshape(-1, 3)
+            n = pts.shape[0]
             idx = np.random.choice(n, self.num_points, replace=(n < self.num_points))
-            sp = pts[idx] - np.mean(pts[idx], axis=0)
+            sampled_pts = pts[idx]  # (num_points, 3)
+            sp = sampled_pts - np.mean(sampled_pts, axis=0)
             md = np.max(np.sqrt(np.sum(sp ** 2, axis=1)))
-            result['point_clouds'] = torch.from_numpy((sp / md) if md > 0 else sp).float()
+            normed_sp = (sp / md) if md > 0 else sp
+            result['point_clouds'] = torch.from_numpy(normed_sp).float()  # (num_points, 3)
             result['has_point_cloud'] = True
             if data['pc_gt'] is not None:
-                pm = data['pc_gt'].T[idx]
-                result['pc_masks'] = torch.from_numpy((pm.astype(np.float32) / 255.0) if isinstance(pm, np.ndarray) and pm.max() > 1 else pm.astype(np.float32)).float()
-        
+                pc_gt = data['pc_gt']
+                # 兼容 pc_gt 是 (N,) 或者 (N, 1) 形状
+                if pc_gt.ndim == 2 and pc_gt.shape[1] == 1:
+                    pc_gt = pc_gt[:, 0]
+                pm = pc_gt[idx]  # (num_points,)
+                pm = pm.astype(np.float32)
+                if pm.max() > 1:
+                    pm = pm / 255.0
+                result['pc_masks'] = torch.from_numpy(pm).float()  # (num_points,)
         # 写入缓存
         self._sample_cache[sample_id] = result
 
