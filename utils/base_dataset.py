@@ -21,34 +21,39 @@ def create_info_dict() -> Dict[str, Dict[str, Dict[str, int]]]:
     """
     创建一个空的 info_dict 结构
     """
-    return {
+    info_dict = {
         'PointCloud': defaultdict(lambda: defaultdict(int)),
         'Image': defaultdict(lambda: defaultdict(int)),
         'Instruction': defaultdict(lambda: defaultdict(int)),
     }
+    # 兼容缩写
+    info_dict['pc'] = info_dict['PointCloud']
+    info_dict['img'] = info_dict['Image']
+    info_dict['ins'] = info_dict['Instruction']
+    return info_dict
 
 def load_info(file_path: str) -> Dict[str, Dict[str, Dict[str, int]]]:
     """
     从 info.json 文件加载数据集统计信息，并恢复各类的计数器
     """
     info_dict = create_info_dict()
-    
+   
     if os.path.exists(file_path):
         with open(file_path, 'r', encoding='utf-8') as f:
             loaded_dict = json.load(f)
             for k in info_dict.keys():
                 for obj_type, vals in loaded_dict.get(k, {}).items():
                     info_dict[k][obj_type] = defaultdict(int, vals)
-            
+           
             # 恢复 cls.count 计数
             PointCloud.count = info_dict['PointCloud']
             Image.count = info_dict['Image']
             Instruction.count = info_dict['Instruction']
-        
+       
         print(f"已从 {file_path} 加载统计信息")
     else:
         warnings.warn(f"没有找到 info.json: {file_path}, 使用初始 info_dict")
-    
+   
     return info_dict
 
 def save_info(output_dir: str, info_dict: Dict[str, Dict[str, Dict[str, int]]] = None) -> str:
@@ -64,40 +69,65 @@ def save_info(output_dir: str, info_dict: Dict[str, Dict[str, Dict[str, int]]] =
     """
     if info_dict is None:
         info_dict = create_info_dict()
-    
+   
     # 更新 PointCloud.count（保留最大的计数）
     for obj, v in PointCloud.count.items():
         for aff, count in v.items():
             current_max = info_dict['PointCloud'][obj][aff]
             info_dict['PointCloud'][obj][aff] = max(count, current_max)
-    
+   
     # 更新 Image.count（保留最大的计数）
     for obj, v in Image.count.items():
         for aff, count in v.items():
             current_max = info_dict['Image'][obj][aff]
             info_dict['Image'][obj][aff] = max(count, current_max)
-    
+   
     # 更新 Instruction.count（直接覆盖）
     for obj, v in Instruction.count.items():
         info_dict['Instruction'][obj] = dict(v)
-    
+   
     # 转换 defaultdict 为普通 dict 以便 JSON 序列化
     serializable_dict = {}
     for modality, obj_dict in info_dict.items():
         serializable_dict[modality] = {}
         for obj_type, aff_dict in obj_dict.items():
             serializable_dict[modality][obj_type] = dict(aff_dict)
-    
+   
     file_path = os.path.join(output_dir, 'info.json')
     with open(file_path, 'w', encoding='utf-8') as f:
         json.dump(serializable_dict, f, ensure_ascii=False, indent=2)
-    
+   
     print(f"统计信息已保存至: {file_path}")
     return file_path
 
 
 """ ------------------------------------ 3种基础模态的支持 ----------------------------------- """
-class PointCloud:
+class Modality:
+    @classmethod
+    def get_by_id(cls, obj_type, idx):
+        def binary_search(target):
+            left, right = 0, len(cls.all[obj_type]) - 1
+           
+            while left <= right:
+                mid = (left + right) // 2  # 取中间索引
+               
+                if cls.all[obj_type][mid].id == target:
+                    return mid  # 找到了，返回索引
+                elif cls.all[obj_type][mid].id < target:
+                    left = mid + 1  # 目标在右半部分
+                else:
+                    right = mid - 1  # 目标在左半部分
+           
+        res_idx = binary_search(idx)
+        if res_idx is not None:
+            return cls.all[obj_type][res_idx]
+
+    @classmethod
+    def sort_by_id(cls):
+        for obj_type in cls.all.keys():
+            cls.all[obj_type].sort(key=lambda x: x.id)
+
+class PointCloud(Modality):
     all = defaultdict(list)
     count = defaultdict(lambda: defaultdict(int))
     """
@@ -119,7 +149,7 @@ class PointCloud:
     def __init__(self, points, obj_type, mask:list[np.ndarray]=None, labels:list=None, given_id:int=None):
         self.points = points
         self.obj_type = obj_type
-        
+       
         PointCloud.all[obj_type].append(self)
         PointCloud.count[obj_type]['ID'] += 1
         self.id = PointCloud.count[obj_type]['ID'] if given_id is None else given_id
@@ -133,7 +163,7 @@ class PointCloud:
 
         self.is_sorted = False
         self._hash = None
-        
+       
 
     """  ---------------------------------------- 读写相关 ---------------------------------------------  """
     def save_to(self, filepath):
@@ -149,10 +179,10 @@ class PointCloud:
 
         with open(filepath, 'w') as f:
             np.savetxt(f, data, delimiter=',', header=','.join(header))
-    
+   
     @staticmethod
-    def load_file(filepath, 
-            obj_type=None, 
+    def load_file(filepath,
+            obj_type=None,
             aff_type=None,
             keep_id: bool=False,
         ) -> 'PointCloud':
@@ -229,13 +259,13 @@ class PointCloud:
                 for e in v:
                     if e is not None:
                         if save_id is None: save_id = e.id  # 以第一个非 None的pc对象的id作为起始id
-                        else: save_id += 1 
+                        else: save_id += 1
                         e.save_to(os.path.join(dir_path, f'{e.obj_type}_{save_id}.csv')) # 保存时命名为 {obj_type}_{id}.csv
     @classmethod
     def load_all(cls,
             dataset_root_path,
             keep_id=False,
-            obj_type=None, 
+            obj_type=None,
             aff_type=None
         ):
         """
@@ -254,7 +284,7 @@ class PointCloud:
             if isinstance(obj_type, str):
                 obj_type = [obj_type]
             obj_type_set = set(obj_type)
-        
+       
         if aff_type is None:
             aff_type_set = None
         else:
@@ -263,7 +293,7 @@ class PointCloud:
             aff_type_set = set(aff_type)
 
         def iterator():
-            for obj_type_name in os.listdir(dataset_root_path):
+            for obj_type_name in tqdm(os.listdir(dataset_root_path), desc='加载PointCloud'):
                 # 物体类型过滤
                 if obj_type_set is not None and obj_type_name not in obj_type_set:
                     continue
@@ -271,21 +301,21 @@ class PointCloud:
                 dir_path = os.path.join(dataset_root_path, obj_type_name, 'PointCloud')
                 if not os.path.isdir(dir_path):
                     continue
-                for file in os.listdir(dir_path):
+                for file in tqdm(os.listdir(dir_path), leave=False, desc='PointCloud'):
                     file_path = os.path.join(dir_path, file)
                     if not os.path.isfile(file_path):
                         continue
-                    print(f'loading PC: {file_path}')
+                    # print(f'loading PC: {file_path}')
                     pc = cls.load_file(
                         file_path,
                         obj_type=obj_type_name,
-                        aff_type=aff_type,
+                        aff_type=aff_type_set,
                         keep_id=keep_id,
                     )
                     yield pc
-        
+       
         return iterator()
-    
+   
     @classmethod
     def load_and_save(cls, input_root, output_root, keep_id=False):
         id_counter = {}  # 用于记录每个 obj_type 的 id 计数
@@ -293,7 +323,7 @@ class PointCloud:
             dir_path = os.path.join(output_root, pc.obj_type, 'PointCloud')
             if not os.path.exists(dir_path):
                 os.makedirs(dir_path, exist_ok=True)
-            
+           
             # 根据 keep_id 决定文件名
             if keep_id:
                 file_id = pc.id
@@ -303,7 +333,7 @@ class PointCloud:
                     id_counter[pc.obj_type] = 0
                 id_counter[pc.obj_type] += 1
                 file_id = id_counter[pc.obj_type]
-            
+           
             pc.save_to(os.path.join(dir_path, f'{pc.obj_type}_{file_id}.csv'))
             pc.free_memory()
 
@@ -341,10 +371,10 @@ class PointCloud:
                 if self.mask.shape[1] <= idx: raise ValueError(f'Error in {self.obj_type}-{self.id}: mask的列数{self.mask.shape}和label的维度 {label} 不同')
 
                 mask_col = self.mask[:, idx]
-                
+               
                 # 白色背景
                 colors = np.full((self.points.shape[0], 3), [0.8, 0.8, 0.8])
-                
+               
                 # 有mask值的点：红色渐变，mask值越大颜色越浓（越亮）
                 mask_mask = mask_col > 0  # 找到所有非零mask的点
                 if mask_mask.any():
@@ -372,15 +402,6 @@ class PointCloud:
 
             self.is_sorted = True
             return True
-
-    @classmethod
-    def get_by_id(cls, obj_type, idx):
-        return cls.all[obj_type][idx-cls.all[obj_type][0].id]
-
-    @classmethod
-    def sort_by_id(cls):
-        for obj_type in cls.all.keys():
-            cls.all[obj_type].sort(key=lambda x: x.id)
 
     def free_memory(self):
         """释放自身占用的内存（不更改计数，用于不重复加载的情况）"""
@@ -413,15 +434,15 @@ class PointCloud:
     @classmethod
     def deduplicate(cls):
         """根据hash值去重合并数据"""
-        for obj_type, ls in tqdm(cls.all.items()):
+        for obj_type, ls in tqdm(cls.all.items(), desc='去重PointCloud'):
             loaded = dict()
-            for pc in tqdm(ls):
+            for pc in tqdm(ls, leave=False):
                 loaded[pc] = pc._merge(loaded.get(pc, None))
 
-class Image:
+class Image(Modality):
     all = defaultdict(list)
     count = defaultdict(lambda: defaultdict(int))
-    
+   
     def __init__(self, img:np.ndarray,
             obj_type,
             labels:list=None,
@@ -458,16 +479,6 @@ class Image:
         self.mask = aff_mask if aff_mask is not None else []
         self.obj_mask = obj_mask
         self.visible_mask = visible_mask
-
-
-    @classmethod
-    def get_by_id(cls, obj_type, idx):
-        return cls.all[obj_type][idx-cls.all[obj_type][0].id]
-
-    @classmethod
-    def sort_by_id(cls):
-        for obj_type in cls.all.keys():
-            cls.all[obj_type].sort(key=lambda x: x.id)
 
     @classmethod
     def save_all(cls, dataset_root_path, keep_id: bool=False):
@@ -550,24 +561,24 @@ class Image:
         img_display = self.img.copy()
         if img_display.dtype != np.uint8:
             img_display = np.clip(img_display, 0, 255).astype(np.uint8)
-        
+       
         # 显示原图
         cv2.imshow(f'Original - {self.obj_type}_{self.id}', img_display)
-        
+       
         # 显示affordance masks
         if len(self.mask) > 0:
             for idx, mask in enumerate(self.mask):
                 label = self.labels[idx] if idx < len(self.labels) else f'mask_{idx}'
-                
+               
                 # 如果指定了selected_labels，跳过不在列表中的
                 if selected_labels is not None and label not in selected_labels:
                     continue
-                
+               
                 # 确保mask是uint8格式
                 mask_display = mask.copy()
                 if mask_display.dtype != np.uint8:
                     mask_display = (mask_display * 255).clip(0, 255).astype(np.uint8)
-                
+               
                 if overlay:
                     # 在原图上叠加显示mask（使用红色半透明叠加）
                     mask_colored = cv2.applyColorMap(mask_display, cv2.COLORMAP_JET)
@@ -576,13 +587,13 @@ class Image:
                 else:
                     # 单独显示mask
                     cv2.imshow(f'Mask - {self.obj_type}_{self.id}_{label}', mask_display)
-        
+       
         # 显示obj_mask
         if self.obj_mask is not None and self.obj_mask.size != 0:
             obj_mask_display = self.obj_mask.copy()
             if obj_mask_display.dtype != np.uint8:
                 obj_mask_display = (obj_mask_display * 255).clip(0, 255).astype(np.uint8)
-            
+           
             if overlay:
                 # 在原图上叠加显示（使用绿色）
                 mask_colored = np.zeros_like(img_display)
@@ -591,13 +602,13 @@ class Image:
                 cv2.imshow(f'Overlay - {self.obj_type}_{self.id}_obj_mask', overlay_img)
             else:
                 cv2.imshow(f'Obj Mask - {self.obj_type}_{self.id}', obj_mask_display)
-        
+       
         # 显示visible_mask
         if self.visible_mask is not None and self.visible_mask.size != 0:
             vis_mask_display = self.visible_mask.copy()
             if vis_mask_display.dtype != np.uint8:
                 vis_mask_display = (vis_mask_display * 255).clip(0, 255).astype(np.uint8)
-            
+           
             if overlay:
                 # 在原图上叠加显示（使用蓝色）
                 mask_colored = np.zeros_like(img_display)
@@ -606,14 +617,14 @@ class Image:
                 cv2.imshow(f'Overlay - {self.obj_type}_{self.id}_visible_mask', overlay_img)
             else:
                 cv2.imshow(f'Visible Mask - {self.obj_type}_{self.id}', vis_mask_display)
-        
+       
         # 等待按键或自动关闭
         if wait_key:
             print(f"显示图片: {self.obj_type}_{self.id} - 按任意键关闭所有窗口")
             cv2.waitKey(0)
         else:
             cv2.waitKey(1000)  # 显示1秒
-        
+       
         cv2.destroyAllWindows()
 
     def resize(self, size, interpolation=cv2.INTER_LINEAR):
@@ -652,10 +663,10 @@ class Image:
             size = tuple(size)
         else:
             raise ValueError(f"Invalid size parameter: {size}")
-        
+       
         # 缩放原图（创建副本）
         resized_img = cv2.resize(self.img.copy(), size, interpolation=interpolation)
-        
+       
         # 缩放affordance masks（使用最近邻插值保持mask的离散性）
         mask_interpolation = cv2.INTER_NEAREST if interpolation == cv2.INTER_LINEAR else interpolation
         resized_masks = []
@@ -666,17 +677,17 @@ class Image:
                     resized_masks.append(resized_mask)
                 else:
                     resized_masks.append(None)
-        
+       
         # 缩放obj_mask
         resized_obj_mask = None
         if self.obj_mask is not None and self.obj_mask.size > 0:
             resized_obj_mask = cv2.resize(self.obj_mask.copy(), size, interpolation=mask_interpolation)
-        
+       
         # 缩放visible_mask
         resized_visible_mask = None
         if self.visible_mask is not None and self.visible_mask.size > 0:
             resized_visible_mask = cv2.resize(self.visible_mask.copy(), size, interpolation=mask_interpolation)
-        
+       
         # 创建新的Image对象
         resized_image = Image(
             img=resized_img,
@@ -687,7 +698,7 @@ class Image:
             visible_mask=resized_visible_mask,
             given_id=self.id  # 保持相同的id
         )
-        
+       
         # 由于使用了given_id，需要调整计数（因为__init__中已经增加了计数）
         # 将计数恢复到原来的值（因为这是同一个对象的缩放版本，不应该增加计数）
         Image.count[self.obj_type]['ID'] -= 1
@@ -696,7 +707,7 @@ class Image:
             for label in resized_image.labels:
                 if Image.count[resized_image.obj_type][label] > 0:
                     Image.count[resized_image.obj_type][label] -= 1
-        
+       
         return resized_image
 
     @classmethod
@@ -718,24 +729,25 @@ class Image:
         """
         # 确定目录路径（图片的父目录rgb的父目录Image）
         dir_path = os.path.dirname(os.path.dirname(filepath))
+        rgb_filename = os.path.basename(filepath)
+       
+        # 从文件名提取 obj_type 和 id: {obj_type}_{id}.png
+        base_name = os.path.splitext(rgb_filename)[0]
+        parts = base_name.rsplit('_', 1)
+        if len(parts) == 2:
+            inferred_obj_type = parts[0]
+            inferred_id = parts[1]
+        else:
+            raise ValueError(f"Cannot parse obj_type and id from filename: {rgb_filename}")
+       
         if obj_type is None:
-            rgb_filename = os.path.basename(filepath)
-            
-            # 从文件名提取 obj_type 和 id: {obj_type}_{id}.png
-            base_name = os.path.splitext(rgb_filename)[0]
-            parts = base_name.rsplit('_', 1)
-            if len(parts) == 2:
-                inferred_obj_type = parts[0]
-                inferred_id = parts[1]
-            else:
-                raise ValueError(f"Cannot parse obj_type and id from filename: {rgb_filename}")
             obj_type = inferred_obj_type
-        
+       
         # 加载RGB图片
         img = cv2.imread(filepath)
         if img is None:
             raise ValueError(f"Failed to load image: {filepath}")
-        
+       
         # 加载affordance masks
         aff_mask = []
         labels = []
@@ -750,25 +762,25 @@ class Image:
                 aff_set = None
 
             # 遍历mask目录下的所有label子目录
-            for label_dir in os.listdir(mask_dir):
+            for aff in os.listdir(mask_dir):
                 # aff 过滤：如果指定了 aff_type，则只加载在列表中的子目录
-                if aff_set is not None and label_dir not in aff_set:
+                if aff_set is not None and aff not in aff_set:
                     continue
 
-                label_path = os.path.join(mask_dir, label_dir)
+                label_path = os.path.join(mask_dir, aff)
                 if not os.path.isdir(label_path):
                     continue
-                
+               
                 # 查找对应的mask文件: {obj_type}_{id}_{label}.png
-                mask_filename = f'{obj_type}_{inferred_id}_{label_dir}.png'
+                mask_filename = f'{obj_type}_{inferred_id}_{aff}.png'
                 mask_filepath = os.path.join(label_path, mask_filename)
-                
+               
                 if os.path.exists(mask_filepath):
                     mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
                     if mask is not None:
                         aff_mask.append(mask)
-                        labels.append(label_dir)
-        
+                        labels.append(aff)
+       
         # 加载obj_mask
         obj_mask = None
         obj_mask_dir = os.path.join(dir_path, 'obj_mask')
@@ -776,14 +788,14 @@ class Image:
             obj_mask_path = os.path.join(obj_mask_dir, f'{obj_type}_{inferred_id}_obj_mask.png')
             if os.path.exists(obj_mask_path):
                 obj_mask = cv2.imread(obj_mask_path, cv2.IMREAD_GRAYSCALE)
-        
+       
         # 加载visible_mask
         visible_mask = None
         if os.path.exists(obj_mask_dir):
             vis_mask_path = os.path.join(obj_mask_dir, f'{obj_type}_{inferred_id}_visible_mask.png')
             if os.path.exists(vis_mask_path):
                 visible_mask = cv2.imread(vis_mask_path, cv2.IMREAD_GRAYSCALE)
-        
+       
         # 解析文件名中的id，用于可选的 keep_id
         given_id = int(inferred_id) if keep_id else None
 
@@ -818,7 +830,7 @@ class Image:
             if isinstance(obj_type, str):
                 obj_type = [obj_type]
             obj_type_set = set(obj_type)
-        
+       
         if aff_type is None:
             aff_type_set = None
         else:
@@ -827,7 +839,7 @@ class Image:
             aff_type_set = set(aff_type)
 
         def iterator():
-            for obj_type_name in os.listdir(dataset_root_path):
+            for obj_type_name in tqdm(os.listdir(dataset_root_path), desc='加载Image'):
                 # 物体类型过滤
                 if obj_type_set is not None and obj_type_name not in obj_type_set:
                     continue
@@ -835,32 +847,32 @@ class Image:
                 obj_type_dir = os.path.join(dataset_root_path, obj_type_name)
                 if not os.path.isdir(obj_type_dir):
                     continue
-                
-                rgb_dir = os.path.join(obj_type_dir, 'rgb')
-                if not os.path.exists(rgb_dir):
+               
+                rgb_dir = os.path.join(obj_type_dir, 'Image', 'rgb')
+                if not os.path.isdir(rgb_dir):
                     continue
-                
+               
                 # 遍历rgb目录下的所有图片文件
                 rgb_files = sorted([
                     f for f in os.listdir(rgb_dir)
                     if f.lower().endswith(('.png', '.jpg'))
                 ])
-                
-                for rgb_file in rgb_files:
+               
+                for rgb_file in tqdm(rgb_files, leave=False, desc='Image'):
                     rgb_path = os.path.join(rgb_dir, rgb_file)
                     try:
-                        print(f'loading IMG: {rgb_path}')
+                        # print(f'loading IMG: {rgb_path}')
                         img = cls.load_file(
                             rgb_path,
                             obj_type=obj_type_name,
-                            aff_type=aff_type,
+                            aff_type=aff_type_set,
                             keep_id=keep_id,
                         )
                         yield img
                     except Exception as e:
                         print(f"Failed to load {rgb_path}: {e}")
                         continue
-        
+       
         return iterator()
 
     @classmethod
@@ -901,7 +913,7 @@ class Image:
         # 删除self的记录
         Image.all[self.obj_type][self.id - 1] = None
 
-class Instruction:
+class Instruction(Modality):
     all = defaultdict(list)
     count = defaultdict(lambda: defaultdict(int))
 
@@ -918,41 +930,49 @@ class Instruction:
         Instruction.count[self.obj_type]['ID'] += 1  # Note: Ins的ID并不是最大的id，仅表示计数
         self.id = Instruction.count[self.obj_type]['ID'] if given_id is None else given_id  # Ins的id和图片的id一一对应
 
-
     @classmethod
-    def get_by_id(cls, obj_type, idx):
-        return cls.all[obj_type][idx-cls.all[obj_type][0].id]
-    
-    @classmethod
-    def sort_by_id(cls):
-        for obj_type in cls.all.keys():
-            cls.all[obj_type].sort(key=lambda x: x.id)
-
-    @classmethod
-    def load(cls, file_path, keep_id=True):
+    def load(cls, file_path, aff_type=None, keep_id=True):
+        if aff_type is not None:
+            if isinstance(aff_type, str):
+                aff_type = [aff_type]
+            aff_set = set(aff_type)
+        else:
+            aff_set = None
+        
         # 加载csv文件，包含header
         instructions = []
         with open(file_path, 'r', newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
-            for row in reader:
+            for row in reader:  # 读文件的行很快，不用tqdm
                 ins = row.get('ins')
-                obj_type = row.get('obj_type')
-                aff_type = row.get('aff_type')
+                obj = row.get('obj_type')
+                aff = row.get('aff_type')
+                if aff_set is not None and aff not in aff_set: continue
+
                 if not keep_id:
                     given_id = None
                 else:
                     given_id = int(row.get('id'))
 
-                instructions.append(cls(ins, obj_type=obj_type, aff_type=aff_type, given_id=given_id))
+                instructions.append(cls(ins, obj_type=obj, aff_type=aff, given_id=given_id))
         return instructions
 
     @classmethod
-    def load_all(cls, dataset_root_path, keep_id=True):
+    def load_all(cls, dataset_root_path, obj_type=None, aff_type=None, keep_id=True):
         """一次加载一个物体，不使用迭代器"""
-        for obj_type in os.listdir(dataset_root_path):
-            file_path = os.path.join(dataset_root_path, obj_type, 'Instruction.csv')
+        if obj_type is not None:
+            if isinstance(obj_type, str):
+                obj_type = [obj_type]
+            obj_set = set(obj_type)
+        else:
+            obj_set = None
+        
+        for obj in tqdm(os.listdir(dataset_root_path), desc='加载Instruction'):
+            if obj_set is not None and obj not in obj_set: continue
+
+            file_path = os.path.join(dataset_root_path, obj, 'Instruction.csv')
             if os.path.exists(file_path):
-                cls.load(file_path, keep_id=keep_id)
+                cls.load(file_path, aff_type=aff_type, keep_id=keep_id)
 
 
     @classmethod
@@ -1030,10 +1050,18 @@ class JointDataSample:
         
 
         obj_type, aff_type = None, None
-        for e in (ins, img, pc):
-            if e is not None: 
-                obj_type = e.obj_type
-                aff_type = e.aff_type
+        if ins is not None: 
+            obj_type = ins.obj_type
+            aff_type = ins.aff_type
+        elif img is not None:
+            obj_type = img.obj_type
+            aff_type = img.labels[img_mask_idx]
+        elif pc is not None:
+            obj_type = pc.obj_type
+            aff_type = pc.labels[pc_mask_idx]
+        else:
+            raise ValueError('没有任何一条数据包含obj_type或aff_type信息')
+
 
         self.aff_type = aff_type
         self.obj_type = obj_type
@@ -1085,6 +1113,8 @@ class JointDataset:
     
     def __init__(self, 
                  dataset_root: str,
+                 obj_type: list[str] = None,
+                 aff_type: list[str] = None,
                  train_ratio: float = None,
                  val_ratio: float = None,
                  test_ratio: float = None,
@@ -1128,6 +1158,8 @@ class JointDataset:
             f"比例之和必须为 1.0，当前为 {train_ratio + val_ratio + test_ratio}"
 
         self.dataset_root = os.path.abspath(dataset_root)
+        self.obj_type = obj_type
+        self.aff_type = aff_type
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
@@ -1142,13 +1174,12 @@ class JointDataset:
         self.test_samples: List[JointDataSample] = []
         
         # 原始数据索引（用于保存分割结果）
-        # 结构参考 config/dataset.json，存储物体的id
-        self._train_ids: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
-        self._val_ids: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
-        self._test_ids: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
+        self._train_ids = create_info_dict()
+        self._val_ids = create_info_dict()
+        self._test_ids = create_info_dict()
         
         # 检查是否存在分割JSON文件
-        split_json_path = os.path.join(dataset_root, 'dataset.json')
+        split_json_path = os.path.join(dataset_root, 'dataset_split.json')
         if split_json_path and os.path.exists(split_json_path):
             print(f"从JSON文件加载数据集分割: {split_json_path}")
             self.load_from_split_json()
@@ -1160,33 +1191,47 @@ class JointDataset:
     
     def load_all_data(self):
         """加载 Instruction、Image、PointCloud 数据"""
-        print(f"开始加载数据集: {self.dataset_root}")
-        
-        # 加载所有数据
-        print("加载 PointCloud...")
-        for _ in PointCloud.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id):
-            pass  # 消费迭代器
-        print("加载 Image...")
-        for _ in Image.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id):
-            pass  # 消费迭代器
-        print("加载 Instruction...")
-        Instruction.load_all(self.dataset_root, keep_id=self.keep_id)
-        
+        import threading
+
+        def load_pc_wrapper():
+            for _ in PointCloud.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id): pass
+
+        def load_img_wrapper():
+            for _ in Image.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id): pass
+
+        def load_ins_wrapper():
+            Instruction.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id)
+
+        # 创建线程
+        t1 = threading.Thread(target=load_pc_wrapper)
+        t2 = threading.Thread(target=load_img_wrapper)
+        t3 = threading.Thread(target=load_ins_wrapper)
+
+        # 启动线程
+        t1.start()
+        t2.start()
+        t3.start()
+
+        # 等待所有线程结束
+        t1.join()
+        t2.join()
+        t3.join()
+
+        print("所有数据加载完成")
+            
     def split_dataset(self):
         # 构建图文对（Instruction + Image）
         # 结构: {obj_type: [(inst, img), ...]}
-        print("构建图文对...")
-        text_image_pairs = defaultdict(list)
-        for obj_type in Instruction.all.keys():
+        text_image_pairs = defaultdict(lambda: defaultdict(list))
+        for obj_type in tqdm(Instruction.all.keys(), desc="构建图文对"):
             for inst in Instruction.all[obj_type]:
                 # 查找匹配的 Image（按 id 匹配）
-                matched_image = Image.all[obj_type][inst.id]
+                matched_image = Image.get_by_id(obj_type, inst.id)
                 
                 if matched_image:
                     for i, aff in enumerate(matched_image.labels):
                         pair = (inst.id, (matched_image.id, i))  # NOTE: 一张图片可能对应多个inst（不同aff_type），因此使用时需要用对应的aff_type
                         text_image_pairs[obj_type][aff].append(pair)
-                        self.count += 1
 
         # 按 obj_type 和 aff_type 分组点云
         # 结构: {obj_type: {aff_type: [pc_ids]}}
@@ -1197,9 +1242,9 @@ class JointDataset:
                 if pc is None or pc.labels is None:
                     continue
                 for idx, label in enumerate(pc.labels):
-                    pc_groups[obj_type][label].append((pc.id, idx))
+                    pc_groups[obj_type][label].append(((pc.id, idx),)) # 兼容图文对 _split_group
         
-        def _split_group(groups, inner, train_ratio, val_ratio):
+        def _split_group(groups, inner, test_ratio, val_ratio):
             # 对每个分组进行分割
             for obj_type in groups.keys():
                 for aff_type, inner_ids in groups[obj_type].items():
@@ -1211,14 +1256,15 @@ class JointDataset:
                     random.shuffle(unique_ids)
                     
                     n_total = len(unique_ids)
-                    n_train = int(n_total * train_ratio)
+                    # if n_total < 5: continue # 数量过少会导致全部划分到train数据集中(Hack:@Lyh 只训练，不评估，增加鲁棒性？)
+                    n_test = int(n_total * test_ratio)
                     n_val = int(n_total * val_ratio)
-                    # test 取剩余的，避免舍入误差
+                    # train 取剩余的，避免舍入误差
                     
                     # 分割ID
-                    train_ids = unique_ids[:n_train]
-                    val_ids = unique_ids[n_train:n_train + n_val]
-                    test_ids = unique_ids[n_train + n_val:]
+                    test_ids = unique_ids[:n_test]
+                    val_ids = unique_ids[n_test:n_test + n_val]
+                    train_ids = unique_ids[n_test + n_val:]
                     
                     # 记录分割结果
                     for idx, modality in enumerate(inner):
@@ -1226,8 +1272,8 @@ class JointDataset:
                         self._val_ids[modality][obj_type][aff_type] =  [e[idx] for e in val_ids]
                         self._test_ids[modality][obj_type][aff_type] =  [e[idx] for e in test_ids]
 
-        _split_group(text_image_pairs, ('ins', 'img'), self.train_ratio, self.val_ratio)
-        _split_group(pc_groups, ('pc',), self.train_ratio, self.val_ratio)
+        _split_group(text_image_pairs, ('ins', 'img'), self.test_ratio, self.val_ratio)
+        _split_group(pc_groups, ('pc',), self.test_ratio, self.val_ratio)
 
 
         def _balance_by_copy(data_list: list, target_count: int) -> list:
@@ -1252,13 +1298,13 @@ class JointDataset:
             # 遍历所有 obj_type 和 aff_type 组合
             all_obj_types = set(self._train_ids['ins'].keys()) | set(self._train_ids['pc'].keys())
             
-            for obj_type in tqdm(all_obj_types):
+            for obj_type in tqdm(all_obj_types, desc='平衡数据'):
                 # 获取该 obj_type 下所有的 aff_type
                 ins_aff_types = set(self._train_ids['ins'].get(obj_type, {}).keys())
                 pc_aff_types = set(self._train_ids['pc'].get(obj_type, {}).keys())
                 all_aff_types = ins_aff_types & pc_aff_types  # NOTE: 只平衡公共aff的数量
                 
-                for aff_type in tqdm(all_aff_types):
+                for aff_type in tqdm(all_aff_types, leave=False):
                     # 对 train/val/test 分别进行平衡
                     for split_ids in [self._train_ids, self._val_ids, self._test_ids]:
                         # 获取当前分割中的 ins/img 和 pc 数量
@@ -1346,18 +1392,18 @@ class JointDataset:
                         # 获取 Image 和 GT
                         image, img_mask_idx = None, None 
                         if i < len(img_ids):
-                            image = Image.get_by_id(obj_type,  img_ids[i][0])
+                            image = Image.get_by_id(obj_type, img_ids[i][0])
                             img_mask_idx = img_ids[i][1]
                         
                         # 获取 PointCloud 和 GT
                         pc = None
                         pc_mask_idx = None
                         if i < len(pc_ids):
-                            pc = PointCloud.get_by_id(pc_ids[i][0])
-                            pc_mask_idx = pc_ids[i][1]
+                            pc = PointCloud.get_by_id(obj_type, pc_ids[i][0])
+                            pc_mask_idx =  pc_ids[i][1]
                         
                         # 至少有一个模态有数据才创建样本
-                        if ins is not None or image is not None or pc is not None:
+                        if (ins or image or pc) is not None:
                             sample = JointDataSample(
                                 ins=ins,
                                 img=image,
@@ -1398,15 +1444,15 @@ class JointDataset:
         self.balance_data = metadata['balance_data']
         self.count = 0
         
-        # 初始化样本列表
-        self.train_samples = []
-        self.val_samples = []
-        self.test_samples = []
-        
         # 加载分割索引
-        self._train_ids = split_data.get('train', {})
-        self._val_ids = split_data.get('val', {})
-        self._test_ids = split_data.get('test', {})
+        self._train_ids = split_data.get('train', create_info_dict())
+        self._val_ids = split_data.get('val', create_info_dict())
+        self._test_ids = split_data.get('test', create_info_dict())
+
+        self._train_ids['ins'] = self._train_ids['Instruction']
+        self._train_ids['img'] = self._train_ids['Image']
+        self._train_ids['pc'] = self._train_ids['PointCloud']
+
 
     def save_split_json(self, save_path: str = None) -> str:
         """
@@ -1425,22 +1471,22 @@ class JointDataset:
                 "random_seed": 114514
             },
             "train": {
-                'ins': {obj_type: {aff_type: [id1, id2, ...]}},
-                'img': {obj_type: {aff_type: [(id, mask_idx), ...]}},
-                'pc': {obj_type: {aff_type: [(id, mask_idx), ...]}}
+                'Instruction': {obj_type: {aff_type: [id1, id2, ...]}},
+                'Image': {obj_type: {aff_type: [(id, mask_idx), ...]}},
+                'PointCloud': {obj_type: {aff_type: [(id, mask_idx), ...]}}
             },
             "val": {...},
             "test": {...}
         }
         
         Args:
-            save_path: 保存路径，默认为 dataset_root/dataset.json
+            save_path: 保存路径，默认为 dataset_root/dataset_split.json
         
         Returns:
             保存的文件路径
         """
         if save_path is None:
-            save_path = os.path.join(self.dataset_root, 'dataset.json')
+            save_path = os.path.join(self.dataset_root, 'dataset_split.json')
         
         
         # 构建JSON数据
@@ -1455,14 +1501,69 @@ class JointDataset:
                 'test_ratio': self.test_ratio,
                 'random_seed': self.random_seed
             },
-            'train': self._train_ids,
-            'val': self._val_ids,
-            'test': self._test_ids
+            'train': {k: self._train_ids[k] for k in ('Instruction', 'Image', 'PointCloud')},
+            'val': {k: self._val_ids[k] for k in ('Instruction', 'Image', 'PointCloud')},
+            'test': {k: self._test_ids[k] for k in ('Instruction', 'Image', 'PointCloud')}
         }
-        
-        # 保存JSON文件
+
+        # 去除值为空的键
+        for t in split_data.keys():
+            if t == 'metadata': continue
+            for m in split_data[t].keys():
+                for obj_type in split_data[t][m].keys():
+                    keys_to_remove = []
+                    for aff_type in split_data[t][m][obj_type].keys():  # 不能同时遍历删除
+                        if not split_data[t][m][obj_type][aff_type]:
+                            keys_to_remove.append(aff_type)
+                    
+                    for k in keys_to_remove:
+                        del split_data[t][m][obj_type][k]
+
+        def get_compact_json(data):
+            json_str = json.dumps(data, indent=4)
+            
+            output = []
+            depth = 0        # 记录方括号嵌套深度
+            in_str = False   # 标记是否在字符串内部
+            escaped = False  # 标记转义字符
+
+            for char in json_str:
+                # 处理字符串状态，防止误判字符串内的括号 (例如 "this is [a] test")
+                if char == '"' and not escaped:
+                    in_str = not in_str
+                
+                if in_str:
+                    output.append(char)
+                    escaped = (char == '\\' and not escaped)
+                    continue
+
+                # 核心逻辑：根据括号深度决定是否保留空白字符
+                if char == '[':
+                    depth += 1
+                    output.append(char)
+                elif char == ']':
+                    depth -= 1
+                    output.append(char)
+                elif char == '\n':
+                    # 如果在列表内，丢弃换行符
+                    if depth == 0:
+                        output.append(char)
+                elif char == ' ':
+                    # 如果在列表内，丢弃缩进空格
+                    # 但为了可读性，我们可以保留逗号后面的一个空格
+                    if depth == 0:
+                        output.append(char)
+                    elif output and output[-1] == ',':
+                        output.append(' ')
+                else:
+                    output.append(char)
+
+            return "".join(output)
+
+        compact_json = get_compact_json(split_data)
         with open(save_path, 'w', encoding='utf-8') as f:
-            json.dump(split_data, f, indent=4, ensure_ascii=False)
+            f.write(compact_json)
+
         
         print(f"数据集分割结果已保存至: {save_path}")
     
@@ -1676,8 +1777,6 @@ class JointDataset:
         print("=" * 60 + "\n")
     
     
-    
-
 def main():
     """示例用法"""
     import argparse
@@ -1702,7 +1801,7 @@ def main():
     parser.add_argument('--save-split', action='store_true',
                        help='保存数据集分割结果为JSON文件')
     parser.add_argument('--save-split-path', type=str, default=None,
-                       help='保存分割结果的JSON文件路径（默认为 dataset_root/dataset.json）')
+                       help='保存分割结果的JSON文件路径（默认为 dataset_root/dataset_split.json）')
     parser.add_argument('--keep-id', action='store_true', default=True,
                        help='保持原有的ID（默认启用）')
     
@@ -1711,13 +1810,14 @@ def main():
     # 创建数据集
     dataset = JointDataset(
         dataset_root=args.dataset_root,
+        obj_type=args.obj_type,
+        aff_type=args.aff_type,
         train_ratio=args.train_ratio,
         val_ratio=args.val_ratio,
         test_ratio=args.test_ratio,
         random_seed=args.seed,
         keep_id=args.keep_id,
         balance_data=not args.no_balance,
-        mask_prob=args.mask_prob
     )
     
     # 保存分割结果
@@ -1728,16 +1828,8 @@ def main():
     dataset.print_statistics()
     
     # 示例：获取训练集
-    train_set = dataset.get_train_set(apply_mask=args.mask_prob > 0 or args.mask_modalities is not None)
+    train_set = dataset.get_train_data()
     print(f"\n训练集第一个样本: {train_set[0] if train_set else 'None'}")
     
-    # 如果启用了 mask，显示 mask 信息
-    if train_set and (args.mask_prob > 0 or args.mask_modalities is not None):
-        sample = train_set[0]
-        print(f"  可用模态: {sample.get_available_modalities()}")
-        print(f"  被 mask 的模态: {sample.get_masked_modalities()}")
-
-
 if __name__ == "__main__":
     main()
-
