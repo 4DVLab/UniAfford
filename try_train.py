@@ -223,7 +223,7 @@ def main(args):
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
-    model.resize_token_embeddings(len(tokenizer))
+    model.resize_token_embeddings(len(tokenizer), pad_to_multiple_of=8)
 
     # make text_hidden_fcs, mask_decoder, lm_head, embed_tokens trainable
     for n, p in model.named_parameters():

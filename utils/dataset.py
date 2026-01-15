@@ -1,8 +1,17 @@
 """
 PyTorch DataLoader 适配器
+
+使用方式:
+    # 创建数据集管理器（只加载一次数据）
+    dataset_manager = DatasetManager(dataset_dir, ...)
+    
+    # 获取各分割的 PyTorch Dataset
+    train_dataset = dataset_manager.get_train_dataset()
+    val_dataset = dataset_manager.get_val_dataset()
+    test_dataset = dataset_manager.get_test_dataset()
 """
 import random
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 import torch
 from torch.utils.data import Dataset
@@ -13,8 +22,11 @@ from model.llava.constants import (
 )
 
 
-class HybridDataset(Dataset):
-    """兼容原有接口的混合数据集"""
+class DatasetManager:
+    """
+    数据集管理器，负责创建和管理 JointDataset，并提供获取各分割数据集的接口。
+    确保 JointDataset 只被创建一次。
+    """
     
     def __init__(self, dataset_dir: str, tokenizer=None, vision_tower: str = None,
                  samples_per_epoch: int = 10000, precision: str = "bf16",
@@ -26,31 +38,97 @@ class HybridDataset(Dataset):
                  num_points: int = 2048,
                  train_ratio: float = 0.7, val_ratio: float = 0.15,
                  test_ratio: float = 0.15, random_seed: int = 42):
-        self.tokenizer = tokenizer
-        self.image_size = image_size
-        self.samples_per_epoch = samples_per_epoch
-        self.num_points = num_points
-        self.precision = precision
+        """
+        初始化数据集管理器
         
+        Args:
+            dataset_dir: 数据集根目录
+            tokenizer: 分词器
+            vision_tower: 视觉塔配置
+            samples_per_epoch: 每个 epoch 的样本数
+            precision: 精度设置
+            image_size: 图像大小
+            num_points: 点云点数
+            train_ratio: 训练集比例
+            val_ratio: 验证集比例
+            test_ratio: 测试集比例
+            random_seed: 随机种子
+        """
+        self.dataset_dir = dataset_dir
+        self.tokenizer = tokenizer
+        self.vision_tower = vision_tower
+        self.samples_per_epoch = samples_per_epoch
+        self.precision = precision
+        self.image_size = image_size
+        self.num_points = num_points
+        self.train_ratio = train_ratio
+        self.val_ratio = val_ratio
+        self.test_ratio = test_ratio
+        self.random_seed = random_seed
+        
+        # 只创建一次 JointDataset
         self.joint_dataset = JointDataset(
-            dataset_root=dataset_dir, train_ratio=train_ratio,
-            val_ratio=val_ratio, test_ratio=test_ratio,
+            dataset_root=dataset_dir,
+            train_ratio=train_ratio,
+            val_ratio=val_ratio,
+            test_ratio=test_ratio,
             random_seed=random_seed,
         )
-        self.samples = self.joint_dataset.train_samples
         
-        if len(self.samples) < samples_per_epoch:
-            repeat = (samples_per_epoch // len(self.samples)) + 1
-            self.sample_indices = (list(range(len(self.samples))) * repeat)[:samples_per_epoch]
-        else:
-            self.sample_indices = list(range(len(self.samples)))
-        random.shuffle(self.sample_indices)
+        # 缓存已创建的数据集
+        self._train_dataset: Optional[HybridDataset] = None
+        self._val_dataset: Optional[ValDataset] = None
+        self._test_dataset: Optional[TestDataset] = None
     
-    def __len__(self): return self.samples_per_epoch
+    def get_train_dataset(self, samples_per_epoch: int = None) -> 'HybridDataset':
+        """获取训练数据集"""
+        if self._train_dataset is None:
+            self._train_dataset = HybridDataset(
+                samples=self.joint_dataset.train_samples,
+                samples_per_epoch=samples_per_epoch or self.samples_per_epoch,
+                image_size=self.image_size,
+                num_points=self.num_points,
+                tokenizer=self.tokenizer,
+                precision=self.precision,
+            )
+        return self._train_dataset
     
-    def __getitem__(self, index: int) -> Dict[str, Any]:
+    def get_val_dataset(self) -> 'ValDataset':
+        """获取验证数据集"""
+        if self._val_dataset is None:
+            self._val_dataset = ValDataset(
+                samples=self.joint_dataset.val_samples,
+                image_size=self.image_size,
+                num_points=self.num_points,
+            )
+        return self._val_dataset
+    
+    def get_test_dataset(self) -> 'TestDataset':
+        """获取测试数据集"""
+        if self._test_dataset is None:
+            self._test_dataset = TestDataset(
+                samples=self.joint_dataset.test_samples,
+                image_size=self.image_size,
+                num_points=self.num_points,
+            )
+        return self._test_dataset
+    
+    def get_all_datasets(self) -> Tuple['HybridDataset', 'ValDataset', 'TestDataset']:
+        """获取所有数据集（训练、验证、测试）"""
+        return self.get_train_dataset(), self.get_val_dataset(), self.get_test_dataset()
+
+
+class _BaseDataset(Dataset):
+    """数据集基类，提供通用的数据处理方法"""
+    
+    def __init__(self, samples: List[JointDataSample], image_size: int = 1024, num_points: int = 2048):
+        self.samples = samples
+        self.image_size = image_size
+        self.num_points = num_points
+    
+    def _process_sample(self, sample: JointDataSample) -> Dict[str, Any]:
+        """处理单个样本，返回标准化的数据字典"""
         import cv2
-        sample = self.samples[self.sample_indices[index % len(self.sample_indices)]]
         data = sample.get_data()
         result = {
             'instruction': data['ins'] or "", 
@@ -80,58 +158,61 @@ class HybridDataset(Dataset):
             if data['pc_gt'] is not None:
                 pm = data['pc_gt'][idx]
                 result['pc_masks'] = torch.from_numpy((pm.astype(np.float32) / 255.0) if isinstance(pm, np.ndarray) and pm.max() > 1 else pm.astype(np.float32)).float()
+        
         return result
 
 
-class ValDataset(Dataset):
-    """验证数据集"""
+class HybridDataset(_BaseDataset):
+    """训练数据集，支持样本重复和打乱"""
     
-    def __init__(self, dataset_dir: str, tokenizer=None, vision_tower: str = None,
-                 val_dataset: str = None, image_size: int = 1024, num_points: int = 2048,
-                 joint_dataset: JointDataset = None,
-                 train_ratio: float = 0.7, val_ratio: float = 0.15,
-                 test_ratio: float = 0.15, random_seed: int = 42):
-        self.image_size, self.num_points = image_size, num_points
-        self.joint_dataset = joint_dataset or JointDataset(
-            dataset_root=dataset_dir, train_ratio=train_ratio, val_ratio=val_ratio,
-            test_ratio=test_ratio, random_seed=random_seed,
-        )
-        self.samples = self.joint_dataset.val_samples
+    def __init__(self, samples: List[JointDataSample], samples_per_epoch: int = 10000,
+                 image_size: int = 1024, num_points: int = 2048,
+                 tokenizer=None, precision: str = "bf16"):
+        super().__init__(samples, image_size, num_points)
+        self.tokenizer = tokenizer
+        self.samples_per_epoch = samples_per_epoch
+        self.precision = precision
+        
+        # 构建样本索引（支持重复采样）
+        if len(self.samples) < samples_per_epoch:
+            repeat = (samples_per_epoch // len(self.samples)) + 1
+            self.sample_indices = (list(range(len(self.samples))) * repeat)[:samples_per_epoch]
+        else:
+            self.sample_indices = list(range(len(self.samples)))
+        random.shuffle(self.sample_indices)
     
-    def __len__(self): return len(self.samples)
+    def __len__(self): 
+        return self.samples_per_epoch
     
     def __getitem__(self, index: int) -> Dict[str, Any]:
-        import cv2
-        sample, data = self.samples[index], self.samples[index].get_data()
-        result = {
-            'instruction': data['ins'] or "", 
-            'obj_type': sample.obj_type, 
-            'aff_type': sample.aff_type,
-            'has_image': False,
-            'has_point_cloud': False,
-        }
-        
-        # 处理图像数据
-        if data['img'] is not None:
-            img = cv2.resize(data['img'], (self.image_size, self.image_size)) if data['img'].shape[:2] != (self.image_size, self.image_size) else data['img']
-            result['images'] = torch.from_numpy(cv2.cvtColor(img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0).permute(2, 0, 1)
-            result['has_image'] = True
-            if data['img_gt'] is not None:
-                mask = cv2.resize(data['img_gt'], (self.image_size, self.image_size), interpolation=cv2.INTER_NEAREST) if data['img_gt'].shape[:2] != (self.image_size, self.image_size) else data['img_gt']
-                result['masks'] = torch.from_numpy((mask.astype(np.float32) / 255.0) if mask.max() > 1 else mask.astype(np.float32)).float()
-        
-        # 处理点云数据
-        if data['pc'] is not None:
-            pts, n = data['pc'], len(data['pc'])
-            idx = np.random.choice(n, self.num_points, replace=(n < self.num_points))
-            sp = pts[idx] - np.mean(pts[idx], axis=0)
-            md = np.max(np.sqrt(np.sum(sp ** 2, axis=1)))
-            result['point_clouds'] = torch.from_numpy((sp / md) if md > 0 else sp).float()
-            result['has_point_cloud'] = True
-            if data['pc_gt'] is not None:
-                pm = data['pc_gt'][idx]
-                result['pc_masks'] = torch.from_numpy((pm.astype(np.float32) / 255.0) if isinstance(pm, np.ndarray) and pm.max() > 1 else pm.astype(np.float32)).float()
-        return result
+        sample = self.samples[self.sample_indices[index % len(self.sample_indices)]]
+        return self._process_sample(sample)
+
+
+class ValDataset(_BaseDataset):
+    """验证数据集"""
+    
+    def __init__(self, samples: List[JointDataSample], image_size: int = 1024, num_points: int = 2048):
+        super().__init__(samples, image_size, num_points)
+    
+    def __len__(self): 
+        return len(self.samples)
+    
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        return self._process_sample(self.samples[index])
+
+
+class TestDataset(_BaseDataset):
+    """测试数据集"""
+    
+    def __init__(self, samples: List[JointDataSample], image_size: int = 1024, num_points: int = 2048):
+        super().__init__(samples, image_size, num_points)
+    
+    def __len__(self): 
+        return len(self.samples)
+    
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        return self._process_sample(self.samples[index])
 
 
 def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
