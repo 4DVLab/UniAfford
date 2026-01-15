@@ -15,7 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
-from utils.dataset import HybridDataset, ValDataset, collate_fn
+from utils.dataset import DatasetManager, collate_fn
 from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
                          AverageMeter, ProgressMeter, Summary, dict_to_cuda,
                          intersectionAndUnionGPU, intersectionAndUnion3D)
@@ -238,10 +238,12 @@ def main(args):
 
     world_size = torch.cuda.device_count()
     args.distributed = world_size > 1
-    train_dataset = HybridDataset(
-        args.dataset_dir,
-        tokenizer,
-        args.vision_tower,
+    
+    # 使用 DatasetManager 统一管理数据集（只创建一次 JointDataset）
+    dataset_manager = DatasetManager(
+        dataset_dir=args.dataset_dir,
+        tokenizer=tokenizer,
+        vision_tower=args.vision_tower,
         samples_per_epoch=args.batch_size
         * args.grad_accumulation_steps
         * args.steps_per_epoch
@@ -259,16 +261,13 @@ def main(args):
         explanatory=args.explanatory,
         num_points=args.num_points,
     )
+    
+    # 获取训练数据集
+    train_dataset = dataset_manager.get_train_dataset()
 
     if args.no_eval == False:
-        val_dataset = ValDataset(
-            args.dataset_dir,
-            tokenizer,
-            args.vision_tower,
-            args.val_dataset,
-            args.image_size,
-            num_points=args.num_points,
-        )
+        # 获取验证数据集（共享同一个 JointDataset）
+        val_dataset = dataset_manager.get_val_dataset()
         print(
             f"Training with {len(train_dataset)} examples and validating with {len(val_dataset)} examples."
         )
