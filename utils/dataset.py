@@ -127,8 +127,17 @@ class _BaseDataset(Dataset):
         self.num_points = num_points
     
     def _process_sample(self, sample: JointDataSample) -> Dict[str, Any]:
-        """处理单个样本，返回标准化的数据字典"""
+        """处理单个样本，返回标准化的数据字典，增加缓存以加速重复访问"""
         import cv2
+
+        # 用于存储缓存的成员变量
+        if not hasattr(self, '_sample_cache'):
+            self._sample_cache = {}
+
+        sample_id = id(sample)
+        if sample_id in self._sample_cache:
+            return self._sample_cache[sample_id]
+
         data = sample.get_data()
         result = {
             'instruction': data['ins'] or "", 
@@ -156,9 +165,12 @@ class _BaseDataset(Dataset):
             result['point_clouds'] = torch.from_numpy((sp / md) if md > 0 else sp).float()
             result['has_point_cloud'] = True
             if data['pc_gt'] is not None:
-                pm = data['pc_gt'][idx]
+                pm = data['pc_gt'].T[idx]
                 result['pc_masks'] = torch.from_numpy((pm.astype(np.float32) / 255.0) if isinstance(pm, np.ndarray) and pm.max() > 1 else pm.astype(np.float32)).float()
         
+        # 写入缓存
+        self._sample_cache[sample_id] = result
+
         return result
 
 
