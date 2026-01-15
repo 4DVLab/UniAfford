@@ -172,20 +172,24 @@ class HybridDataset(_BaseDataset):
         self.tokenizer = tokenizer
         self.samples_per_epoch = samples_per_epoch
         self.precision = precision
+        self.num_samples = len(self.samples)
         
-        # 构建样本索引（支持重复采样）
-        if len(self.samples) < samples_per_epoch:
-            repeat = (samples_per_epoch // len(self.samples)) + 1
-            self.sample_indices = (list(range(len(self.samples))) * repeat)[:samples_per_epoch]
-        else:
-            self.sample_indices = list(range(len(self.samples)))
+        # 只创建一个 epoch 大小的打乱索引，避免内存爆炸
+        # 当 samples_per_epoch 很大时，使用动态随机采样而不是预先创建大列表
+        self._shuffle_indices()
+    
+    def _shuffle_indices(self):
+        """创建或重新打乱索引（只保留一个 epoch 的样本数量）"""
+        self.sample_indices = list(range(self.num_samples))
         random.shuffle(self.sample_indices)
     
     def __len__(self): 
         return self.samples_per_epoch
     
     def __getitem__(self, index: int) -> Dict[str, Any]:
-        sample = self.samples[self.sample_indices[index % len(self.sample_indices)]]
+        # 使用取模运算动态映射到实际样本，避免创建大列表
+        actual_index = self.sample_indices[index % self.num_samples]
+        sample = self.samples[actual_index]
         return self._process_sample(sample)
 
 

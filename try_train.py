@@ -5,9 +5,14 @@ import sys
 import time
 from functools import partial
 
-import deepspeed
 import numpy as np
 import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from torch.cuda.amp import GradScaler
+from torch.amp import autocast
 import tqdm
 import transformers
 from peft import LoraConfig, get_peft_model
@@ -110,10 +115,39 @@ def parse_args(args):
     return parser.parse_args(args)
 
 
+def setup_distributed():
+    """初始化分布式训练环境"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        rank = int(os.environ['RANK'])
+        world_size = int(os.environ['WORLD_SIZE'])
+        local_rank = int(os.environ['LOCAL_RANK'])
+    else:
+        rank = 0
+        world_size = 1
+        local_rank = 0
+    
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend='nccl', init_method='env://', world_size=world_size, rank=rank)
+    return rank, world_size, local_rank
+
+
+def cleanup_distributed():
+    """清理分布式训练环境"""
+    dist.destroy_process_group()
+
+
 def main(args):
     args = parse_args(args)
+    
+    # 初始化分布式训练
+    rank, world_size, local_rank = setup_distributed()
+    args.local_rank = local_rank
+    args.rank = rank
+    args.world_size = world_size
+    args.distributed = world_size > 1
+    
     args.log_dir = os.path.join(args.log_base_dir, args.exp_name)
-    if args.local_rank == 0:
+    if rank == 0:
         os.makedirs(args.log_dir, exist_ok=True)
         writer = SummaryWriter(args.log_dir)
     else:
@@ -236,9 +270,6 @@ def main(args):
             print("n: ", n, "p.shape: ", p.shape)
             p.requires_grad = True
 
-    world_size = torch.cuda.device_count()
-    args.distributed = world_size > 1
-    
     # 使用 DatasetManager 统一管理数据集（只创建一次 JointDataset）
     dataset_manager = DatasetManager(
         dataset_dir=args.dataset_dir,
@@ -275,70 +306,75 @@ def main(args):
         val_dataset = None
         print(f"Training with {len(train_dataset)} examples.")
 
-    ds_config = {
-        "train_micro_batch_size_per_gpu": args.batch_size,
-        "gradient_accumulation_steps": args.grad_accumulation_steps,
-        "optimizer": {
-            "type": "AdamW",
-            "params": {
-                "lr": args.lr,
-                "weight_decay": 0.0,
-                "betas": (args.beta1, args.beta2),
-            },
-        },
-        "scheduler": {
-            "type": "WarmupDecayLR",
-            "params": {
-                "total_num_steps": args.epochs * args.steps_per_epoch,
-                "warmup_min_lr": 0,
-                "warmup_max_lr": args.lr,
-                "warmup_num_steps": 100,
-                "warmup_type": "linear",
-            },
-        },
-        "fp16": {
-            "enabled": args.precision == "fp16",
-        },
-        "bf16": {
-            "enabled": args.precision == "bf16",
-        },
-        "gradient_clipping": 1.0,
-        "zero_optimization": {
-            "stage": 2,
-            "contiguous_gradients": True,
-            "overlap_comm": True,
-            "reduce_scatter": True,
-            "reduce_bucket_size": 5e8,
-            "allgather_bucket_size": 5e8,
-        },
-    }
-    model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
-        model=model,
-        model_parameters=model.parameters(),
-        training_data=train_dataset,
+    # 将模型移动到 GPU 并包装为 DDP
+    model = model.to(local_rank)
+    model = DDP(model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
+    
+    # 创建优化器
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.lr,
+        weight_decay=0.0,
+        betas=(args.beta1, args.beta2),
+    )
+    
+    # 创建学习率调度器 (带 warmup 的余弦退火)
+    total_steps = args.epochs * args.steps_per_epoch
+    warmup_steps = 100
+    
+    def lr_lambda(current_step):
+        if current_step < warmup_steps:
+            return float(current_step) / float(max(1, warmup_steps))
+        progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+        return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
+    
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+    
+    # 混合精度训练 (V100 不支持 bf16，使用 fp16)
+    use_amp = args.precision in ["fp16", "bf16"]
+    # V100 只支持 fp16，不支持 bf16
+    amp_dtype = torch.float16 if args.precision == "fp16" else torch.float16  # V100 强制使用 fp16
+    scaler = GradScaler(enabled=use_amp)
+    
+    if rank == 0:
+        print(f"使用混合精度训练: {use_amp}, dtype: {amp_dtype}")
+    
+    # 创建训练数据加载器
+    train_sampler = DistributedSampler(train_dataset, shuffle=True)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,  # 使用 DistributedSampler 时设为 False
+        num_workers=args.workers,
+        pin_memory=True,
+        sampler=train_sampler,
         collate_fn=partial(
             collate_fn,
             tokenizer=tokenizer,
             conv_type=args.conv_type,
             use_mm_start_end=args.use_mm_start_end,
-            local_rank=args.local_rank,
+            local_rank=local_rank,
         ),
-        config=ds_config,
+        drop_last=True,
     )
 
-    # resume deepspeed checkpoint
+    # 恢复检查点
     if args.auto_resume and len(args.resume) == 0:
-        resume = os.path.join(args.log_dir, "ckpt_model")
+        resume = os.path.join(args.log_dir, "ckpt_model.pth")
         if os.path.exists(resume):
             args.resume = resume
 
-    if args.resume:
-        load_path, client_state = model_engine.load_checkpoint(args.resume)
-        with open(os.path.join(args.resume, "latest"), "r") as f:
-            ckpt_dir = f.readlines()[0].strip()
-        args.start_epoch = (
-            int(ckpt_dir.replace("global_step", "")) // args.steps_per_epoch
-        )
+    if args.resume and os.path.exists(args.resume):
+        if rank == 0:
+            print(f"从检查点恢复: {args.resume}")
+        map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
+        checkpoint = torch.load(args.resume, map_location=map_location)
+        model.module.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        if 'scaler_state_dict' in checkpoint and scaler is not None:
+            scaler.load_state_dict(checkpoint['scaler_state_dict'])
+        args.start_epoch = checkpoint['epoch'] + 1
         print(
             "resume training from {}, start from epoch {}".format(
                 args.resume, args.start_epoch
@@ -348,10 +384,10 @@ def main(args):
     # validation dataset
     if val_dataset is not None:
         assert args.val_batch_size == 1
-        val_sampler = torch.utils.data.distributed.DistributedSampler(
+        val_sampler = DistributedSampler(
             val_dataset, shuffle=False, drop_last=False
         )
-        val_loader = torch.utils.data.DataLoader(
+        val_loader = DataLoader(
             val_dataset,
             batch_size=args.val_batch_size,
             shuffle=False,
@@ -363,7 +399,7 @@ def main(args):
                 tokenizer=tokenizer,
                 conv_type=args.conv_type,
                 use_mm_start_end=args.use_mm_start_end,
-                local_rank=args.local_rank,
+                local_rank=local_rank,
             ),
         )
 
@@ -371,32 +407,53 @@ def main(args):
     best_score, cur_ciou = 0.0, 0.0
 
     if args.eval_only:
-        giou, ciou = validate(val_loader, model_engine, 0, writer, args)
+        giou, ciou = validate(val_loader, model, 0, writer, args)
+        cleanup_distributed()
         exit()
 
     for epoch in range(args.start_epoch, args.epochs):
+        # 设置 epoch 以确保每个 epoch 的数据打乱不同
+        train_sampler.set_epoch(epoch)
+        if val_dataset is not None:
+            val_sampler.set_epoch(epoch)
+        
         # train for one epoch
         train_iter = train(
             train_loader,
-            model_engine,
+            model,
             epoch,
             scheduler,
             writer,
             train_iter,
             args,
+            optimizer,
+            scaler,
+            use_amp,
+            amp_dtype,
         )
 
         if args.no_eval == False:
-            giou, ciou = validate(val_loader, model_engine, epoch, writer, args)
+            giou, ciou = validate(val_loader, model, epoch, writer, args)
             is_best = giou > best_score
             best_score = max(giou, best_score)
             cur_ciou = ciou if is_best else cur_ciou
 
         if args.no_eval or is_best:
-            save_dir = os.path.join(args.log_dir, "ckpt_model")
-            if args.local_rank == 0:
+            save_dir = os.path.join(args.log_dir, "ckpt_model.pth")
+            if rank == 0:
+                # 保存检查点
+                checkpoint = {
+                    'epoch': epoch,
+                    'model_state_dict': model.module.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scaler_state_dict': scaler.state_dict() if scaler is not None else None,
+                    'best_score': best_score,
+                    'cur_ciou': cur_ciou,
+                }
+                torch.save(checkpoint, save_dir)
                 torch.save(
-                    {"epoch": epoch},
+                    {"epoch": epoch, "best_giou": best_score, "cur_ciou": cur_ciou},
                     os.path.join(
                         args.log_dir,
                         "meta_log_giou{:.3f}_ciou{:.3f}.pth".format(
@@ -404,10 +461,10 @@ def main(args):
                         ),
                     ),
                 )
-                if os.path.exists(save_dir):
-                    shutil.rmtree(save_dir)
-            torch.distributed.barrier()
-            model_engine.save_checkpoint(save_dir)
+                print(f"模型已保存到 {save_dir}")
+            dist.barrier()
+    
+    cleanup_distributed()
 
 
 def train(
@@ -418,6 +475,10 @@ def train(
     writer,
     train_iter,
     args,
+    optimizer,
+    scaler,
+    use_amp,
+    amp_dtype,
 ):
     """Main training loop."""
     batch_time = AverageMeter("Time", ":6.3f")
@@ -451,6 +512,10 @@ def train(
     # switch to train mode
     model.train()
     end = time.time()
+    
+    # 梯度累积计数器
+    optimizer.zero_grad()
+    
     for global_step in range(args.steps_per_epoch):
         for i in range(args.grad_accumulation_steps):
             try:
@@ -462,28 +527,32 @@ def train(
             data_time.update(time.time() - end)
             input_dict = dict_to_cuda(input_dict)
 
+            # V100 使用 fp16
             if args.precision == "fp16":
                 input_dict["images"] = input_dict["images"].half()
                 input_dict["images_clip"] = input_dict["images_clip"].half()
             elif args.precision == "bf16":
-                input_dict["images"] = input_dict["images"].bfloat16()
-                input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
+                # V100 不支持 bf16，转换为 fp16
+                input_dict["images"] = input_dict["images"].half()
+                input_dict["images_clip"] = input_dict["images_clip"].half()
             else:
                 input_dict["images"] = input_dict["images"].float()
                 input_dict["images_clip"] = input_dict["images_clip"].float()
             
             # 处理点云数据精度
             if "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
-                if args.precision == "fp16":
+                if args.precision in ["fp16", "bf16"]:
                     input_dict["point_clouds"] = input_dict["point_clouds"].half()
-                elif args.precision == "bf16":
-                    input_dict["point_clouds"] = input_dict["point_clouds"].bfloat16()
                 else:
                     input_dict["point_clouds"] = input_dict["point_clouds"].float()
 
-            output_dict = model(**input_dict)
+            # 使用混合精度训练
+            with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+                output_dict = model(**input_dict)
+                loss = output_dict["loss"]
+                # 梯度累积时需要对 loss 进行缩放
+                loss = loss / args.grad_accumulation_steps
 
-            loss = output_dict["loss"]
             ce_loss = output_dict["ce_loss"]
             mask_bce_loss = output_dict["mask_bce_loss"]
             mask_dice_loss = output_dict["mask_dice_loss"]
@@ -495,7 +564,7 @@ def train(
             mask_3d_loss = output_dict.get("mask_3d_loss", torch.tensor(0.0))
 
             batch_size = input_dict["images"].size(0)
-            losses.update(loss.item(), batch_size)
+            losses.update(loss.item() * args.grad_accumulation_steps, batch_size)
             ce_losses.update(ce_loss.item(), batch_size)
             mask_bce_losses.update(mask_bce_loss.item(), batch_size)
             mask_dice_losses.update(mask_dice_loss.item(), batch_size)
@@ -505,8 +574,20 @@ def train(
             mask_3d_dice_losses.update(mask_3d_dice_loss.item() if isinstance(mask_3d_dice_loss, torch.Tensor) else mask_3d_dice_loss, batch_size)
             mask_3d_losses.update(mask_3d_loss.item() if isinstance(mask_3d_loss, torch.Tensor) else mask_3d_loss, batch_size)
             
-            model.backward(loss)
-            model.step()
+            # 反向传播
+            scaler.scale(loss).backward()
+        
+        # 梯度裁剪
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        
+        # 优化器步进
+        scaler.step(optimizer)
+        scaler.update()
+        optimizer.zero_grad()
+        
+        # 更新学习率
+        scheduler.step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -571,7 +652,7 @@ def train(
     return train_iter
 
 
-def validate(val_loader, model_engine, epoch, writer, args):
+def validate(val_loader, model, epoch, writer, args):
     intersection_meter = AverageMeter("Intersec", ":6.3f", Summary.SUM)
     union_meter = AverageMeter("Union", ":6.3f", Summary.SUM)
     acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.SUM)
@@ -581,33 +662,33 @@ def validate(val_loader, model_engine, epoch, writer, args):
     union_3d_meter = AverageMeter("Union3D", ":6.3f", Summary.SUM)
     acc_iou_3d_meter = AverageMeter("gIoU3D", ":6.3f", Summary.SUM)
 
-    model_engine.eval()
+    model.eval()
 
     for input_dict in tqdm.tqdm(val_loader):
         torch.cuda.empty_cache()
 
         input_dict = dict_to_cuda(input_dict)
+        # V100 使用 fp16
         if args.precision == "fp16":
             input_dict["images"] = input_dict["images"].half()
             input_dict["images_clip"] = input_dict["images_clip"].half()
         elif args.precision == "bf16":
-            input_dict["images"] = input_dict["images"].bfloat16()
-            input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
+            # V100 不支持 bf16，转换为 fp16
+            input_dict["images"] = input_dict["images"].half()
+            input_dict["images_clip"] = input_dict["images_clip"].half()
         else:
             input_dict["images"] = input_dict["images"].float()
             input_dict["images_clip"] = input_dict["images_clip"].float()
         
         # 处理点云数据精度
         if "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
-            if args.precision == "fp16":
+            if args.precision in ["fp16", "bf16"]:
                 input_dict["point_clouds"] = input_dict["point_clouds"].half()
-            elif args.precision == "bf16":
-                input_dict["point_clouds"] = input_dict["point_clouds"].bfloat16()
             else:
                 input_dict["point_clouds"] = input_dict["point_clouds"].float()
 
         with torch.no_grad():
-            output_dict = model_engine(**input_dict)
+            output_dict = model(**input_dict)
 
         # 2D 图像分割评估
         pred_masks = output_dict["pred_masks"]
