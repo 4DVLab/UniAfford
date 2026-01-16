@@ -1509,19 +1509,15 @@ class JointDataset:
             合并多个 split 字典 (train/val/test)，保持原有的层级结构：
             Modality -> ObjType -> AffType -> List
             """
-            # 使用 defaultdict 自动处理嵌套结构，简化代码
-            merged = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+            # {pc: {obj1: [ids1, ids2]...}}
+            merged = defaultdict(lambda: defaultdict(list))
             
             for split in splits:
                 if not split: continue
-                # 第1层：Modality (Instruction, Image, PointCloud)
                 for mod, obj_dict in split.items():
-                    # 第2层：Object Type (Bottle, Chair...)
                     for obj, aff_dict in obj_dict.items():
-                        # 第3层：Affordance Type (grasp, hold...)
                         for aff, ids in aff_dict.items():
-                            # 第4层：List (直接拼接列表)
-                            merged[mod][obj][aff].extend(ids)
+                            merged[mod][obj].extend(ids)
             
             return merged
         
