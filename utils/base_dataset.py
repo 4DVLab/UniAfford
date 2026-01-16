@@ -211,58 +211,6 @@ class PointCloud(Modality):
         with open(filepath, 'w') as f:
             np.savetxt(f, data, delimiter=',', header=','.join(header))
    
-    @staticmethod
-    def load_file(filepath,
-            obj_type=None,
-            aff_type=None,
-            keep_id: bool=False,
-        ) -> 'PointCloud':
-        """
-        Args:
-            keep_id: 是否保持文件的id，默认False加载时重新分配id
-        """
-        obj_type = os.path.basename(os.path.dirname(filepath)) if obj_type is None else obj_type
-
-        with open(filepath, 'r') as f:
-            first_line = f.readline().strip()
-            header = first_line.split(',') if first_line else []
-            data = np.loadtxt(f, delimiter=',', skiprows=1)
-
-        if keep_id:
-            file_name = os.path.basename(filepath).strip('.csv')
-            given_id = int(file_name.split('_')[1])
-        else:
-            given_id = None
-
-        if len(header) > 3:
-            labels = header[3:]
-            mask = data[:, 3:]
-
-            # 根据 aff_type 过滤列（aff_type 为 None 时保留全部）
-            if aff_type is not None:
-                aff_set = Modality.normalize_to_set(aff_type)
-
-                keep_indices = [i for i, l in enumerate(labels) if l in aff_set]
-                if keep_indices:
-                    mask = mask[:, keep_indices]
-                    labels = [labels[i] for i in keep_indices]
-                else:
-                    # 如果没有匹配的列，则置空 mask / labels
-                    mask = None
-                    labels = None
-
-            pc_obj = PointCloud(points=data[:, :3],
-                                mask=mask,
-                                obj_type=obj_type,
-                                labels=labels,
-                                given_id=given_id)
-        else:
-            pc_obj = PointCloud(points=data[:, :3],
-                                obj_type=obj_type,
-                                given_id=given_id)
-
-        return pc_obj
-
     @classmethod
     def save_all(cls, dataset_root_path, keep_id: bool=False):
         """
@@ -290,6 +238,61 @@ class PointCloud(Modality):
                         if save_id is None: save_id = e.id  # 以第一个非 None的pc对象的id作为起始id
                         else: save_id += 1
                         e.save_to(os.path.join(dir_path, f'{e.obj_type}_{save_id}.csv')) # 保存时命名为 {obj_type}_{id}.csv
+    
+    @staticmethod
+    def load_file(filepath,
+            obj_type=None,
+            aff_type=None,
+            keep_id: bool=False,
+        ) -> 'PointCloud':
+        """
+        Args:
+            keep_id: 是否保持文件的id，默认False加载时重新分配id
+        """
+        obj_type = os.path.basename(os.path.dirname(filepath)) if obj_type is None else obj_type
+
+        with open(filepath, 'r') as f:
+            first_line = f.readline().strip()
+            header = first_line.split(',') if first_line else []
+            data = np.loadtxt(f, delimiter=',')
+
+        if keep_id:
+            file_name = os.path.basename(filepath).strip('.csv')
+            given_id = int(file_name.split('_')[1])
+        else:
+            given_id = None
+
+        if len(header) > 3:
+            labels = header[3:]
+            mask = data[:, 3:]
+
+            # 根据 aff_type 过滤列（aff_type 为 None 时保留全部）
+            if aff_type is not None:
+                aff_set = Modality.normalize_to_set(aff_type)
+
+                keep_indices = [i for i, l in enumerate(labels) if l in aff_set]
+                if keep_indices:
+                    mask = mask[:, keep_indices]
+                    mask = [mask[:, col] for col in range(mask.shape[1])]
+
+                    labels = [labels[i] for i in keep_indices]
+                else:
+                    # 如果没有匹配的列，则置空 mask / labels
+                    mask = None
+                    labels = None
+
+            pc_obj = PointCloud(points=data[:, :3],
+                                mask=mask,
+                                obj_type=obj_type,
+                                labels=labels,
+                                given_id=given_id)
+        else:
+            pc_obj = PointCloud(points=data[:, :3],
+                                obj_type=obj_type,
+                                given_id=given_id)
+
+        return pc_obj
+
     @classmethod
     def load_all(cls,
             dataset_root_path,
