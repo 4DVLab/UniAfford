@@ -313,7 +313,7 @@ class PointCloud(Modality):
         obj_set = cls.normalize_filter_args(obj_type, target_ids_dict)
         all_objs = set([d for d in os.listdir(dataset_root_path) if os.path.isdir(os.path.join(dataset_root_path, d))])
         if obj_set is not None:
-            all_objs |= obj_set
+            all_objs &= obj_set
         
         def iterator():
             for obj_type_name in tqdm(sorted(all_objs), desc='加载PointCloud'):
@@ -856,7 +856,7 @@ class Image(Modality):
         obj_set = cls.normalize_filter_args(obj_type, target_ids_dict)
         all_objs = set([d for d in os.listdir(dataset_root_path) if os.path.isdir(os.path.join(dataset_root_path, d))])
         if obj_set is not None:
-            all_objs |= obj_set
+            all_objs &= obj_set
 
         def iterator():
             for obj_type_name in tqdm(sorted(all_objs), desc='加载Image'):
@@ -1010,7 +1010,7 @@ class Instruction(Modality):
         # 合并 obj_set 和目录下所有文件夹名，确保 tqdm 数量正确（处理全部可能出现的 obj_type）
         all_objs = set([d for d in os.listdir(dataset_root_path) if os.path.isdir(os.path.join(dataset_root_path, d))])
         if obj_set is not None:
-            all_objs |= obj_set
+            all_objs &= obj_set
         
         for obj in tqdm(sorted(all_objs), desc='加载Instruction'):
             if obj_set is not None and obj not in obj_set: continue
