@@ -126,7 +126,38 @@ class Modality:
     def sort_by_id(cls):
         for obj_type in cls.all.keys():
             cls.all[obj_type].sort(key=lambda x: x.id)
+    
+    @staticmethod
+    def normalize_to_set(arg):
+        """
+        通用辅助方法：将输入参数 (None / str / list) 统一归一化为 set 或 None
+        """
+        if arg is None:
+            return None
+        if isinstance(arg, str):
+            return {arg}
+        return set(arg)
+    
+    @staticmethod
+    def normalize_filter_args(obj_type, target_ids_dict=None):
+        """
+        统一处理 obj_type, aff_type 和 target_ids_dict 的标准化与交集逻辑
+        """
+        # 1. 处理 obj_type (调用通用逻辑)
+        obj_type_set = Modality.normalize_to_set(obj_type)
+        
+        # 2. 处理 target_ids_dict 对 obj_type 的限制
+        # 如果提供了 target_ids_dict，优先使用其中的 key 作为 obj_set 的基础
+        if target_ids_dict is not None:
+            target_obj_keys = set(target_ids_dict.keys())
+            if obj_type_set is not None:
+                obj_type_set = obj_type_set & target_obj_keys # 取交集
+            else:
+                obj_type_set = target_obj_keys
+            
+        return obj_type_set
 
+    
 class PointCloud(Modality):
     all = defaultdict(list)
     count = defaultdict(lambda: defaultdict(int))
@@ -209,9 +240,7 @@ class PointCloud(Modality):
 
             # 根据 aff_type 过滤列（aff_type 为 None 时保留全部）
             if aff_type is not None:
-                if isinstance(aff_type, str):
-                    aff_type = [aff_type]
-                aff_set = set(aff_type)
+                aff_set = Modality.normalize_to_set(aff_type)
 
                 keep_indices = [i for i, l in enumerate(labels) if l in aff_set]
                 if keep_indices:
@@ -265,8 +294,9 @@ class PointCloud(Modality):
     def load_all(cls,
             dataset_root_path,
             keep_id=False,
-            obj_type=None,
-            aff_type=None
+            obj_type=None, 
+            aff_type=None,
+            target_ids_dict: dict = None
         ):
         """
         从统一格式的数据集中批量加载 PointCloud
@@ -276,21 +306,10 @@ class PointCloud(Modality):
             keep_id: 是否保持文件名中的 id，而不是重新分配
             obj_type: 需要加载的物体类型；None 时加载所有，可以是 str 或 list[str]
             aff_type: 需要加载的 affordance 类型；None 时加载所有，可以是 str 或 list[str]
+            target_ids_dict: {obj_type: [id1, id2, ...]} 字典。
+                             如果提供了此参数，只加载字典中存在的 obj_type 及其对应的 IDs。
         """
-        # 归一化过滤列表
-        if obj_type is None:
-            obj_type_set = None
-        else:
-            if isinstance(obj_type, str):
-                obj_type = [obj_type]
-            obj_type_set = set(obj_type)
-       
-        if aff_type is None:
-            aff_type_set = None
-        else:
-            if isinstance(aff_type, str):
-                aff_type = [aff_type]
-            aff_type_set = set(aff_type)
+        obj_type_set = cls.normalize_filter_args(obj_type, target_ids_dict)
 
         def iterator():
             for obj_type_name in tqdm(os.listdir(dataset_root_path), desc='加载PointCloud'):
@@ -301,19 +320,41 @@ class PointCloud(Modality):
                 dir_path = os.path.join(dataset_root_path, obj_type_name, 'PointCloud')
                 if not os.path.isdir(dir_path):
                     continue
+                
+                # 获取当前物体需要加载的具体 ID 集合 (Set for O(1) lookup)
+                current_target_ids = None
+                if target_ids_dict is not None:
+                    ids_list = target_ids_dict.get(obj_type_name)
+                    if ids_list is not None:
+                        current_target_ids = set(ids_list)
+                    else:
+                        continue
+
                 for file in tqdm(os.listdir(dir_path), leave=False, desc='PointCloud'):
                     file_path = os.path.join(dir_path, file)
                     if not os.path.isfile(file_path):
                         continue
-                    # print(f'loading PC: {file_path}')
-                    pc = cls.load_file(
-                        file_path,
-                        obj_type=obj_type_name,
-                        aff_type=aff_type_set,
-                        keep_id=keep_id,
-                    )
-                    yield pc
-       
+                    
+                    try:
+                        # 文件名格式: {obj_type}_{id}.csv
+                        file_name_no_ext = os.path.splitext(file)[0]
+                        _, id_str = file_name_no_ext.rsplit('_', 1)
+                        file_id = int(id_str)
+
+                        if current_target_ids is not None and file_id not in current_target_ids:
+                            continue
+
+                        pc = cls.load_file(
+                            file_path,
+                            obj_type=obj_type_name,
+                            aff_type=aff_type,
+                            keep_id=keep_id,
+                        )
+                        yield pc
+                    except Exception as e:
+                        print(f"Failed to load PC {file_path}: {e}")
+                        continue
+            cls.sort_by_id()
         return iterator()
    
     @classmethod
@@ -753,13 +794,7 @@ class Image(Modality):
         labels = []
         mask_dir = os.path.join(dir_path, 'mask')
         if os.path.exists(mask_dir):
-            # 归一化 aff_type 过滤列表（如果提供）
-            if aff_type is not None:
-                if isinstance(aff_type, str):
-                    aff_type = [aff_type]
-                aff_set = set(aff_type)
-            else:
-                aff_set = None
+            aff_set = Modality.normalize_to_set(aff_type)
 
             # 遍历mask目录下的所有label子目录
             for aff in os.listdir(mask_dir):
@@ -780,21 +815,21 @@ class Image(Modality):
                     if mask is not None:
                         aff_mask.append(mask)
                         labels.append(aff)
+        # Discard: 暂不使用
+        # # 加载obj_mask
+        # obj_mask = None
+        # obj_mask_dir = os.path.join(dir_path, 'obj_mask')
+        # if os.path.exists(obj_mask_dir):
+        #     obj_mask_path = os.path.join(obj_mask_dir, f'{obj_type}_{inferred_id}_obj_mask.png')
+        #     if os.path.exists(obj_mask_path):
+        #         obj_mask = cv2.imread(obj_mask_path, cv2.IMREAD_GRAYSCALE)
        
-        # 加载obj_mask
-        obj_mask = None
-        obj_mask_dir = os.path.join(dir_path, 'obj_mask')
-        if os.path.exists(obj_mask_dir):
-            obj_mask_path = os.path.join(obj_mask_dir, f'{obj_type}_{inferred_id}_obj_mask.png')
-            if os.path.exists(obj_mask_path):
-                obj_mask = cv2.imread(obj_mask_path, cv2.IMREAD_GRAYSCALE)
-       
-        # 加载visible_mask
-        visible_mask = None
-        if os.path.exists(obj_mask_dir):
-            vis_mask_path = os.path.join(obj_mask_dir, f'{obj_type}_{inferred_id}_visible_mask.png')
-            if os.path.exists(vis_mask_path):
-                visible_mask = cv2.imread(vis_mask_path, cv2.IMREAD_GRAYSCALE)
+        # # 加载visible_mask
+        # visible_mask = None
+        # if os.path.exists(obj_mask_dir):
+        #     vis_mask_path = os.path.join(obj_mask_dir, f'{obj_type}_{inferred_id}_visible_mask.png')
+        #     if os.path.exists(vis_mask_path):
+        #         visible_mask = cv2.imread(vis_mask_path, cv2.IMREAD_GRAYSCALE)
        
         # 解析文件名中的id，用于可选的 keep_id
         given_id = int(inferred_id) if keep_id else None
@@ -804,8 +839,8 @@ class Image(Modality):
             obj_type=obj_type,
             labels=labels if labels else None,
             aff_mask=aff_mask if aff_mask else None,
-            obj_mask=obj_mask,
-            visible_mask=visible_mask,
+            # obj_mask=obj_mask,
+            # visible_mask=visible_mask,
             given_id=given_id,
         )
 
@@ -813,7 +848,7 @@ class Image(Modality):
 
     @classmethod
     def load_all(cls, dataset_root_path, keep_id=False,
-                 obj_type=None, aff_type=None):
+                 obj_type=None, aff_type=None, target_ids_dict: dict = None):
         """
         从保存的数据集目录结构中加载所有图片
         
@@ -822,21 +857,10 @@ class Image(Modality):
             keep_id: 是否保持文件名中的 id，而不是重新分配
             obj_type: 需要加载的物体类型；None 时加载所有，可以是 str 或 list[str]
             aff_type: 需要加载的 affordance 类型；None 时加载所有，可以是 str 或 list[str]
+            target_ids_dict: {obj_type: [id1, id2, ...]} 字典。
+                             如果提供了此参数，只加载字典中存在的 obj_type 及其对应的 IDs。
         """
-        # 归一化过滤列表
-        if obj_type is None:
-            obj_type_set = None
-        else:
-            if isinstance(obj_type, str):
-                obj_type = [obj_type]
-            obj_type_set = set(obj_type)
-       
-        if aff_type is None:
-            aff_type_set = None
-        else:
-            if isinstance(aff_type, str):
-                aff_type = [aff_type]
-            aff_type_set = set(aff_type)
+        obj_type_set = cls.normalize_filter_args(obj_type, target_ids_dict)
 
         def iterator():
             for obj_type_name in tqdm(os.listdir(dataset_root_path), desc='加载Image'):
@@ -847,32 +871,51 @@ class Image(Modality):
                 obj_type_dir = os.path.join(dataset_root_path, obj_type_name)
                 if not os.path.isdir(obj_type_dir):
                     continue
-               
+                
                 rgb_dir = os.path.join(obj_type_dir, 'Image', 'rgb')
                 if not os.path.isdir(rgb_dir):
                     continue
-               
+                
+                current_target_ids = None
+                if target_ids_dict is not None:
+                    # 使用 get 避免 key error，虽然上面已经过滤过 obj_type
+                    ids_list = target_ids_dict.get(obj_type_name)
+                    if ids_list is not None:
+                        current_target_ids = set(ids_list)
+                    else:
+                        # 如果字典里没有这个key，说明不需要加载这个物体的数据
+                        continue 
+
                 # 遍历rgb目录下的所有图片文件
                 rgb_files = sorted([
                     f for f in os.listdir(rgb_dir)
                     if f.lower().endswith(('.png', '.jpg'))
                 ])
-               
+                
                 for rgb_file in tqdm(rgb_files, leave=False, desc='Image'):
-                    rgb_path = os.path.join(rgb_dir, rgb_file)
                     try:
-                        # print(f'loading IMG: {rgb_path}')
+                        base_name = os.path.splitext(rgb_file)[0]
+                        # rsplit 确保从右边分割，处理 obj_type 中可能包含下划线的情况
+                        _, id_str = base_name.rsplit('_', 1) 
+                        file_id = int(id_str)
+
+                        if current_target_ids is not None and file_id not in current_target_ids:
+                            continue
+
+                        rgb_path = os.path.join(rgb_dir, rgb_file)
+
                         img = cls.load_file(
                             rgb_path,
                             obj_type=obj_type_name,
-                            aff_type=aff_type_set,
+                            aff_type=aff_type,
                             keep_id=keep_id,
                         )
                         yield img
+                    
                     except Exception as e:
                         print(f"Failed to load {rgb_path}: {e}")
                         continue
-       
+            cls.sort_by_id()
         return iterator()
 
     @classmethod
@@ -926,19 +969,22 @@ class Instruction(Modality):
         self.aff_type = aff_type
         if aff_type is not None:
             Instruction.count[obj_type][aff_type] += 1
-
+        
+        # Note: 这里我们假设如果是指定ID加载，外部逻辑会保证ID的唯一性和正确性
         Instruction.count[self.obj_type]['ID'] += 1  # Note: Ins的ID并不是最大的id，仅表示计数
         self.id = Instruction.count[self.obj_type]['ID'] if given_id is None else given_id  # Ins的id和图片的id一一对应
 
     @classmethod
-    def load(cls, file_path, aff_type=None, keep_id=True):
-        if aff_type is not None:
-            if isinstance(aff_type, str):
-                aff_type = [aff_type]
-            aff_set = set(aff_type)
-        else:
-            aff_set = None
+    def load_file(cls, file_path, aff_type=None, keep_id=True, target_ids: list[int] = None):
+        """
+        Args:
+            target_ids: 指定需要加载的ID列表 (List[int])。如果为 None，则加载所有。
+        """
+        aff_set = Modality.normalize_to_set(aff_type)
         
+        # 将 target_ids 转为 set 以优化查找速度
+        target_ids_set = set(target_ids) if target_ids is not None else None
+
         # 加载csv文件，包含header
         instructions = []
         with open(file_path, 'r', newline='', encoding='utf-8') as f:
@@ -947,33 +993,50 @@ class Instruction(Modality):
                 ins = row.get('ins')
                 obj = row.get('obj_type')
                 aff = row.get('aff_type')
+                
+                # 1. Affordance 过滤
                 if aff_set is not None and aff not in aff_set: continue
+
+                # 获取当前行ID
+                row_id = int(row.get('id'))
+
+                # 2. ID 过滤
+                if target_ids_set is not None and row_id not in target_ids_set:
+                    continue
 
                 if not keep_id:
                     given_id = None
                 else:
-                    given_id = int(row.get('id'))
+                    given_id = row_id
 
                 instructions.append(cls(ins, obj_type=obj, aff_type=aff, given_id=given_id))
         return instructions
 
     @classmethod
-    def load_all(cls, dataset_root_path, obj_type=None, aff_type=None, keep_id=True):
+    def load_all(cls, dataset_root_path, obj_type=None, aff_type=None, keep_id=True, target_ids_dict: dict = None):
+        """
+        Args:
+            target_ids_dict: {obj_type: [id1, id2, ...]} 字典。
+                             如果提供了此参数，只加载字典中存在的 obj_type 及其对应的 IDs。
+        """
         """一次加载一个物体，不使用迭代器"""
-        if obj_type is not None:
-            if isinstance(obj_type, str):
-                obj_type = [obj_type]
-            obj_set = set(obj_type)
-        else:
-            obj_set = None
-        
+        obj_set = cls.normalize_filter_args(obj_type, target_ids_dict)
+
         for obj in tqdm(os.listdir(dataset_root_path), desc='加载Instruction'):
             if obj_set is not None and obj not in obj_set: continue
 
             file_path = os.path.join(dataset_root_path, obj, 'Instruction.csv')
             if os.path.exists(file_path):
-                cls.load(file_path, aff_type=aff_type, keep_id=keep_id)
-
+                # 获取当前物体需要加载的具体 ID 列表
+                current_target_ids = None
+                if target_ids_dict is not None:
+                    current_target_ids = target_ids_dict.get(obj)
+                    # 如果 target_ids_dict 存在但当前 obj 不在其中（虽前面过滤过，防守式编程），则跳过
+                    if current_target_ids is None: 
+                        continue
+                
+                cls.load_file(file_path, aff_type=aff_type, keep_id=keep_id, target_ids=current_target_ids)
+        cls.sort_by_id()
 
     @classmethod
     def save_all(cls, dataset_root_dir, obj_type:list[str]=None, keep_id: bool=True):
@@ -981,7 +1044,6 @@ class Instruction(Modality):
         Args:
             obj_type: 需要保存的指定的物品list['bag', 'knife',...]，默认保存所有
             keep_id: 是否保持对象的 id，False 时按顺序重新分配 id
-
         """
         # 保存为csv文件，包含header
         fieldnames = ['ins', 'obj_type', 'aff_type', 'id']
@@ -1182,25 +1244,28 @@ class JointDataset:
         split_json_path = os.path.join(dataset_root, 'dataset_split.json')
         if split_json_path and os.path.exists(split_json_path):
             print(f"从JSON文件加载数据集分割: {split_json_path}")
-            self.load_from_split_json()
+            self.load_from_split_json(split_json_path)
         else:
             # 加载数据并分割
             self.load_all_data()
             self.split_dataset()
         self.pair_samples()
     
-    def load_all_data(self):
+    def load_all_data(self, filter_by_ids=None):
         """加载 Instruction、Image、PointCloud 数据"""
         import threading
 
         def load_pc_wrapper():
-            for _ in PointCloud.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id): pass
+            target_ids_dict = filter_by_ids['pc'] if filter_by_ids is not None else None
+            for _ in PointCloud.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id, target_ids_dict=target_ids_dict): pass
 
         def load_img_wrapper():
-            for _ in Image.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id): pass
+            target_ids_dict = filter_by_ids['img'] if filter_by_ids is not None else None
+            for _ in Image.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id, target_ids_dict=target_ids_dict): pass
 
         def load_ins_wrapper():
-            Instruction.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id)
+            target_ids_dict = filter_by_ids['ins'] if filter_by_ids is not None else None
+            Instruction.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id, target_ids_dict=target_ids_dict)
 
         # 创建线程
         t1 = threading.Thread(target=load_pc_wrapper)
@@ -1440,19 +1505,41 @@ class JointDataset:
         self.val_ratio = metadata['val_ratio']
         self.test_ratio = metadata['test_ratio']
         self.random_seed = metadata['random_seed']
-        self.keep_id = metadata['keep_id']
-        self.balance_data = metadata['balance_data']
-        self.count = 0
         
         # 加载分割索引
         self._train_ids = split_data.get('train', create_info_dict())
         self._val_ids = split_data.get('val', create_info_dict())
         self._test_ids = split_data.get('test', create_info_dict())
+        
+        # 兼容缩写
+        for e in (self._train_ids, self._test_ids, self._val_ids):
+            e['ins'] = e['Instruction']
+            e['img'] = e['Image']
+            e['pc'] = e['PointCloud']
 
-        self._train_ids['ins'] = self._train_ids['Instruction']
-        self._train_ids['img'] = self._train_ids['Image']
-        self._train_ids['pc'] = self._train_ids['PointCloud']
-
+        def merge_split_ids(*splits):
+            """
+            合并多个 split 字典 (train/val/test)，保持原有的层级结构：
+            Modality -> ObjType -> AffType -> List
+            """
+            # 使用 defaultdict 自动处理嵌套结构，简化代码
+            merged = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+            
+            for split in splits:
+                if not split: continue
+                # 第1层：Modality (Instruction, Image, PointCloud)
+                for mod, obj_dict in split.items():
+                    # 第2层：Object Type (Bottle, Chair...)
+                    for obj, aff_dict in obj_dict.items():
+                        # 第3层：Affordance Type (grasp, hold...)
+                        for aff, ids in aff_dict.items():
+                            # 第4层：List (直接拼接列表)
+                            merged[mod][obj][aff].extend(ids)
+            
+            return merged
+        
+        merged_ids = merge_split_ids(self._train_ids, self._test_ids, self._val_ids)
+        self.load_all_data(filter_by_ids=merged_ids)
 
     def save_split_json(self, save_path: str = None) -> str:
         """

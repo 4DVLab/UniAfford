@@ -105,7 +105,7 @@ def rename_obj_type(dataset_root, obj_rename, aff_rename=None):
     # 加载 Instruction
     old_ins_file = os.path.join(old_obj_dir, 'Instruction.csv')
     if os.path.exists(old_ins_file):
-        instructions = Instruction.load(old_ins_file, keep_id=True)
+        instructions = Instruction.load_file(old_ins_file, keep_id=True)
         # 更新 obj_type 为新名称，创建新的 Instruction 对象
         for inst in instructions:
             if inst.obj_type == old_obj_type:
