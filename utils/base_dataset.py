@@ -1515,9 +1515,14 @@ class JointDataset:
             for split in splits:
                 if not split: continue
                 for mod, obj_dict in split.items():
-                    for obj, aff_dict in obj_dict.items():
-                        for aff, ids in aff_dict.items():
-                            merged[mod][obj].extend([e[0] for e in ids])
+                    if mod in ('ins', 'Instruction'):
+                        for obj, aff_dict in obj_dict.items():
+                            for aff, ids in aff_dict.items():
+                                merged[mod][obj].extend(ids)
+                    else:
+                        for obj, aff_dict in obj_dict.items():
+                            for aff, ids in aff_dict.items():
+                                merged[mod][obj].extend([e[0] for e in ids])
             
             return merged
         
