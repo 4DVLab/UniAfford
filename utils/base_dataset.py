@@ -309,41 +309,32 @@ class PointCloud(Modality):
             target_ids_dict: {obj_type: [id1, id2, ...]} 字典。
                              如果提供了此参数，只加载字典中存在的 obj_type 及其对应的 IDs。
         """
-        obj_type_set = cls.normalize_filter_args(obj_type, target_ids_dict)
-
+        # 确定要加载的文件
+        obj_set = cls.normalize_filter_args(obj_type, target_ids_dict)
+        all_objs = set([d for d in os.listdir(dataset_root_path) if os.path.isdir(os.path.join(dataset_root_path, d))])
+        if obj_set is not None:
+            all_objs |= obj_set
+        
         def iterator():
-            for obj_type_name in tqdm(os.listdir(dataset_root_path), desc='加载PointCloud'):
-                # 物体类型过滤
-                if obj_type_set is not None and obj_type_name not in obj_type_set:
-                    continue
-
+            for obj_type_name in tqdm(sorted(all_objs), desc='加载PointCloud'):
                 dir_path = os.path.join(dataset_root_path, obj_type_name, 'PointCloud')
-                if not os.path.isdir(dir_path):
+                if not os.path.exists(dir_path):
                     continue
                 
-                # 获取当前物体需要加载的具体 ID 集合 (Set for O(1) lookup)
-                current_target_ids = None
-                if target_ids_dict is not None:
-                    ids_list = target_ids_dict.get(obj_type_name)
-                    if ids_list is not None:
-                        current_target_ids = set(ids_list)
-                    else:
-                        continue
-
-                for file in tqdm(os.listdir(dir_path), leave=False, desc='PointCloud'):
+                # 注意：target_ids_dict 的 key 必须与文件夹名完全一致
+                if target_ids_dict:
+                    target_ids = target_ids_dict.get(obj_type_name)
+                    files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in target_ids]
+                else:
+                    files_to_load = [f for f in os.listdir(dir_path) if f.endswith('.csv')]
+            
+                for file in tqdm(files_to_load, leave=False, desc=f'PC-{obj_type_name}'):
                     file_path = os.path.join(dir_path, file)
-                    if not os.path.isfile(file_path):
+                    if not os.path.isfile(file_path) or not os.path.exists(file_path):
+                        warnings.warn(f"File not exist: {file_path}")
                         continue
-                    
+
                     try:
-                        # 文件名格式: {obj_type}_{id}.csv
-                        file_name_no_ext = os.path.splitext(file)[0]
-                        _, id_str = file_name_no_ext.rsplit('_', 1)
-                        file_id = int(id_str)
-
-                        if current_target_ids is not None and file_id not in current_target_ids:
-                            continue
-
                         pc = cls.load_file(
                             file_path,
                             obj_type=obj_type_name,
@@ -352,8 +343,7 @@ class PointCloud(Modality):
                         )
                         yield pc
                     except Exception as e:
-                        print(f"Failed to load PC {file_path}: {e}")
-                        continue
+                        warnings.warn(f"Failed to load PC {file_path}: {e}")
             cls.sort_by_id()
         return iterator()
    
@@ -860,61 +850,57 @@ class Image(Modality):
             target_ids_dict: {obj_type: [id1, id2, ...]} 字典。
                              如果提供了此参数，只加载字典中存在的 obj_type 及其对应的 IDs。
         """
-        obj_type_set = cls.normalize_filter_args(obj_type, target_ids_dict)
+        VALID_EXTS = ('.png', '.jpg', '.jpeg') # 定义支持的图片后缀
+
+        # 确定要遍历的物体类型列表
+        obj_set = cls.normalize_filter_args(obj_type, target_ids_dict)
+        all_objs = set([d for d in os.listdir(dataset_root_path) if os.path.isdir(os.path.join(dataset_root_path, d))])
+        if obj_set is not None:
+            all_objs |= obj_set
 
         def iterator():
-            for obj_type_name in tqdm(os.listdir(dataset_root_path), desc='加载Image'):
-                # 物体类型过滤
-                if obj_type_set is not None and obj_type_name not in obj_type_set:
-                    continue
-
-                obj_type_dir = os.path.join(dataset_root_path, obj_type_name)
-                if not os.path.isdir(obj_type_dir):
+            for obj_type_name in tqdm(sorted(all_objs), desc='加载Image'):
+                rgb_dir = os.path.join(dataset_root_path, obj_type_name, 'Image', 'rgb')
+                if not os.path.exists(rgb_dir):
                     continue
                 
-                rgb_dir = os.path.join(obj_type_dir, 'Image', 'rgb')
-                if not os.path.isdir(rgb_dir):
-                    continue
-                
-                current_target_ids = None
+                files_to_load = []
+                # 构造指定id的文件名
                 if target_ids_dict is not None:
-                    # 使用 get 避免 key error，虽然上面已经过滤过 obj_type
-                    ids_list = target_ids_dict.get(obj_type_name)
-                    if ids_list is not None:
-                        current_target_ids = set(ids_list)
-                    else:
-                        # 如果字典里没有这个key，说明不需要加载这个物体的数据
-                        continue 
+                    target_ids = target_ids_dict.get(obj_type_name, [])
+                    # 这里虽然多了一层循环，但在 ID 确定的情况下，比 os.listdir 依然快得多
+                    for target_id in target_ids:
+                        found = False
+                        # 尝试构造文件名
+                        for ext in VALID_EXTS:
+                            filename = f"{obj_type_name}_{target_id}{ext}"
+                            # 只有文件真实存在时，才加入待加载列表
+                            if os.path.exists(os.path.join(rgb_dir, filename)):
+                                files_to_load.append(filename)
+                                found = True
+                                break
+                        
+                        if not found:
+                            warnings.warn(f"Image file not found: {obj_type_name}_{target_id}")
+                            
+                # 加载整个目录
+                else:
+                    files_to_load = sorted([f for f in os.listdir(rgb_dir) if f.lower().endswith(VALID_EXTS)])
 
-                # 遍历rgb目录下的所有图片文件
-                rgb_files = sorted([
-                    f for f in os.listdir(rgb_dir)
-                    if f.lower().endswith(('.png', '.jpg'))
-                ])
-                
-                for rgb_file in tqdm(rgb_files, leave=False, desc='Image'):
+                # ----------------------- 统一加载循环 -----------------------
+                for rgb_file in tqdm(files_to_load, leave=False, desc=f'Img-{obj_type_name}'):
+                    file_path = os.path.join(rgb_dir, rgb_file)
                     try:
-                        base_name = os.path.splitext(rgb_file)[0]
-                        # rsplit 确保从右边分割，处理 obj_type 中可能包含下划线的情况
-                        _, id_str = base_name.rsplit('_', 1) 
-                        file_id = int(id_str)
-
-                        if current_target_ids is not None and file_id not in current_target_ids:
-                            continue
-
-                        rgb_path = os.path.join(rgb_dir, rgb_file)
-
                         img = cls.load_file(
-                            rgb_path,
+                            file_path,
                             obj_type=obj_type_name,
                             aff_type=aff_type,
                             keep_id=keep_id,
                         )
                         yield img
-                    
                     except Exception as e:
-                        print(f"Failed to load {rgb_path}: {e}")
-                        continue
+                        warnings.warn(f"Failed to load Img {file_path}: {e}")
+            
             cls.sort_by_id()
         return iterator()
 
@@ -1021,8 +1007,12 @@ class Instruction(Modality):
         """
         """一次加载一个物体，不使用迭代器"""
         obj_set = cls.normalize_filter_args(obj_type, target_ids_dict)
-
-        for obj in tqdm(os.listdir(dataset_root_path), desc='加载Instruction'):
+        # 合并 obj_set 和目录下所有文件夹名，确保 tqdm 数量正确（处理全部可能出现的 obj_type）
+        all_objs = set([d for d in os.listdir(dataset_root_path) if os.path.isdir(os.path.join(dataset_root_path, d))])
+        if obj_set is not None:
+            all_objs |= obj_set
+        
+        for obj in tqdm(sorted(all_objs), desc='加载Instruction'):
             if obj_set is not None and obj not in obj_set: continue
 
             file_path = os.path.join(dataset_root_path, obj, 'Instruction.csv')
@@ -1031,9 +1021,6 @@ class Instruction(Modality):
                 current_target_ids = None
                 if target_ids_dict is not None:
                     current_target_ids = target_ids_dict.get(obj)
-                    # 如果 target_ids_dict 存在但当前 obj 不在其中（虽前面过滤过，防守式编程），则跳过
-                    if current_target_ids is None: 
-                        continue
                 
                 cls.load_file(file_path, aff_type=aff_type, keep_id=keep_id, target_ids=current_target_ids)
         cls.sort_by_id()
