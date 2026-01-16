@@ -273,14 +273,13 @@ class PointCloud(Modality):
                 keep_indices = [i for i, l in enumerate(labels) if l in aff_set]
                 if keep_indices:
                     mask = mask[:, keep_indices]
-                    mask = [mask[:, col] for col in range(mask.shape[1])]
-
                     labels = [labels[i] for i in keep_indices]
                 else:
                     # 如果没有匹配的列，则置空 mask / labels
                     mask = None
                     labels = None
-
+            
+            mask = [mask[:, col] for col in range(mask.shape[1])]
             pc_obj = PointCloud(points=data[:, :3],
                                 mask=mask,
                                 obj_type=obj_type,
