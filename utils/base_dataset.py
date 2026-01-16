@@ -326,7 +326,7 @@ class PointCloud(Modality):
                 # 注意：target_ids_dict 的 key 必须与文件夹名完全一致
                 if target_ids_dict:
                     target_ids = target_ids_dict.get(obj_type_name)
-                    files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in target_ids]
+                    files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in sorted(target_ids)]
                 else:
                     files_to_load = [f for f in os.listdir(dir_path) if f.endswith('.csv')]
             
@@ -871,7 +871,7 @@ class Image(Modality):
                 if target_ids_dict is not None:
                     target_ids = target_ids_dict.get(obj_type_name, [])
                     # 这里虽然多了一层循环，但在 ID 确定的情况下，比 os.listdir 依然快得多
-                    for target_id in target_ids:
+                    for target_id in sorted(target_ids):
                         found = False
                         # 尝试构造文件名
                         for ext in VALID_EXTS:
@@ -889,7 +889,6 @@ class Image(Modality):
                 else:
                     files_to_load = sorted([f for f in os.listdir(rgb_dir) if f.lower().endswith(VALID_EXTS)])
 
-                # ----------------------- 统一加载循环 -----------------------
                 for rgb_file in tqdm(files_to_load, leave=False, desc=f'Img-{obj_type_name}'):
                     file_path = os.path.join(rgb_dir, rgb_file)
                     try:
@@ -1512,7 +1511,7 @@ class JointDataset:
             Modality -> ObjType -> AffType -> List
             """
             # {pc: {obj1: [ids1, ids2]...}}
-            merged = defaultdict(lambda: defaultdict(list))
+            merged = defaultdict(lambda: defaultdict(set))
             
             for split in splits:
                 if not split: continue
@@ -1520,11 +1519,11 @@ class JointDataset:
                     if mod in ('ins', 'Instruction'):
                         for obj, aff_dict in obj_dict.items():
                             for aff, ids in aff_dict.items():
-                                merged[mod][obj].extend(ids)
+                                merged[mod][obj] |= set(ids)
                     else:
                         for obj, aff_dict in obj_dict.items():
                             for aff, ids in aff_dict.items():
-                                merged[mod][obj].extend([e[0] for e in ids])
+                                merged[mod][obj] |= set([e[0] for e in ids])
             
             return merged
         
