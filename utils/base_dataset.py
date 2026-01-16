@@ -1517,7 +1517,7 @@ class JointDataset:
                 for mod, obj_dict in split.items():
                     for obj, aff_dict in obj_dict.items():
                         for aff, ids in aff_dict.items():
-                            merged[mod][obj].extend(ids)
+                            merged[mod][obj].extend([e[0] for e in ids])
             
             return merged
         
