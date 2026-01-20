@@ -595,6 +595,122 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             return super().forward(**kwargs)
         # 否则使用自定义的 model_forward
         return self.model_forward(**kwargs)
+    
+    def _extract_token_embeddings(self, output_ids, last_hidden_state, token_idx, has_image):
+        """
+        提取特定 token 的嵌入并按样本分组
+        
+        Args:
+            output_ids: 输出的 token IDs [B, L]
+            last_hidden_state: 投影后的隐藏状态 [B, L, C]
+            token_idx: 要提取的 token 索引
+            has_image: 是否有图像输入（决定是否添加 IMAGE_TOKEN_INDEX 填充）
+            
+        Returns:
+            token_embeddings_list: 按样本分组的 token 嵌入列表
+        """
+        # 找到指定 token 的位置
+        token_mask = output_ids[:, 1:] == token_idx
+        
+        # 处理 IMAGE_TOKEN_INDEX（如果有图像）
+        if has_image:
+            token_mask = torch.cat(
+                [torch.zeros((token_mask.shape[0], 255)).bool().cuda(), token_mask],
+                dim=1,
+            )
+        
+        # 提取 token 的嵌入
+        token_embeddings = last_hidden_state[token_mask]
+        
+        # 按样本分组
+        token_counts = token_mask.int().sum(-1)
+        token_offset = token_counts.cumsum(-1)
+        token_offset = torch.cat([torch.zeros(1).long().cuda(), token_offset], dim=0)
+        
+        token_embeddings_list = []
+        for i in range(len(token_offset) - 1):
+            start_i, end_i = token_offset[i], token_offset[i + 1]
+            token_embeddings_list.append(token_embeddings[start_i:end_i])
+        
+        return token_embeddings_list
+    
+    def _generate_2d_masks(self, pred_embeddings_list, image_embeddings, resize_list, label_list):
+        """
+        使用 SAM 生成 2D 分割掩码
+        
+        Args:
+            pred_embeddings_list: 按样本分组的预测嵌入列表
+            image_embeddings: SAM 图像嵌入
+            resize_list: 图像尺寸调整列表
+            label_list: 原始图像尺寸列表
+            
+        Returns:
+            pred_masks: 预测的 2D 掩码列表
+        """
+        pred_masks = []
+        multimask_output = False
+        
+        for i in range(len(pred_embeddings_list)):
+            if len(pred_embeddings_list[i]) > 0:
+                # 将文本特征转换为 SAM 提示嵌入
+                (sparse_embeddings, dense_embeddings) = self.model.visual_model.prompt_encoder(
+                    points=None, boxes=None, masks=None,
+                    text_embeds=pred_embeddings_list[i].unsqueeze(1),
+                )
+                sparse_embeddings = sparse_embeddings.to(pred_embeddings_list[i].dtype)
+                
+                # 使用 SAM 的 mask decoder 生成掩码
+                low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
+                    image_embeddings=image_embeddings[i].unsqueeze(0),
+                    image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
+                    sparse_prompt_embeddings=sparse_embeddings,
+                    dense_prompt_embeddings=dense_embeddings,
+                    multimask_output=multimask_output,
+                )
+                
+                # 后处理掩码：调整到原始图像尺寸
+                pred_mask = self.model.visual_model.postprocess_masks(
+                    low_res_masks,
+                    input_size=resize_list[i],
+                    original_size=label_list[i],
+                )
+                pred_masks.append(pred_mask[:, 0])
+        
+        return pred_masks
+    
+    def _generate_3d_masks(self, pred_embeddings_list, point_clouds):
+        """
+        使用 PointNet++ 生成 3D 点云掩码
+        
+        Args:
+            pred_embeddings_list: 按样本分组的预测嵌入列表
+            point_clouds: 点云数据 [B, 3, N]
+            
+        Returns:
+            pred_3d_masks: 预测的 3D 掩码列表
+        """
+        # 确保点云格式为 [B, 3, N]
+        if point_clouds.shape[1] != 3:
+            point_clouds = point_clouds.permute(0, 2, 1)
+        
+        pred_3d_masks = []
+        batch_size = point_clouds.shape[0]
+        
+        for i in range(batch_size):
+            if len(pred_embeddings_list[i]) > 0:
+                # text_feat: [num_tokens, embed_dim] -> [1, num_tokens, embed_dim]
+                text_feat = pred_embeddings_list[i].unsqueeze(0)
+                text_mask = torch.ones(1, text_feat.shape[1], dtype=torch.bool, device=text_feat.device)
+                pc_i = point_clouds[i:i+1]  # [1, 3, N]
+                
+                # 使用 3D 分割器
+                pred_3d_mask = self.model.point_cloud_segmentor(pc_i, text_feat, text_mask)  # [1, N]
+                pred_3d_masks.append(pred_3d_mask.squeeze(0))  # [N]
+            else:
+                # 如果没有特殊 token，返回全零掩码
+                pred_3d_masks.append(torch.zeros(point_clouds.shape[2], device=point_clouds.device))
+        
+        return pred_3d_masks
 
     def model_forward(
         self,
@@ -625,12 +741,15 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             masks_list: 真实分割掩码列表
             label_list: 标签列表
             resize_list: 图像尺寸调整列表
-            inference: 是否为推理模式
+            inference: 是否为推理模式（不计算损失）
             point_clouds: 3D点云输入
             point_masks_list: 3D点云真实掩码列表
+            generate_mode: 是否使用生成模式（用于 evaluate，会生成新的 token）
+            max_new_tokens: 生成模式下的最大 token 数
             
         Returns:
-            包含损失和预测结果的字典
+            如果 generate_mode=True: (output_ids, pred_2d_masks, pred_3d_masks)
+            否则: 包含损失和预测结果的字典
         """
         # 判断输入模态
         has_image = images is not None and images_clip is not None
@@ -643,7 +762,8 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # 获取 batch_size
         if has_image:
             batch_size = images.shape[0]
-            assert batch_size == len(offset) - 1
+            if offset is not None:
+                assert batch_size == len(offset) - 1
         else:
             batch_size = point_clouds.shape[0] if has_point_cloud else 1
         
@@ -706,36 +826,15 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             images_clip = None
 
         # 统一调用父类前向传播（LLaVA）
-        if inference:
-            # 推理模式：逐批处理以节省内存
-            n_batch = 1
-            length = input_ids.shape[0]
-            output_hidden_states = []
-            
-            for i in range(n_batch):
-                start_i, end_i = i * length, min((i + 1) * length, input_ids.shape[0])
-                output_i = super().forward(
-                    images=images_clip[start_i:end_i] if has_image else None,
-                    attention_mask=attention_masks[start_i:end_i],
-                    input_ids=input_ids[start_i:end_i],
-                    output_hidden_states=True,
-                )
-                output_hidden_states.append(output_i.hidden_states)
-                torch.cuda.empty_cache()
-            
-            # 合并所有批次的隐藏状态
-            output_hidden_states = [torch.cat(output_hidden_states, dim=0)]
-            output = None
-        else:
-            # 训练模式：批量处理
-            output = super().forward(
-                images=images_clip,
-                attention_mask=attention_masks,
-                input_ids=input_ids,
-                labels=labels,
-                output_hidden_states=True,
-            )
-            output_hidden_states = output.hidden_states
+        # 推理和训练的唯一区别是是否传入labels
+        output = super().forward(
+            images=images_clip if has_image else None,
+            attention_mask=attention_masks,
+            input_ids=input_ids,
+            labels=labels if not inference else None,
+            output_hidden_states=True,
+        )
+        output_hidden_states = output.hidden_states
 
         # 将语言模型的隐藏状态投影到 prompt 嵌入空间
         assert len(self.model.text_hidden_fcs) == 1
@@ -765,53 +864,12 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # ========== 2D 分割：使用 SAM 生成分割掩码（仅在有图像输入时）==========
         pred_masks = []
         if has_image:
-            multimask_output = False
-            for i in range(len(pred_embeddings)):
-                if len(pred_embeddings[i]) > 0:
-                    # 将文本特征转换为 SAM 提示嵌入
-                    (sparse_embeddings, dense_embeddings) = self.model.visual_model.prompt_encoder(
-                        points=None, boxes=None, masks=None,
-                        text_embeds=pred_embeddings[i].unsqueeze(1),
-                    )
-                    sparse_embeddings = sparse_embeddings.to(pred_embeddings[i].dtype)
-                    
-                    # 使用 SAM 的 mask decoder 生成掩码
-                    low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
-                        image_embeddings=image_embeddings[i].unsqueeze(0),
-                        image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
-                        sparse_prompt_embeddings=sparse_embeddings,
-                        dense_prompt_embeddings=dense_embeddings,
-                        multimask_output=multimask_output,
-                    )
-                    
-                    # 后处理掩码：调整到原始图像尺寸
-                    pred_mask = self.model.visual_model.postprocess_masks(
-                        low_res_masks,
-                        input_size=resize_list[i],
-                        original_size=label_list[i],
-                    )
-                    pred_masks.append(pred_mask[:, 0])
+            pred_masks = self._generate_2d_masks(pred_embeddings, image_embeddings, resize_list, label_list)
 
         # ========== 3D 分割：使用 PointNet++ 处理点云（仅在有点云输入时）==========
         pred_3d_masks = []
         if has_point_cloud:
-            # 确保点云格式为 [B, 3, N]
-            if point_clouds.shape[1] != 3:
-                point_clouds = point_clouds.permute(0, 2, 1)
-            
-            for i in range(batch_size):
-                if len(pred_embeddings[i]) > 0:
-                    # text_feat: [num_aff_tokens, embed_dim] -> [1, num_aff_tokens, embed_dim]
-                    text_feat = pred_embeddings[i].unsqueeze(0)
-                    text_mask = torch.ones(1, text_feat.shape[1], dtype=torch.bool, device=text_feat.device)
-                    pc_i = point_clouds[i:i+1]  # [1, 3, N]
-                    
-                    # 使用 3D 分割器
-                    pred_3d_mask = self.model.point_cloud_segmentor(pc_i, text_feat, text_mask)  # [1, N]
-                    pred_3d_masks.append(pred_3d_mask.squeeze(0))  # [N]
-                else:
-                    # 如果没有特殊 token，返回全零掩码
-                    pred_3d_masks.append(torch.zeros(point_clouds.shape[2], device=point_clouds.device))
+            pred_3d_masks = self._generate_3d_masks(pred_embeddings, point_clouds)
 
         # 推理模式：只返回预测结果
         if inference:
@@ -903,41 +961,49 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
 
     def evaluate(
         self,
-        images_clip,
-        images,
-        input_ids,
-        resize_list,
-        original_size_list,
+        images_clip=None,
+        images=None,
+        input_ids=None,
+        resize_list=None,
+        original_size_list=None,
         max_new_tokens=32,
         tokenizer=None,
-        point_clouds=None,  # 3D点云输入 [B, 3, N] 或 [B, N, 3]
+        point_clouds=None,
     ):
         """
-        评估函数：生成文本并预测分割掩码
+        评估函数：生成文本并预测分割掩码（支持动态模态输入）
         
         Args:
-            images_clip: CLIP 输入图像
-            images: SAM 输入图像
+            images_clip: CLIP 输入图像，可选
+            images: SAM 输入图像，可选
             input_ids: 输入 token IDs
-            resize_list: 图像尺寸调整列表
-            original_size_list: 原始图像尺寸列表
+            resize_list: 图像尺寸调整列表，可选
+            original_size_list: 原始图像尺寸列表，可选
             max_new_tokens: 最大生成 token 数
             tokenizer: 分词器（未使用）
-            point_clouds: 3D点云数据
+            point_clouds: 3D点云数据，可选
             
         Returns:
             output_ids: 生成的 token IDs
-            pred_2d_masks: 预测的 2D 分割掩码列表
-            pred_3d_masks: 预测的 3D 点云掩码列表
+            pred_2d_masks: 预测的 2D 分割掩码列表（如果有图像）或 None
+            pred_3d_masks: 预测的 3D 点云掩码列表（如果有点云）或 None
         """
+        # 判断输入模态
+        has_image = images is not None and images_clip is not None
+        has_point_cloud = point_clouds is not None
+        
+        # 至少需要一种模态
+        if not has_image and not has_point_cloud:
+            raise ValueError("至少需要提供图像或点云输入")
+        
         with torch.no_grad():
-            """ -------------------------------------- VLM process part ----------------------------------- """
-            # 预处理 CLIP 图像
-            images_clip = self.preprocess_clip_images(images_clip)
+            # ========== 1. 预处理图像（与训练/推理一致）==========
+            if has_image:
+                images_clip = self.preprocess_clip_images(images_clip)
             
-            # 生成文本（包含 [SEG] token）
+            # ========== 2. 生成文本（包含 [SEG]/[AFF] token）==========
             outputs = self.generate(
-                images=images_clip,
+                images=images_clip if has_image else None,
                 input_ids=input_ids,
                 max_new_tokens=max_new_tokens,
                 num_beams=1,
@@ -946,126 +1012,37 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             )
             output_hidden_states = outputs.hidden_states[-1]
             output_ids = outputs.sequences
-
-            """ -------------------------------------- <2D-AFF> process part ----------------------------------- """
-            # 找到生成的 [SEG] token 位置
-            seg_token_mask_2d = output_ids[:, 1:] == self.seg_token_idx
-            # 处理 IMAGE_TOKEN_INDEX
-            seg_token_mask_2d = torch.cat(
-                [
-                    torch.zeros((seg_token_mask_2d.shape[0], 255)).bool().cuda(),
-                    seg_token_mask_2d,
-                ],
-                dim=1,
-            )
-
-            # 投影隐藏状态到 SAM prompt 空间
-            hidden_states = []
-
-            assert len(self.model.text_hidden_fcs) == 1
-            hidden_states.append(self.model.text_hidden_fcs[0](output_hidden_states))
-
-            last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
-            pred_embeddings = last_hidden_state[seg_token_mask_2d]
-
-            # 按样本分组预测嵌入
-            seg_token_counts = seg_token_mask_2d.int().sum(-1)  # [bs, ]
-            seg_token_offset = seg_token_counts.cumsum(-1)
-            seg_token_offset = torch.cat(
-                [torch.zeros(1).long().cuda(), seg_token_offset], dim=0
-            )
-
-            pred_embeddings_ = []
-            for i in range(len(seg_token_offset) - 1):
-                start_i, end_i = seg_token_offset[i], seg_token_offset[i + 1]
-                pred_embeddings_.append(pred_embeddings[start_i:end_i])
-            pred_embeddings = pred_embeddings_
-
-            """ -------------------------------------- SAM process part ----------------------------------- """
-            # 获取 SAM 图像嵌入
-            image_embeddings = self.get_visual_embs(images)
-
-            # 生成分割掩码
-            multimask_output = False
-            pred_2d_masks = []
-            for i in range(len(pred_embeddings)):
-                # 编码文本嵌入为 SAM 提示
-                (
-                    sparse_embeddings,
-                    dense_embeddings,
-                ) = self.model.visual_model.prompt_encoder(
-                    points=None,
-                    boxes=None,
-                    masks=None,
-                    text_embeds=pred_embeddings[i].unsqueeze(1),
-                )
-
-                sparse_embeddings = sparse_embeddings.to(pred_embeddings[i].dtype)
-                # 解码生成掩码
-                low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
-                    image_embeddings=image_embeddings[i].unsqueeze(0),
-                    image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
-                    sparse_prompt_embeddings=sparse_embeddings,
-                    dense_prompt_embeddings=dense_embeddings,
-                    multimask_output=multimask_output,
-                )
-                # 后处理掩码
-                pred_mask = self.model.visual_model.postprocess_masks(
-                    low_res_masks,
-                    input_size=resize_list[i],
-                    original_size=original_size_list[i],
-                )
-                pred_2d_masks.append(pred_mask[:, 0])
             
-            """ -------------------------------------- <3D-AFF> process part ----------------------------------- """
-            pred_3d_masks = None
-            if point_clouds is not None:
-                # 确保点云格式为 [B, 3, N]
-                if point_clouds.shape[1] != 3:
-                    point_clouds = point_clouds.permute(0, 2, 1)
-                
-                batch_size = point_clouds.shape[0]
-                
-                # 找到 [AFF] token 的位置（用于 3D 分割）
-                aff_token_mask = output_ids[:, 1:] == self.aff_token_idx
-                # 处理 IMAGE_TOKEN_INDEX
-                aff_token_mask = torch.cat(
-                    [
-                        torch.zeros((aff_token_mask.shape[0], 255)).bool().cuda(),
-                        aff_token_mask,
-                    ],
-                    dim=1,
+            # ========== 3. 投影隐藏状态到 prompt 空间（与训练/推理一致）==========
+            assert len(self.model.text_hidden_fcs) == 1
+            last_hidden_state = self.model.text_hidden_fcs[0](output_hidden_states)
+            
+            # ========== 4. 2D 分割：处理 [SEG] token（使用公共函数）==========
+            pred_2d_masks = []
+            if has_image:
+                # 提取 [SEG] token 的嵌入
+                seg_embeddings_list = self._extract_token_embeddings(
+                    output_ids, last_hidden_state, self.seg_token_idx, has_image
                 )
                 
-                # 提取 [AFF] token 位置的嵌入
-                aff_embeddings = last_hidden_state[aff_token_mask]
-                aff_token_counts = aff_token_mask.int().sum(-1)
-                aff_token_offset = aff_token_counts.cumsum(-1)
-                aff_token_offset = torch.cat(
-                    [torch.zeros(1).long().cuda(), aff_token_offset], dim=0
+                # 获取 SAM 图像嵌入
+                image_embeddings = self.get_visual_embs(images)
+                
+                # 生成 2D 掩码
+                pred_2d_masks = self._generate_2d_masks(
+                    seg_embeddings_list, image_embeddings, resize_list, original_size_list
+                )
+            
+            # ========== 5. 3D 分割：处理 [AFF] token（使用公共函数）==========
+            pred_3d_masks = []
+            if has_point_cloud:
+                # 提取 [AFF] token 的嵌入
+                aff_embeddings_list = self._extract_token_embeddings(
+                    output_ids, last_hidden_state, self.aff_token_idx, has_image
                 )
                 
-                # 将预测嵌入按样本分组
-                aff_embeddings_ = []
-                for i in range(len(aff_token_offset) - 1):
-                    start_i, end_i = aff_token_offset[i], aff_token_offset[i + 1]
-                    aff_embeddings_.append(aff_embeddings[start_i:end_i])
-                
-                # 使用 3D 点云分割器生成掩码
-                pred_3d_masks = []
-                for i in range(batch_size):
-                    if len(aff_embeddings_[i]) > 0:
-                        # text_feat: [num_aff_tokens, embed_dim] -> [1, num_aff_tokens, embed_dim]
-                        text_feat = aff_embeddings_[i].unsqueeze(0)
-                        # 创建文本掩码（全部有效）
-                        text_mask = torch.ones(1, text_feat.shape[1], dtype=torch.bool, device=text_feat.device)
-                        # 获取当前样本的点云
-                        pc_i = point_clouds[i:i+1]  # [1, 3, N]
-                        # 使用 3D 分割器
-                        pred_3d_mask = self.model.point_cloud_segmentor(pc_i, text_feat, text_mask)  # [1, N]
-                        pred_3d_masks.append(pred_3d_mask.squeeze(0))  # [N]
-                    else:
-                        # 如果没有 [AFF] token，返回全零掩码
-                        pred_3d_masks.append(torch.zeros(point_clouds.shape[2], device=point_clouds.device))
+                # 生成 3D 掩码
+                pred_3d_masks = self._generate_3d_masks(aff_embeddings_list, point_clouds)
+        
+        return output_ids, pred_2d_masks if has_image else None, pred_3d_masks if has_point_cloud else None
 
-        return output_ids, pred_2d_masks, pred_3d_masks
