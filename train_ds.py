@@ -238,6 +238,7 @@ def main(args):
     model.resize_token_embeddings(len(tokenizer))
 
     # 设置可训练的模块
+    params_to_train = []
     for n, p in model.named_parameters():
         if any(
             [
@@ -247,6 +248,7 @@ def main(args):
         ):
             print("Trainable parameter: ", n, "shape: ", p.shape)
             p.requires_grad = True
+            params_to_train.append(p)
 
     world_size = torch.cuda.device_count()
     args.distributed = world_size > 1
@@ -319,7 +321,6 @@ def main(args):
         },
     }
 
-    params_to_train = [p for p in model.parrmeters() if p.requries.grad]
     model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
         model=model,
         model_parameters=params_to_train,
