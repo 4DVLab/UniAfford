@@ -1113,6 +1113,24 @@ class JointDataSample:
         else:
             raise ValueError('没有任何一条数据包含obj_type或aff_type信息')
 
+        # 如果没有 ins 参数输入，则使用点云的物体和类别作为 ins
+        if ins is None and pc is not None:
+            # 生成默认的 instruction 文本
+            default_ins_templates = [
+                f"Please identify the {aff_type} affordance region of the {obj_type}.",
+                f"Find the area of the {obj_type} that is related to {aff_type} functionality.",
+                f"Which part of the {obj_type} provides the {aff_type} affordance?",
+                f"Locate the {aff_type} region on the {obj_type}.",
+                f"For this {obj_type}, show the {aff_type} functionality region.",
+            ]
+            default_ins_text = random.choice(default_ins_templates)
+
+            # 创建一个临时的 Instruction 对象
+            self.ins = Instruction(
+                ins=default_ins_text,
+                obj_type=obj_type,
+                aff_type=aff_type,
+            )
 
         self.aff_type = aff_type
         self.obj_type = obj_type
@@ -1123,12 +1141,12 @@ class JointDataSample:
         JointDataSample.count[self.obj_type][self.aff_type] += 1
         # 模态可见状态：True 表示该模态可见，False 表示不可见（或无数据）
         self.is_available = {
-            'ins': ins is not None,
-            'img': img is not None,
-            'pc': pc is not None,
+            'ins': self.ins is not None,
+            'img': self.img is not None,
+            'pc': self.pc is not None,
         }
     
-    def apply_mask(self, mask_prob=(0.01, 0.02, 0.003)) -> 'JointDataSample':
+    def apply_mask(self, mask_prob=(0, 0.02, 0.003)) -> 'JointDataSample':
         """对指定模态应用掩码
         Args:
             mask_prob: ['ins', 'img', 'pc'] 每个模态被 mask 的概率（0.0-1.0）

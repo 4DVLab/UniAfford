@@ -598,26 +598,26 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
 
     def model_forward(
         self,
-        images: torch.FloatTensor,
-        images_clip: torch.FloatTensor,
-        input_ids: torch.LongTensor,
-        labels: torch.LongTensor,
-        attention_masks: torch.LongTensor,
-        offset: torch.LongTensor,
-        masks_list: List[torch.FloatTensor],
-        label_list: List[torch.Tensor],
-        resize_list: List[tuple],
+        images: torch.FloatTensor = None,
+        images_clip: torch.FloatTensor = None,
+        input_ids: torch.LongTensor = None,
+        labels: torch.LongTensor = None,
+        attention_masks: torch.LongTensor = None,
+        offset: torch.LongTensor = None,
+        masks_list: List[torch.FloatTensor] = None,
+        label_list: List[torch.Tensor] = None,
+        resize_list: List[tuple] = None,
         inference: bool = False,
         point_clouds: torch.FloatTensor = None,  # 3D点云输入 [B, 3, N] 或 [B, N, 3]
         point_masks_list: List[torch.FloatTensor] = None,  # 3D点云真实掩码列表
         **kwargs,
     ):
         """
-        模型前向传播主函数
+        模型前向传播主函数（支持动态模态输入）
         
         Args:
-            images: SAM 输入图像，形状 [batch_size, C, H, W]
-            images_clip: CLIP 输入图像，形状 [batch_size, C, H', W']
+            images: SAM 输入图像，形状 [batch_size, C, H, W]，可选
+            images_clip: CLIP 输入图像，形状 [batch_size, C, H', W']，可选
             input_ids: 输入 token IDs
             labels: 标签（用于计算语言模型损失）
             attention_masks: 注意力掩码
@@ -626,18 +626,44 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             label_list: 标签列表
             resize_list: 图像尺寸调整列表
             inference: 是否为推理模式
+            point_clouds: 3D点云输入
+            point_masks_list: 3D点云真实掩码列表
             
         Returns:
             包含损失和预测结果的字典
         """
-        # 获取 SAM 图像嵌入
-        image_embeddings = self.get_visual_embs(images)
-        batch_size = image_embeddings.shape[0]
-        assert batch_size == len(offset) - 1
+        # 判断输入模态
+        has_image = images is not None and images_clip is not None
+        has_point_cloud = point_clouds is not None
+        
+        # 至少需要一种模态
+        if not has_image and not has_point_cloud:
+            raise ValueError("至少需要提供图像或点云输入")
+        
+        # 获取 batch_size
+        if has_image:
+            batch_size = images.shape[0]
+            assert batch_size == len(offset) - 1
+        else:
+            batch_size = point_clouds.shape[0] if has_point_cloud else 1
+        
+        # 获取 SAM 图像嵌入（仅在有图像输入时）
+        image_embeddings = None
+        if has_image:
+            image_embeddings = self.get_visual_embs(images)
 
         # 找到所有 [SEG] token 和 [AFF] token 的位置
-        # 这些位置的语言模型隐藏状态将被用于生成分割和3D分割提示
-        seg_token_mask = (input_ids[:, 1:] == self.seg_token_idx) | (input_ids[:, 1:] == self.aff_token_idx)
+        # 根据输入模态决定要查找的 token
+        if has_image and has_point_cloud:
+            # 两种模态都有，查找 [SEG] 和 [AFF]
+            seg_token_mask = (input_ids[:, 1:] == self.seg_token_idx) | (input_ids[:, 1:] == self.aff_token_idx)
+        elif has_image:
+            # 只有图像，只查找 [SEG]
+            seg_token_mask = (input_ids[:, 1:] == self.seg_token_idx)
+        else:
+            # 只有点云，只查找 [AFF]
+            seg_token_mask = (input_ids[:, 1:] == self.aff_token_idx)
+        
         seg_token_mask = torch.cat(
             [
                 seg_token_mask,
@@ -645,63 +671,63 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             ],
             dim=1,
         )
-        # 处理 IMAGE_TOKEN_INDEX：假设只有一个图像，且在前面
-        # 添加 255 个位置的填充（对应图像 token）
-        seg_token_mask = torch.cat(
-            [torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(), seg_token_mask],
-            dim=1,
-        )
+        
+        # 处理 IMAGE_TOKEN_INDEX：只有在有图像输入时才添加图像 token 填充
+        if has_image:
+            # 添加 255 个位置的填充（对应图像 token）
+            seg_token_mask = torch.cat(
+                [torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(), seg_token_mask],
+                dim=1,
+            )
 
+        # 统一处理图像预处理和扩展
+        if has_image:
+            if inference:
+                # 推理模式：扩展单张图像以匹配序列长度
+                assert images_clip.shape[0] == 1
+                length = input_ids.shape[0]
+                images_clip = self.preprocess_clip_images(images_clip)
+                images_clip = images_clip.expand(length, -1, -1, -1).contiguous()
+            else:
+                # 训练模式：根据 offset 为每个样本准备对应的图像
+                images_clip_list = []
+                for i in range(len(offset) - 1):
+                    start_i, end_i = offset[i], offset[i + 1]
+                    images_clip_i = (
+                        images_clip[i]
+                        .unsqueeze(0)
+                        .expand(end_i - start_i, -1, -1, -1)
+                        .contiguous()
+                    )
+                    images_clip_list.append(images_clip_i)
+                images_clip = torch.cat(images_clip_list, dim=0)
+                images_clip = self.preprocess_clip_images(images_clip)
+        else:
+            images_clip = None
+
+        # 统一调用父类前向传播（LLaVA）
         if inference:
-            # 推理模式：逐个处理序列
+            # 推理模式：逐批处理以节省内存
             n_batch = 1
             length = input_ids.shape[0]
-            assert images_clip.shape[0] == 1
-            
-            # 预处理 CLIP 图像
-            images_clip = self.preprocess_clip_images(images_clip)
-            
-            # 扩展图像以匹配序列长度
-            images_clip_extend = images_clip.expand(length, -1, -1, -1).contiguous()
-
             output_hidden_states = []
+            
             for i in range(n_batch):
                 start_i, end_i = i * length, min((i + 1) * length, input_ids.shape[0])
-                # 调用父类前向传播获取隐藏状态
                 output_i = super().forward(
-                    images=images_clip_extend[: end_i - start_i],
+                    images=images_clip[start_i:end_i] if has_image else None,
                     attention_mask=attention_masks[start_i:end_i],
                     input_ids=input_ids[start_i:end_i],
                     output_hidden_states=True,
                 )
                 output_hidden_states.append(output_i.hidden_states)
                 torch.cuda.empty_cache()
-
-            output_hidden_states_list = []
-            output_hidden_states_level = torch.cat(output_hidden_states, dim=0)
-            output_hidden_states_list.append(output_hidden_states_level)
-            output_hidden_states = output_hidden_states_list
+            
+            # 合并所有批次的隐藏状态
+            output_hidden_states = [torch.cat(output_hidden_states, dim=0)]
             output = None
-
         else:
             # 训练模式：批量处理
-            images_clip_list = []
-            # 根据 offset 为每个样本准备对应的图像
-            for i in range(len(offset) - 1):
-                start_i, end_i = offset[i], offset[i + 1]
-                images_clip_i = (
-                    images_clip[i]
-                    .unsqueeze(0)
-                    .expand(end_i - start_i, -1, -1, -1)
-                    .contiguous()
-                )
-                images_clip_list.append(images_clip_i)
-            images_clip = torch.cat(images_clip_list, dim=0)
-            
-            # 预处理 CLIP 图像
-            images_clip = self.preprocess_clip_images(images_clip)
-
-            # 调用父类前向传播（LLaVA）
             output = super().forward(
                 images=images_clip,
                 attention_mask=attention_masks,
@@ -711,28 +737,23 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             )
             output_hidden_states = output.hidden_states
 
-        # 将语言模型的隐藏状态投影到 SAM prompt 嵌入空间
-        hidden_states = []
-
+        # 将语言模型的隐藏状态投影到 prompt 嵌入空间
         assert len(self.model.text_hidden_fcs) == 1
-        # 使用投影层处理最后一层的隐藏状态
-        hidden_states.append(self.model.text_hidden_fcs[0](output_hidden_states[-1]))
-
-        # 合并多个隐藏状态（如果有多个投影层）
-        last_hidden_state = torch.stack(hidden_states, dim=-1).sum(dim=-1)
-        # 提取 [SEG] token 位置的嵌入作为分割提示
+        last_hidden_state = self.model.text_hidden_fcs[0](output_hidden_states[-1])
+        
+        # 提取 [SEG]/[AFF] token 位置的嵌入作为分割提示
         pred_embeddings = last_hidden_state[seg_token_mask]
-        # 统计每个样本中 [SEG] token 的数量
         seg_token_counts = seg_token_mask.int().sum(-1)  # [bs, ]
 
-        # 计算 [SEG] token 的累积偏移量
+        # 计算特殊 token 的累积偏移量
         seg_token_offset = seg_token_counts.cumsum(-1)
         seg_token_offset = torch.cat(
             [torch.zeros(1).long().cuda(), seg_token_offset], dim=0
         )
 
-        # 根据批次偏移量调整
-        seg_token_offset = seg_token_offset[offset]
+        # 根据批次偏移量调整（只有在有 offset 时才调整）
+        if offset is not None:
+            seg_token_offset = seg_token_offset[offset]
 
         # 将预测嵌入按样本分组
         pred_embeddings_ = []
@@ -741,124 +762,109 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             pred_embeddings_.append(pred_embeddings[start_i:end_i])
         pred_embeddings = pred_embeddings_
 
-        # 使用 SAM 生成分割掩码
-        multimask_output = False  # 不输出多个掩码
+        # ========== 2D 分割：使用 SAM 生成分割掩码（仅在有图像输入时）==========
         pred_masks = []
-        for i in range(len(pred_embeddings)):
-            """ ----------------------- 使用 SAM 处理 text_embedding和图片 ------------------------ """
-            if images is not None:
-                # 将文本特征转换为 SAM 可以理解的提示嵌入
-                (
-                    sparse_embeddings,
-                    dense_embeddings,
-                ) = self.model.visual_model.prompt_encoder(
-                    points=None,  # 不使用点提示
-                    boxes=None,  # 不使用框提示
-                    masks=None,  # 不使用掩码提示
-                    text_embeds=pred_embeddings[i].unsqueeze(1),  # 使用文本嵌入
-                )
-                sparse_embeddings = sparse_embeddings.to(pred_embeddings[i].dtype)
-                # 使用 SAM 的 mask decoder 生成掩码
-                low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
-                    image_embeddings=image_embeddings[i].unsqueeze(0),  # SAM 图像嵌入
-                    image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),  # 位置编码
-                    sparse_prompt_embeddings=sparse_embeddings,  # 稀疏提示嵌入
-                    dense_prompt_embeddings=dense_embeddings,  # 密集提示嵌入
-                    multimask_output=multimask_output,
-                )
-                # 后处理掩码：调整到原始图像尺寸
-                pred_mask = self.model.visual_model.postprocess_masks(
-                    low_res_masks,
-                    input_size=resize_list[i],
-                    original_size=label_list[i],
-                )
-                pred_masks.append(pred_mask[:, 0])  # 取第一个掩码
+        if has_image:
+            multimask_output = False
+            for i in range(len(pred_embeddings)):
+                if len(pred_embeddings[i]) > 0:
+                    # 将文本特征转换为 SAM 提示嵌入
+                    (sparse_embeddings, dense_embeddings) = self.model.visual_model.prompt_encoder(
+                        points=None, boxes=None, masks=None,
+                        text_embeds=pred_embeddings[i].unsqueeze(1),
+                    )
+                    sparse_embeddings = sparse_embeddings.to(pred_embeddings[i].dtype)
+                    
+                    # 使用 SAM 的 mask decoder 生成掩码
+                    low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
+                        image_embeddings=image_embeddings[i].unsqueeze(0),
+                        image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
+                        sparse_prompt_embeddings=sparse_embeddings,
+                        dense_prompt_embeddings=dense_embeddings,
+                        multimask_output=multimask_output,
+                    )
+                    
+                    # 后处理掩码：调整到原始图像尺寸
+                    pred_mask = self.model.visual_model.postprocess_masks(
+                        low_res_masks,
+                        input_size=resize_list[i],
+                        original_size=label_list[i],
+                    )
+                    pred_masks.append(pred_mask[:, 0])
 
-        """ ----------------------- 使用 PointNet2 处理 text_embedding和点云 ------------------------ """
-        pred_3d_masks = None
-        if point_clouds is not None:
+        # ========== 3D 分割：使用 PointNet++ 处理点云（仅在有点云输入时）==========
+        pred_3d_masks = []
+        if has_point_cloud:
             # 确保点云格式为 [B, 3, N]
             if point_clouds.shape[1] != 3:
                 point_clouds = point_clouds.permute(0, 2, 1)
             
-            # 使用 3D 点云分割器生成掩码
-            pred_3d_masks = []
             for i in range(batch_size):
                 if len(pred_embeddings[i]) > 0:
                     # text_feat: [num_aff_tokens, embed_dim] -> [1, num_aff_tokens, embed_dim]
                     text_feat = pred_embeddings[i].unsqueeze(0)
-                    # 创建文本掩码（全部有效）
                     text_mask = torch.ones(1, text_feat.shape[1], dtype=torch.bool, device=text_feat.device)
-                    # 获取当前样本的点云
                     pc_i = point_clouds[i:i+1]  # [1, 3, N]
+                    
                     # 使用 3D 分割器
                     pred_3d_mask = self.model.point_cloud_segmentor(pc_i, text_feat, text_mask)  # [1, N]
                     pred_3d_masks.append(pred_3d_mask.squeeze(0))  # [N]
                 else:
-                    # 如果没有 [AFF] token，返回全零掩码
+                    # 如果没有特殊 token，返回全零掩码
                     pred_3d_masks.append(torch.zeros(point_clouds.shape[2], device=point_clouds.device))
-
-
-        model_output = output
-        gt_masks = masks_list
 
         # 推理模式：只返回预测结果
         if inference:
             return {
-                "pred_masks": pred_masks,
-                "gt_masks": gt_masks,
-                "pred_3d_masks": pred_3d_masks,
-                "gt_3d_masks": point_masks_list,
+                "pred_masks": pred_masks if has_image else None,
+                "gt_masks": masks_list if has_image else None,
+                "pred_3d_masks": pred_3d_masks if has_point_cloud else None,
+                "gt_3d_masks": point_masks_list if has_point_cloud else None,
             }
 
-        output = model_output.logits
-
+        # ========== 训练模式：计算损失 ==========
         # 计算语言模型损失（交叉熵）
-        ce_loss = model_output.loss
-        ce_loss = ce_loss * self.ce_loss_weight
+        ce_loss = output.loss * self.ce_loss_weight
         
-        # 计算分割掩码损失
-        mask_bce_loss = 0
-        mask_dice_loss = 0
-        num_masks = 0
-        for batch_idx in range(len(pred_masks)):
-            gt_mask = gt_masks[batch_idx]
-            pred_mask = pred_masks[batch_idx]
+        # 计算 2D 分割掩码损失（仅在有图像输入时）
+        mask_bce_loss = torch.tensor(0.0, device=input_ids.device)
+        mask_dice_loss = torch.tensor(0.0, device=input_ids.device)
+        
+        if has_image and len(pred_masks) > 0:
+            mask_bce_loss_sum = 0
+            mask_dice_loss_sum = 0
+            num_masks = 0
+            
+            for batch_idx in range(len(pred_masks)):
+                gt_mask = masks_list[batch_idx]
+                pred_mask = pred_masks[batch_idx]
+                assert gt_mask.shape[0] == pred_mask.shape[0], \
+                    f"gt_mask.shape: {gt_mask.shape}, pred_mask.shape: {pred_mask.shape}"
+                
+                mask_bce_loss_sum += sigmoid_ce_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0]) * gt_mask.shape[0]
+                mask_dice_loss_sum += dice_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0]) * gt_mask.shape[0]
+                num_masks += gt_mask.shape[0]
 
-            # 确保预测和真实掩码的形状匹配
-            assert (
-                gt_mask.shape[0] == pred_mask.shape[0]
-            ), "gt_mask.shape: {}, pred_mask.shape: {}".format(
-                gt_mask.shape, pred_mask.shape
-            )
-            # 累积二元交叉熵损失
-            mask_bce_loss += (
-                sigmoid_ce_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
-                * gt_mask.shape[0]
-            )
-            # 累积 Dice 损失
-            mask_dice_loss += (
-                dice_loss(pred_mask, gt_mask, num_masks=gt_mask.shape[0])
-                * gt_mask.shape[0]
-            )
-            num_masks += gt_mask.shape[0]
-
-        # 归一化并加权掩码损失
-        mask_bce_loss = self.bce_loss_weight * mask_bce_loss / (num_masks + 1e-8)
-        mask_dice_loss = self.dice_loss_weight * mask_dice_loss / (num_masks + 1e-8)
+            if num_masks > 0:
+                mask_bce_loss = self.bce_loss_weight * mask_bce_loss_sum / num_masks
+                mask_dice_loss = self.dice_loss_weight * mask_dice_loss_sum / num_masks
+        
         mask_loss = mask_bce_loss + mask_dice_loss
 
-        # ========== 计算 3D 点云掩码损失 ==========
-        mask_3d_bce_loss = torch.tensor(0.0, device=images.device)
-        mask_3d_dice_loss = torch.tensor(0.0, device=images.device)
-        if pred_3d_masks is not None and point_masks_list is not None:
+        # 计算 3D 点云掩码损失（仅在有点云输入时）
+        mask_3d_bce_loss = torch.tensor(0.0, device=input_ids.device)
+        mask_3d_dice_loss = torch.tensor(0.0, device=input_ids.device)
+        
+        if has_point_cloud and len(pred_3d_masks) > 0 and point_masks_list is not None:
+            mask_3d_bce_loss_sum = 0
+            mask_3d_dice_loss_sum = 0
             num_3d_masks = 0
+            
             for batch_idx in range(len(pred_3d_masks)):
                 if point_masks_list[batch_idx] is not None:
                     gt_3d_mask = point_masks_list[batch_idx]  # [N]
                     pred_3d_mask = pred_3d_masks[batch_idx]  # [N]
                     
-                    # 确保形状匹配
                     if gt_3d_mask.shape == pred_3d_mask.shape:
                         # BCE 损失（pred_3d_mask 已经经过 sigmoid）
                         bce = F.binary_cross_entropy(
@@ -866,23 +872,22 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                             gt_3d_mask.float(), 
                             reduction='mean'
                         )
-                        mask_3d_bce_loss += bce
+                        mask_3d_bce_loss_sum += bce
                         
                         # Dice 损失
                         intersection = (pred_3d_mask * gt_3d_mask.float()).sum()
                         union = pred_3d_mask.sum() + gt_3d_mask.float().sum()
                         dice = 1 - (2 * intersection + 1e-6) / (union + 1e-6)
-                        mask_3d_dice_loss += dice
-                        
+                        mask_3d_dice_loss_sum += dice
                         num_3d_masks += 1
             
             if num_3d_masks > 0:
-                mask_3d_bce_loss = self.bce_loss_weight * mask_3d_bce_loss / num_3d_masks
-                mask_3d_dice_loss = self.dice_loss_weight * mask_3d_dice_loss / num_3d_masks
+                mask_3d_bce_loss = self.bce_loss_weight * mask_3d_bce_loss_sum / num_3d_masks
+                mask_3d_dice_loss = self.dice_loss_weight * mask_3d_dice_loss_sum / num_3d_masks
         
         mask_3d_loss = mask_3d_bce_loss + mask_3d_dice_loss
 
-        # 总损失 = 语言模型损失 + 2D分割损失 + 3D分割损失
+        # 总损失
         loss = ce_loss + mask_loss + mask_3d_loss
 
         return {
