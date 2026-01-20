@@ -98,8 +98,15 @@ class LlavaMetaForCausalLM(ABC):
     def prepare_inputs_labels_for_multimodal(
         self, input_ids, attention_mask, past_key_values, labels, images
     ):
+        """
+        核心任务：将 input_ids 中的图像占位符替换为真实的图像特征向量，
+        并同步对齐 attention_mask 和 labels。
+        """
         vision_tower = self.get_vision_tower()
+        
+        # --- 场景 1: 如果没有图像输入，或者处于生成模式（input_ids 长度为 1） ---
         if vision_tower is None or images is None or input_ids.shape[1] == 1:
+            # 如果是在 kv-cache 推理阶段（past_key_values 存在），需要调整 mask 长度
             if (
                 past_key_values is not None
                 and vision_tower is not None
@@ -113,6 +120,8 @@ class LlavaMetaForCausalLM(ABC):
                 )
             return input_ids, attention_mask, past_key_values, None, labels
 
+        # --- 阶段 1: 提取图像特征 (Visual Encoding) ---
+        # 支持处理列表形式的图像或 5 维 Tensor（视频/多帧）
         if type(images) is list or images.ndim == 5:
             concat_images = torch.cat([image for image in images], dim=0)
             image_features = self.encode_images(concat_images)
@@ -122,158 +131,106 @@ class LlavaMetaForCausalLM(ABC):
         else:
             image_features = self.encode_images(images)
 
+        # --- 阶段 2: 拼接文本与图像 Embedding (Merging) ---
         new_input_embeds = []
         new_labels = [] if labels is not None else None
         cur_image_idx = 0
+        
+        # 遍历 Batch 中的每一个样本
         for batch_idx, cur_input_ids in enumerate(input_ids):
+            # 如果当前样本没有图像 Token (IMAGE_TOKEN_INDEX)
             if (cur_input_ids == IMAGE_TOKEN_INDEX).sum() == 0:
-                # multimodal LLM, but the current sample is not multimodal
                 cur_input_embeds = self.get_model().embed_tokens(cur_input_ids)
+                # 这种写法是为了在分布式训练中保持梯度链，即模型包含 mm_projector 但此处未用到
                 cur_input_embeds = (
                     cur_input_embeds
-                    + (
-                        0.0 * self.get_model().mm_projector(vision_tower.dummy_feature)
-                    ).sum()
+                    + (0.0 * self.get_model().mm_projector(vision_tower.dummy_feature)).sum()
                 )
                 new_input_embeds.append(cur_input_embeds)
                 if labels is not None:
                     new_labels.append(labels[batch_idx])
                 cur_image_idx += 1
                 continue
+            
+            # 找到图像 Token 在当前序列中的位置
             image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
             cur_new_input_embeds = []
             if labels is not None:
                 cur_labels = labels[batch_idx]
                 cur_new_labels = []
                 assert cur_labels.shape == cur_input_ids.shape
+            
+            # 循环处理序列中的每一个图像（支持单句多图）
             while image_token_indices.numel() > 0:
                 cur_image_features = image_features[cur_image_idx]
                 image_token_start = image_token_indices[0]
+                
+                # 情况 A: 使用了起始和结束标记 (IM_START/IM_END) 且在微调 MLP
                 if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
                     self.config, "mm_use_im_start_end", False
                 ):
-                    cur_new_input_embeds.append(
-                        self.get_model()
-                        .embed_tokens(cur_input_ids[: image_token_start - 1])
-                        .detach()
-                    )
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(
-                            cur_input_ids[image_token_start - 1 : image_token_start]
-                        )
-                    )
+                    # 拼接逻辑：图像前文本 + 图像起始标记 + 图像特征 + 图像结束标记
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[: image_token_start - 1]).detach())
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[image_token_start - 1 : image_token_start]))
                     cur_new_input_embeds.append(cur_image_features)
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(
-                            cur_input_ids[image_token_start + 1 : image_token_start + 2]
-                        )
-                    )
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[image_token_start + 1 : image_token_start + 2]))
+                    
                     if labels is not None:
+                        # 图像区域在 Label 中填入 IGNORE_INDEX (-100)，即不计算损失
                         cur_new_labels.append(cur_labels[:image_token_start])
-                        cur_new_labels.append(
-                            torch.full(
-                                (cur_image_features.shape[0],),
-                                IGNORE_INDEX,
-                                device=labels.device,
-                                dtype=labels.dtype,
-                            )
-                        )
-                        cur_new_labels.append(
-                            cur_labels[image_token_start : image_token_start + 1]
-                        )
+                        cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
+                        cur_new_labels.append(cur_labels[image_token_start : image_token_start + 1])
                         cur_labels = cur_labels[image_token_start + 2 :]
+                
+                # 情况 B: 仅使用起始结束标记
                 elif getattr(self.config, "mm_use_im_start_end", False):
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(cur_input_ids[:image_token_start])
-                    )
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
                     cur_new_input_embeds.append(cur_image_features)
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(
-                            cur_input_ids[image_token_start + 1 : image_token_start + 2]
-                        )
-                    )
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[image_token_start + 1 : image_token_start + 2]))
                     if labels is not None:
                         cur_new_labels.append(cur_labels[:image_token_start])
-                        cur_new_labels.append(
-                            torch.full(
-                                (cur_image_features.shape[0],),
-                                IGNORE_INDEX,
-                                device=labels.device,
-                                dtype=labels.dtype,
-                            )
-                        )
-                        cur_new_labels.append(
-                            cur_labels[image_token_start + 1 : image_token_start + 2]
-                        )
+                        cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
+                        cur_new_labels.append(cur_labels[image_token_start + 1 : image_token_start + 2])
                         cur_labels = cur_labels[image_token_start + 2 :]
+                
+                # 情况 C: 默认情况（直接替换 <image> Token）
                 else:
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(cur_input_ids[:image_token_start])
-                    )
+                    cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids[:image_token_start]))
                     cur_new_input_embeds.append(cur_image_features)
                     if labels is not None:
                         cur_new_labels.append(cur_labels[:image_token_start])
-                        cur_new_labels.append(
-                            torch.full(
-                                (cur_image_features.shape[0],),
-                                IGNORE_INDEX,
-                                device=labels.device,
-                                dtype=labels.dtype,
-                            )
-                        )
+                        cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=labels.device, dtype=labels.dtype))
                         cur_labels = cur_labels[image_token_start + 1 :]
+                
+                # 更新索引，继续寻找下一个图像位置
                 cur_image_idx += 1
-                if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
-                    self.config, "mm_use_im_start_end", False
-                ):
-                    cur_input_ids = cur_input_ids[image_token_start + 2 :]
-                elif getattr(self.config, "mm_use_im_start_end", False):
-                    cur_input_ids = cur_input_ids[image_token_start + 2 :]
-                else:
-                    cur_input_ids = cur_input_ids[image_token_start + 1 :]
+                offset = 2 if getattr(self.config, "mm_use_im_start_end", False) else 1
+                cur_input_ids = cur_input_ids[image_token_start + offset :]
                 image_token_indices = torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0]
+            
+            # 拼接图像后的剩余文本
             if cur_input_ids.numel() > 0:
-                if getattr(self.config, "tune_mm_mlp_adapter", False) and getattr(
-                    self.config, "mm_use_im_start_end", False
-                ):
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(cur_input_ids).detach()
-                    )
-                elif getattr(self.config, "mm_use_im_start_end", False):
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(cur_input_ids)
-                    )
-                else:
-                    cur_new_input_embeds.append(
-                        self.get_model().embed_tokens(cur_input_ids)
-                    )
+                cur_new_input_embeds.append(self.get_model().embed_tokens(cur_input_ids))
                 if labels is not None:
                     cur_new_labels.append(cur_labels)
-            cur_new_input_embeds = [
-                x.to(device=self.device) for x in cur_new_input_embeds
-            ]
+            
+            # 将当前样本的所有块拼接成一个长向量
+            cur_new_input_embeds = [x.to(device=self.device) for x in cur_new_input_embeds]
             cur_new_input_embeds = torch.cat(cur_new_input_embeds, dim=0)
             new_input_embeds.append(cur_new_input_embeds)
             if labels is not None:
                 cur_new_labels = torch.cat(cur_new_labels, dim=0)
                 new_labels.append(cur_new_labels)
 
+        # --- 阶段 3: 处理 Batch 中不同样本的长度对齐 (Padding) ---
+        # 如果 Batch 中存在长度不一致的情况，需要手动填充至 max_len
         if any(x.shape != new_input_embeds[0].shape for x in new_input_embeds):
             max_len = max(x.shape[0] for x in new_input_embeds)
 
             new_input_embeds_align = []
             for cur_new_embed in new_input_embeds:
-                cur_new_embed = torch.cat(
-                    (
-                        cur_new_embed,
-                        torch.zeros(
-                            (max_len - cur_new_embed.shape[0], cur_new_embed.shape[1]),
-                            dtype=cur_new_embed.dtype,
-                            device=cur_new_embed.device,
-                        ),
-                    ),
-                    dim=0,
-                )
+                # 在末尾补零以对齐
+                cur_new_embed = torch.cat((cur_new_embed, torch.zeros((max_len - cur_new_embed.shape[0], cur_new_embed.shape[1]), dtype=cur_new_embed.dtype, device=cur_new_embed.device)), dim=0)
                 new_input_embeds_align.append(cur_new_embed)
             new_input_embeds = torch.stack(new_input_embeds_align, dim=0)
 
@@ -281,18 +238,8 @@ class LlavaMetaForCausalLM(ABC):
                 new_labels_align = []
                 _new_labels = new_labels
                 for cur_new_label in new_labels:
-                    cur_new_label = torch.cat(
-                        (
-                            cur_new_label,
-                            torch.full(
-                                (max_len - cur_new_label.shape[0],),
-                                IGNORE_INDEX,
-                                dtype=cur_new_label.dtype,
-                                device=cur_new_label.device,
-                            ),
-                        ),
-                        dim=0,
-                    )
+                    # Labels 补上 IGNORE_INDEX
+                    cur_new_label = torch.cat((cur_new_label, torch.full((max_len - cur_new_label.shape[0],), IGNORE_INDEX, dtype=cur_new_label.dtype, device=cur_new_label.device)), dim=0)
                     new_labels_align.append(cur_new_label)
                 new_labels = torch.stack(new_labels_align, dim=0)
 
@@ -301,51 +248,27 @@ class LlavaMetaForCausalLM(ABC):
                 for cur_attention_mask, cur_new_labels, cur_new_labels_align in zip(
                     attention_mask, _new_labels, new_labels
                 ):
-                    new_attn_mask_pad_left = torch.full(
-                        (cur_new_labels.shape[0] - labels.shape[1],),
-                        True,
-                        dtype=attention_mask.dtype,
-                        device=attention_mask.device,
-                    )
-                    new_attn_mask_pad_right = torch.full(
-                        (cur_new_labels_align.shape[0] - cur_new_labels.shape[0],),
-                        False,
-                        dtype=attention_mask.dtype,
-                        device=attention_mask.device,
-                    )
-                    cur_new_attention_mask = torch.cat(
-                        (
-                            new_attn_mask_pad_left,
-                            cur_attention_mask,
-                            new_attn_mask_pad_right,
-                        ),
-                        dim=0,
-                    )
+                    # 关键逻辑：图像特征部分在 Mask 中设为 True (可见)，Padding 部分设为 False (不可见)
+                    new_attn_mask_pad_left = torch.full((cur_new_labels.shape[0] - labels.shape[1],), True, dtype=attention_mask.dtype, device=attention_mask.device)
+                    new_attn_mask_pad_right = torch.full((cur_new_labels_align.shape[0] - cur_new_labels.shape[0],), False, dtype=attention_mask.dtype, device=attention_mask.device)
+                    cur_new_attention_mask = torch.cat((new_attn_mask_pad_left, cur_attention_mask, new_attn_mask_pad_right), dim=0)
                     new_attention_mask.append(cur_new_attention_mask)
                 attention_mask = torch.stack(new_attention_mask, dim=0)
-                assert attention_mask.shape == new_labels.shape
+        
+        # --- 阶段 4: Batch 长度一致时直接 Stack ---
         else:
             new_input_embeds = torch.stack(new_input_embeds, dim=0)
             if labels is not None:
                 new_labels = torch.stack(new_labels, dim=0)
 
             if attention_mask is not None:
-                new_attn_mask_pad_left = torch.full(
-                    (
-                        attention_mask.shape[0],
-                        new_input_embeds.shape[1] - input_ids.shape[1],
-                    ),
-                    True,
-                    dtype=attention_mask.dtype,
-                    device=attention_mask.device,
-                )
-                attention_mask = torch.cat(
-                    (new_attn_mask_pad_left, attention_mask), dim=1
-                )
-                assert attention_mask.shape == new_input_embeds.shape[:2]
+                # 即使长度一致，由于图像 Token 被替换为了多维特征，Mask 长度仍需从 input_ids 维度扩展到 embeds 维度
+                new_attn_mask_pad_left = torch.full((attention_mask.shape[0], new_input_embeds.shape[1] - input_ids.shape[1]), True, dtype=attention_mask.dtype, device=attention_mask.device)
+                attention_mask = torch.cat((new_attn_mask_pad_left, attention_mask), dim=1)
 
+        # 返回结果中 input_ids 设为 None，因为已经转换成了 new_input_embeds 直接给 LLM
         return None, attention_mask, past_key_values, new_input_embeds, new_labels
-
+    
     # def initialize_vision_tokenizer(self, model_args, tokenizer):
     def initialize_vision_tokenizer(self, model_args, num_new_tokens):
         # if model_args.mm_use_im_patch_token:

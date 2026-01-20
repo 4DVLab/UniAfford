@@ -602,9 +602,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         
         Args:
             output_ids: 输出的 token IDs [B, L]
-            last_hidden_state: 投影后的隐藏状态 [B, L, C]
+            last_hidden_state: 投影后的隐藏状态 [B, L', C]
             token_idx: 要提取的 token 索引
-            has_image: 是否有图像输入（决定是否添加 IMAGE_TOKEN_INDEX 填充）
+            has_image: 是否有图像输入（用于调试信息）
             
         Returns:
             token_embeddings_list: 按样本分组的 token 嵌入列表
@@ -612,12 +612,22 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # 找到指定 token 的位置
         token_mask = output_ids[:, 1:] == token_idx
         
-        # 处理 IMAGE_TOKEN_INDEX（如果有图像）
-        if has_image:
+        # 关键修复：动态调整 token_mask 的长度以匹配 last_hidden_state
+        # last_hidden_state.shape: [B, L', C]
+        # token_mask.shape: [B, L-1]
+        actual_seq_len = last_hidden_state.shape[1]
+        current_mask_len = token_mask.shape[1]
+        
+        if actual_seq_len > current_mask_len:
+            # 需要在前面填充（图像特征被插入到序列开头）
+            padding_len = actual_seq_len - current_mask_len
             token_mask = torch.cat(
-                [torch.zeros((token_mask.shape[0], 255)).bool().cuda(), token_mask],
+                [torch.zeros((token_mask.shape[0], padding_len)).bool().cuda(), token_mask],
                 dim=1,
             )
+        elif actual_seq_len < current_mask_len:
+            # 截断到实际长度
+            token_mask = token_mask[:, :actual_seq_len]
         
         # 提取 token 的嵌入
         token_embeddings = last_hidden_state[token_mask]
@@ -791,14 +801,6 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             ],
             dim=1,
         )
-        
-        # 处理 IMAGE_TOKEN_INDEX：只有在有图像输入时才添加图像 token 填充
-        if has_image:
-            # 添加 255 个位置的填充（对应图像 token）
-            seg_token_mask = torch.cat(
-                [torch.zeros((seg_token_mask.shape[0], 255)).bool().cuda(), seg_token_mask],
-                dim=1,
-            )
 
         # 统一处理图像预处理和扩展
         if has_image:
@@ -839,6 +841,24 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # 将语言模型的隐藏状态投影到 prompt 嵌入空间
         assert len(self.model.text_hidden_fcs) == 1
         last_hidden_state = self.model.text_hidden_fcs[0](output_hidden_states[-1])
+        
+        # 关键修复：动态调整 seg_token_mask 的长度以匹配 last_hidden_state
+        # last_hidden_state.shape: [B, L', C]
+        # seg_token_mask.shape: [B, L]
+        # 需要将 seg_token_mask 扩展到 L' 的长度
+        actual_seq_len = last_hidden_state.shape[1]
+        current_mask_len = seg_token_mask.shape[1]
+        
+        if actual_seq_len > current_mask_len:
+            # 需要在前面填充（图像特征被插入到序列开头）
+            padding_len = actual_seq_len - current_mask_len
+            seg_token_mask = torch.cat(
+                [torch.zeros((seg_token_mask.shape[0], padding_len)).bool().cuda(), seg_token_mask],
+                dim=1,
+            )
+        elif actual_seq_len < current_mask_len:
+            # 理论上不应该发生，但为了安全起见进行截断
+            seg_token_mask = seg_token_mask[:, :actual_seq_len]
         
         # 提取 [SEG]/[AFF] token 位置的嵌入作为分割提示
         pred_embeddings = last_hidden_state[seg_token_mask]
