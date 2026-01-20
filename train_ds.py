@@ -238,7 +238,7 @@ def main(args):
     model.resize_token_embeddings(len(tokenizer))
 
     # 设置可训练的模块
-    params_to_train = []
+    # 首先确保所有参数的 requires_grad 状态正确
     for n, p in model.named_parameters():
         if any(
             [
@@ -246,9 +246,21 @@ def main(args):
                 for x in ["lm_head", "embed_tokens", "mask_decoder", "text_hidden_fcs", "point_cloud_segmentor"]
             ]
         ):
-            print("Trainable parameter: ", n, "shape: ", p.shape)
             p.requires_grad = True
+        else:
+            # 明确冻结其他参数
+            p.requires_grad = False
+    
+    # 收集所有 requires_grad=True 的参数
+    params_to_train = []
+    for n, p in model.named_parameters():
+        if p.requires_grad:
+            print("Trainable parameter: ", n, "shape: ", p.shape)
             params_to_train.append(p)
+    
+    print(f"\nTotal trainable parameters: {len(params_to_train)}")
+    print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+    print(f"Trainable parameters: {sum(p.numel() for p in params_to_train)}")
 
     world_size = torch.cuda.device_count()
     args.distributed = world_size > 1
