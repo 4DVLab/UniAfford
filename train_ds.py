@@ -14,7 +14,6 @@ from peft import LoraConfig, get_peft_model
 from torch.utils.tensorboard import SummaryWriter
 
 from model.LISA import LISAForCausalLM
-from model.joint_affordance import JointAff
 from model.llava import conversation as conversation_lib
 from utils.dataset import DatasetManager, HybridDataset, ValDataset, collate_fn
 from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
@@ -123,7 +122,7 @@ def main(args):
     else:
         writer = None
 
-    # Create model - 使用新的 JointAff 模型
+    # Create model - 使用魔改后的 LISAForCausalLM 模型（已支持点云）
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         args.version,
         cache_dir=None,
@@ -144,28 +143,110 @@ def main(args):
             [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
         )
 
-    # 初始化 JointAff 模型
+    # 模型参数配置
+    model_args = {
+        "train_mask_decoder": args.train_mask_decoder,
+        "out_dim": args.out_dim,
+        "ce_loss_weight": args.ce_loss_weight,
+        "dice_loss_weight": args.dice_loss_weight,
+        "bce_loss_weight": args.bce_loss_weight,
+        "seg_token_idx": args.seg_token_idx,
+        "aff_token_idx": args.aff_token_idx,  # 3D affordance token
+        "vision_pretrained": args.vision_pretrained,
+        "vision_tower": args.vision_tower,
+        "use_mm_start_end": args.use_mm_start_end,
+    }
+    
     torch_dtype = torch.float32
     if args.precision == "bf16":
         torch_dtype = torch.bfloat16
     elif args.precision == "fp16":
         torch_dtype = torch.half
     
-    model = JointAff(
-        pretrained_weight=None,
-        use_image=True,
-        use_pointcloud=args.use_pointcloud,
+    # 初始化魔改后的 LISA 模型
+    model = LISAForCausalLM.from_pretrained(
+        args.version, torch_dtype=torch_dtype, low_cpu_mem_usage=True, **model_args
     )
-    model = model.to(dtype=torch_dtype, device=args.local_rank)
+    model.config.eos_token_id = tokenizer.eos_token_id
+    model.config.bos_token_id = tokenizer.bos_token_id
+    model.config.pad_token_id = tokenizer.pad_token_id
+
+    model.enable_input_require_grads()
+    model.gradient_checkpointing_enable()
+
+    # 初始化视觉模块
+    model.get_model().initialize_vision_modules(model.get_model().config)
+    vision_tower = model.get_model().get_vision_tower()
+    vision_tower.to(dtype=torch_dtype, device=args.local_rank)
     
+    # 初始化 LISA 模块（包括 SAM 和 3D 点云分割器）
+    if not args.eval_only:
+        model.get_model().initialize_lisa_modules(model.get_model().config)
+
+    # 冻结视觉编码器和投影层
+    for p in vision_tower.parameters():
+        p.requires_grad = False
+    for p in model.get_model().mm_projector.parameters():
+        p.requires_grad = False
+
     conversation_lib.default_conversation = conversation_lib.conv_templates[
         args.conv_type
     ]
 
-    # 设置可训练参数
-    print("Setting trainable parameters for JointAff model...")
+    # LoRA 配置（可选）
+    lora_r = args.lora_r
+    if lora_r > 0:
+        def find_linear_layers(model, lora_target_modules):
+            cls = torch.nn.Linear
+            lora_module_names = set()
+            for name, module in model.named_modules():
+                if (
+                    isinstance(module, cls)
+                    and all(
+                        [
+                            x not in name
+                            for x in [
+                                "visual_model",
+                                "vision_tower",
+                                "mm_projector",
+                                "text_hidden_fcs",
+                                "point_cloud_segmentor",
+                            ]
+                        ]
+                    )
+                    and any([x in name for x in lora_target_modules])
+                ):
+                    lora_module_names.add(name)
+            return sorted(list(lora_module_names))
+
+        lora_alpha = args.lora_alpha
+        lora_dropout = args.lora_dropout
+        lora_target_modules = find_linear_layers(
+            model, args.lora_target_modules.split(",")
+        )
+        lora_config = LoraConfig(
+            r=lora_r,
+            lora_alpha=lora_alpha,
+            target_modules=lora_target_modules,
+            lora_dropout=lora_dropout,
+            bias="none",
+            task_type="CAUSAL_LM",
+        )
+        model = get_peft_model(model, lora_config)
+        model.print_trainable_parameters()
+
+    model.resize_token_embeddings(len(tokenizer))
+
+    # 设置可训练的模块
     for n, p in model.named_parameters():
-        print(f"Parameter: {n}, shape: {p.shape}, requires_grad: {p.requires_grad}")
+        if any(
+            [
+                x in n
+                for x in ["lm_head", "embed_tokens", "mask_decoder", "text_hidden_fcs", "point_cloud_segmentor"]
+            ]
+        ):
+            print("Trainable parameter: ", n, "shape: ", p.shape)
+            p.requires_grad = True
 
     world_size = torch.cuda.device_count()
     args.distributed = world_size > 1
@@ -348,16 +429,24 @@ def train(
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     losses = AverageMeter("Loss", ":.4f")
-    loss_2d_meter = AverageMeter("Loss2D", ":.4f")
-    loss_3d_meter = AverageMeter("Loss3D", ":.4f")
+    ce_losses = AverageMeter("CeLoss", ":.4f")
+    mask_bce_losses = AverageMeter("MaskBCELoss", ":.4f")
+    mask_dice_losses = AverageMeter("MaskDICELoss", ":.4f")
+    mask_losses = AverageMeter("MaskLoss", ":.4f")
+    mask_3d_bce_losses = AverageMeter("Mask3DBCELoss", ":.4f")
+    mask_3d_dice_losses = AverageMeter("Mask3DDICELoss", ":.4f")
+    mask_3d_losses = AverageMeter("Mask3DLoss", ":.4f")
 
     progress = ProgressMeter(
         args.steps_per_epoch,
         [
             batch_time,
             losses,
-            loss_2d_meter,
-            loss_3d_meter,
+            ce_losses,
+            mask_losses,
+            mask_bce_losses,
+            mask_dice_losses,
+            mask_3d_losses,
         ],
         prefix="Epoch: [{}]".format(epoch),
     )
@@ -376,22 +465,20 @@ def train(
             data_time.update(time.time() - end)
             input_dict = dict_to_cuda(input_dict)
 
-            # 准备模型输入
-            batch_size = input_dict["input_ids"].size(0)
-            
             # 处理图像数据
-            images = input_dict.get("images")
-            if images is not None:
-                if args.precision == "fp16":
-                    images = images.half()
-                elif args.precision == "bf16":
-                    images = images.bfloat16()
-                else:
-                    images = images.float()
-            
+            if args.precision == "fp16":
+                input_dict["images"] = input_dict["images"].half()
+                input_dict["images_clip"] = input_dict["images_clip"].half()
+            elif args.precision == "bf16":
+                input_dict["images"] = input_dict["images"].bfloat16()
+                input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
+            else:
+                input_dict["images"] = input_dict["images"].float()
+                input_dict["images_clip"] = input_dict["images_clip"].float()
+
             # 处理点云数据
-            point_clouds = input_dict.get("point_clouds")
-            if point_clouds is not None:
+            if "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
+                point_clouds = input_dict["point_clouds"]
                 if args.precision == "fp16":
                     point_clouds = point_clouds.half()
                 elif args.precision == "bf16":
@@ -401,46 +488,28 @@ def train(
                 # 转换为 [B, C, N] 格式（如果是 [B, N, C]）
                 if point_clouds.dim() == 3 and point_clouds.size(-1) == 3:
                     point_clouds = point_clouds.permute(0, 2, 1).contiguous()
-            
-            # 准备文本输入（使用 input_ids 作为文本表示）
-            text_input = input_dict["input_ids"]
-            
-            # 准备 GT
-            gt_aff2d = None
-            if "masks_list" in input_dict and len(input_dict["masks_list"]) > 0:
-                # 将 masks_list 转换为批次张量
-                gt_aff2d = torch.stack([m[0] if m.dim() == 3 else m for m in input_dict["masks_list"]])
-                gt_aff2d = gt_aff2d.unsqueeze(1) if gt_aff2d.dim() == 3 else gt_aff2d
-            
-            gt_aff3d = None
-            if "point_masks_list" in input_dict and input_dict["point_masks_list"] is not None:
-                gt_aff3d = torch.stack(input_dict["point_masks_list"])
-            
-            # 获取有效性掩码
-            img_mask = input_dict.get("image_valid_mask")
-            pc_mask = input_dict.get("pc_valid_mask")
-            
-            # 前向传播
-            output_dict = model(
-                text=text_input,
-                img=images,
-                points=point_clouds,
-                gt_aff2d=gt_aff2d,
-                gt_aff3d=gt_aff3d,
-                img_mask=img_mask,
-                pc_mask=pc_mask,
-                return_loss=True,
-            )
+                input_dict["point_clouds"] = point_clouds
 
-            loss = output_dict.get("loss", torch.tensor(0.0, device=args.local_rank))
-            loss_2d = output_dict.get("loss_2d", torch.tensor(0.0, device=args.local_rank))
-            loss_3d = output_dict.get("loss_3d", torch.tensor(0.0, device=args.local_rank))
+            # 调用魔改后的 LISA 模型
+            output_dict = model(**input_dict)
 
-            losses.update(loss.item(), batch_size)
-            if loss_2d is not None and loss_2d.item() > 0:
-                loss_2d_meter.update(loss_2d.item(), batch_size)
-            if loss_3d is not None and loss_3d.item() > 0:
-                loss_3d_meter.update(loss_3d.item(), batch_size)
+            loss = output_dict["loss"]
+            ce_loss = output_dict["ce_loss"]
+            mask_bce_loss = output_dict["mask_bce_loss"]
+            mask_dice_loss = output_dict["mask_dice_loss"]
+            mask_loss = output_dict["mask_loss"]
+            mask_3d_bce_loss = output_dict.get("mask_3d_bce_loss", torch.tensor(0.0))
+            mask_3d_dice_loss = output_dict.get("mask_3d_dice_loss", torch.tensor(0.0))
+            mask_3d_loss = output_dict.get("mask_3d_loss", torch.tensor(0.0))
+
+            losses.update(loss.item(), input_dict["images"].size(0))
+            ce_losses.update(ce_loss.item(), input_dict["images"].size(0))
+            mask_bce_losses.update(mask_bce_loss.item(), input_dict["images"].size(0))
+            mask_dice_losses.update(mask_dice_loss.item(), input_dict["images"].size(0))
+            mask_losses.update(mask_loss.item(), input_dict["images"].size(0))
+            mask_3d_bce_losses.update(mask_3d_bce_loss.item(), input_dict["images"].size(0))
+            mask_3d_dice_losses.update(mask_3d_dice_loss.item(), input_dict["images"].size(0))
+            mask_3d_losses.update(mask_3d_loss.item(), input_dict["images"].size(0))
             
             model.backward(loss)
             model.step()
@@ -453,15 +522,30 @@ def train(
             if args.distributed:
                 batch_time.all_reduce()
                 data_time.all_reduce()
+
                 losses.all_reduce()
-                loss_2d_meter.all_reduce()
-                loss_3d_meter.all_reduce()
+                ce_losses.all_reduce()
+                mask_bce_losses.all_reduce()
+                mask_dice_losses.all_reduce()
+                mask_losses.all_reduce()
+                mask_3d_bce_losses.all_reduce()
+                mask_3d_dice_losses.all_reduce()
+                mask_3d_losses.all_reduce()
 
             if args.local_rank == 0:
                 progress.display(global_step + 1)
                 writer.add_scalar("train/loss", losses.avg, global_step)
-                writer.add_scalar("train/loss_2d", loss_2d_meter.avg, global_step)
-                writer.add_scalar("train/loss_3d", loss_3d_meter.avg, global_step)
+                writer.add_scalar("train/ce_loss", ce_losses.avg, global_step)
+                writer.add_scalar(
+                    "train/mask_bce_loss", mask_bce_losses.avg, global_step
+                )
+                writer.add_scalar(
+                    "train/mask_dice_loss", mask_dice_losses.avg, global_step
+                )
+                writer.add_scalar("train/mask_loss", mask_losses.avg, global_step)
+                writer.add_scalar("train/mask_3d_bce_loss", mask_3d_bce_losses.avg, global_step)
+                writer.add_scalar("train/mask_3d_dice_loss", mask_3d_dice_losses.avg, global_step)
+                writer.add_scalar("train/mask_3d_loss", mask_3d_losses.avg, global_step)
                 writer.add_scalar(
                     "metrics/total_secs_per_batch", batch_time.avg, global_step
                 )
@@ -472,8 +556,13 @@ def train(
             batch_time.reset()
             data_time.reset()
             losses.reset()
-            loss_2d_meter.reset()
-            loss_3d_meter.reset()
+            ce_losses.reset()
+            mask_bce_losses.reset()
+            mask_dice_losses.reset()
+            mask_losses.reset()
+            mask_3d_bce_losses.reset()
+            mask_3d_dice_losses.reset()
+            mask_3d_losses.reset()
 
         if global_step != 0:
             curr_lr = scheduler.get_last_lr()
@@ -484,13 +573,9 @@ def train(
 
 
 def validate(val_loader, model_engine, epoch, writer, args):
-    intersection_meter_2d = AverageMeter("Intersec2D", ":6.3f", Summary.SUM)
-    union_meter_2d = AverageMeter("Union2D", ":6.3f", Summary.SUM)
-    acc_iou_meter_2d = AverageMeter("gIoU2D", ":6.3f", Summary.SUM)
-    
-    intersection_meter_3d = AverageMeter("Intersec3D", ":6.3f", Summary.SUM)
-    union_meter_3d = AverageMeter("Union3D", ":6.3f", Summary.SUM)
-    acc_iou_meter_3d = AverageMeter("gIoU3D", ":6.3f", Summary.SUM)
+    intersection_meter = AverageMeter("Intersec", ":6.3f", Summary.SUM)
+    union_meter = AverageMeter("Union", ":6.3f", Summary.SUM)
+    acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.SUM)
 
     model_engine.eval()
 
@@ -500,18 +585,19 @@ def validate(val_loader, model_engine, epoch, writer, args):
         input_dict = dict_to_cuda(input_dict)
         
         # 处理图像数据
-        images = input_dict.get("images")
-        if images is not None:
-            if args.precision == "fp16":
-                images = images.half()
-            elif args.precision == "bf16":
-                images = images.bfloat16()
-            else:
-                images = images.float()
-        
+        if args.precision == "fp16":
+            input_dict["images"] = input_dict["images"].half()
+            input_dict["images_clip"] = input_dict["images_clip"].half()
+        elif args.precision == "bf16":
+            input_dict["images"] = input_dict["images"].bfloat16()
+            input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
+        else:
+            input_dict["images"] = input_dict["images"].float()
+            input_dict["images_clip"] = input_dict["images_clip"].float()
+
         # 处理点云数据
-        point_clouds = input_dict.get("point_clouds")
-        if point_clouds is not None:
+        if "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
+            point_clouds = input_dict["point_clouds"]
             if args.precision == "fp16":
                 point_clouds = point_clouds.half()
             elif args.precision == "bf16":
@@ -521,101 +607,46 @@ def validate(val_loader, model_engine, epoch, writer, args):
             # 转换为 [B, C, N] 格式
             if point_clouds.dim() == 3 and point_clouds.size(-1) == 3:
                 point_clouds = point_clouds.permute(0, 2, 1).contiguous()
-        
-        text_input = input_dict["input_ids"]
+            input_dict["point_clouds"] = point_clouds
 
         with torch.no_grad():
-            output_dict = model_engine(
-                text=text_input,
-                img=images,
-                points=point_clouds,
-                return_loss=False,
+            output_dict = model_engine(**input_dict)
+
+        # 评估 2D 分割
+        pred_masks = output_dict["pred_masks"]
+        masks_list = output_dict["gt_masks"][0].int()
+        output_list = (pred_masks[0] > 0).int()
+        assert len(pred_masks) == 1
+
+        intersection, union, acc_iou = 0.0, 0.0, 0.0
+        for mask_i, output_i in zip(masks_list, output_list):
+            intersection_i, union_i, _ = intersectionAndUnionGPU(
+                output_i.contiguous().clone(), mask_i.contiguous(), 2, ignore_index=255
             )
+            intersection += intersection_i
+            union += union_i
+            acc_iou += intersection_i / (union_i + 1e-5)
+            acc_iou[union_i == 0] += 1.0  # no-object target
+        intersection, union = intersection.cpu().numpy(), union.cpu().numpy()
+        acc_iou = acc_iou.cpu().numpy() / masks_list.shape[0]
+        intersection_meter.update(intersection), union_meter.update(
+            union
+        ), acc_iou_meter.update(acc_iou, n=masks_list.shape[0])
 
-        # 评估 2D 预测
-        if "aff2d" in output_dict and "masks_list" in input_dict and len(input_dict["masks_list"]) > 0:
-            pred_masks_2d = output_dict["aff2d"]
-            gt_masks_2d = input_dict["masks_list"][0].int()
-            
-            # 确保预测和GT形状匹配
-            if pred_masks_2d.dim() == 4:  # [B, 1, H, W]
-                pred_masks_2d = pred_masks_2d[0, 0]  # [H, W]
-            elif pred_masks_2d.dim() == 3:  # [B, H, W]
-                pred_masks_2d = pred_masks_2d[0]  # [H, W]
-            
-            output_2d = (pred_masks_2d > 0.5).int()
-            
-            intersection, union, acc_iou = 0.0, 0.0, 0.0
-            for mask_i in gt_masks_2d:
-                if mask_i.dim() == 3:
-                    mask_i = mask_i[0]
-                intersection_i, union_i, _ = intersectionAndUnionGPU(
-                    output_2d.contiguous().clone(), mask_i.contiguous(), 2, ignore_index=255
-                )
-                intersection += intersection_i
-                union += union_i
-                acc_iou += intersection_i / (union_i + 1e-5)
-                acc_iou[union_i == 0] += 1.0
-            
-            intersection, union = intersection.cpu().numpy(), union.cpu().numpy()
-            acc_iou = acc_iou.cpu().numpy() / max(len(gt_masks_2d), 1)
-            intersection_meter_2d.update(intersection)
-            union_meter_2d.update(union)
-            acc_iou_meter_2d.update(acc_iou, n=len(gt_masks_2d))
-        
-        # 评估 3D 预测
-        if "aff3d" in output_dict and "point_masks_list" in input_dict and input_dict["point_masks_list"] is not None:
-            pred_masks_3d = output_dict["aff3d"]  # [B, N, 1]
-            gt_masks_3d = input_dict["point_masks_list"][0]  # [N] or [N, 1]
-            
-            if pred_masks_3d.dim() == 3:
-                pred_masks_3d = pred_masks_3d[0].squeeze(-1)  # [N]
-            
-            if gt_masks_3d.dim() == 2:
-                gt_masks_3d = gt_masks_3d.squeeze(-1)  # [N]
-            
-            output_3d = (pred_masks_3d > 0.5).int()
-            gt_3d = gt_masks_3d.int()
-            
-            # 计算 3D IoU
-            intersection_3d = (output_3d & gt_3d).sum().float()
-            union_3d = (output_3d | gt_3d).sum().float()
-            iou_3d = intersection_3d / (union_3d + 1e-5)
-            
-            intersection_meter_3d.update(intersection_3d.cpu().numpy())
-            union_meter_3d.update(union_3d.cpu().numpy())
-            acc_iou_meter_3d.update(iou_3d.cpu().numpy(), n=1)
+    intersection_meter.all_reduce()
+    union_meter.all_reduce()
+    acc_iou_meter.all_reduce()
 
-    # 汇总 2D 指标
-    intersection_meter_2d.all_reduce()
-    union_meter_2d.all_reduce()
-    acc_iou_meter_2d.all_reduce()
-    
-    iou_class_2d = intersection_meter_2d.sum / (union_meter_2d.sum + 1e-10)
-    ciou_2d = iou_class_2d[1] if len(iou_class_2d) > 1 else 0.0
-    giou_2d = acc_iou_meter_2d.avg[1] if len(acc_iou_meter_2d.avg) > 1 else 0.0
-    
-    # 汇总 3D 指标
-    intersection_meter_3d.all_reduce()
-    union_meter_3d.all_reduce()
-    acc_iou_meter_3d.all_reduce()
-    
-    ciou_3d = intersection_meter_3d.sum / (union_meter_3d.sum + 1e-10)
-    giou_3d = acc_iou_meter_3d.avg
+    iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
+    ciou = iou_class[1]
+    giou = acc_iou_meter.avg[1]
 
     if args.local_rank == 0:
-        writer.add_scalar("val/giou_2d", giou_2d, epoch)
-        writer.add_scalar("val/ciou_2d", ciou_2d, epoch)
-        writer.add_scalar("val/giou_3d", giou_3d, epoch)
-        writer.add_scalar("val/ciou_3d", ciou_3d, epoch)
-        print("2D - giou: {:.4f}, ciou: {:.4f}".format(giou_2d, ciou_2d))
-        print("3D - giou: {:.4f}, ciou: {:.4f}".format(giou_3d, ciou_3d))
+        writer.add_scalar("val/giou", giou, epoch)
+        writer.add_scalar("val/ciou", ciou, epoch)
+        print("giou: {:.4f}, ciou: {:.4f}".format(giou, ciou))
 
-    # 返回综合指标（2D和3D的平均）
-    avg_giou = (giou_2d + giou_3d) / 2.0
-    avg_ciou = (ciou_2d + ciou_3d) / 2.0
-    
-    return avg_giou, avg_ciou
+    return giou, ciou
 
 
 if __name__ == "__main__":

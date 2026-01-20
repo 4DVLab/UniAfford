@@ -1,3 +1,4 @@
+"""代码架构未完成，不使用"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -209,3 +210,5 @@ class JointAff(nn.Module):
             outputs["loss"] = total
 
         return outputs
+
+__all__ = []
