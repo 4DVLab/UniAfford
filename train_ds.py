@@ -318,9 +318,11 @@ def main(args):
             "allgather_bucket_size": 5e8,
         },
     }
+
+    params_to_train = [p for p in model.parrmeters() if p.requries.grad]
     model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
         model=model,
-        model_parameters=model.parameters(),
+        model_parameters=params_to_train,
         training_data=train_dataset,
         collate_fn=partial(
             collate_fn,
