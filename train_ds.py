@@ -258,7 +258,6 @@ def main(args):
             print("Trainable parameter: ", n, "shape: ", p.shape)
             params_to_train.append(p)
     
-    print(f"\nTotal trainable parameters: {len(params_to_train)}")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
     print(f"Trainable parameters: {sum(p.numel() for p in params_to_train)}")
 

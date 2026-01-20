@@ -905,8 +905,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         ce_loss = output.loss * self.ce_loss_weight
         
         # 计算 2D 分割掩码损失（仅在有图像输入时）
-        mask_bce_loss = torch.tensor(0.0, device=input_ids.device)
-        mask_dice_loss = torch.tensor(0.0, device=input_ids.device)
+        # 使用 ce_loss * 0 保持计算图连接
+        mask_bce_loss = ce_loss * 0.0
+        mask_dice_loss = ce_loss * 0.0
         
         if has_image and len(pred_masks) > 0:
             mask_bce_loss_sum = 0
@@ -930,8 +931,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         mask_loss = mask_bce_loss + mask_dice_loss
 
         # 计算 3D 点云掩码损失（仅在有点云输入时）
-        mask_3d_bce_loss = torch.tensor(0.0, device=input_ids.device)
-        mask_3d_dice_loss = torch.tensor(0.0, device=input_ids.device)
+        # 使用 ce_loss * 0 保持计算图连接
+        mask_3d_bce_loss = ce_loss * 0.0
+        mask_3d_dice_loss = ce_loss * 0.0
         
         if has_point_cloud and len(pred_3d_masks) > 0 and point_masks_list is not None:
             mask_3d_bce_loss_sum = 0
