@@ -10,7 +10,6 @@ import json
 from typing import List, Tuple, Optional, Dict, Any
 from collections import defaultdict
 import numpy as np
-import open3d as o3d
 import cv2
 import csv
 
@@ -398,6 +397,8 @@ class PointCloud(Modality):
         Args:
             selected_labels: 只选择部分标签，否则都显示
         """
+        import open3d as o3d
+
         if self.mask is not None and self.labels is not None and len(self.labels) > 0:
             for idx, label in enumerate(self.labels):
                 if selected_labels is not None and label not in selected_labels: continue

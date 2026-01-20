@@ -8,7 +8,7 @@ from typing import List
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BitsAndBytesConfig, CLIPVisionModel
+from transformers import BitsAndBytesConfig, CLIPVisionModel, CLIPImageProcessor
 
 from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
                          DEFAULT_IMAGE_PATCH_TOKEN)
@@ -495,6 +495,11 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # 语言模型头：将隐藏状态映射到词汇表
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
+        # 初始化 CLIP 图像预处理器
+        self.clip_image_processor = CLIPImageProcessor.from_pretrained(
+            config.mm_vision_tower
+        )
+
         # 初始化权重并应用最终处理
         self.post_init()
 
@@ -536,6 +541,44 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             point_clouds = point_clouds.permute(0, 2, 1)
         point_embeddings = self.model.point_cloud_encoder(point_clouds)
         return point_embeddings
+    
+    def preprocess_clip_images(self, images_clip: torch.FloatTensor):
+        """
+        预处理 CLIP 图像
+        
+        Args:
+            images_clip: 输入图像张量，形状为 [B, C, H, W]，值范围 [0, 1] 或 [0, 255]
+            
+        Returns:
+            processed_images: 预处理后的图像张量，形状为 [B, C, H', W']
+        """
+        # 如果图像已经是归一化的 [0, 1] 范围，转换为 [0, 255]
+        if images_clip.max() <= 1.0:
+            images_clip = images_clip * 255.0
+        
+        # 转换为 numpy 格式以便使用 CLIPImageProcessor
+        # CLIPImageProcessor 期望输入为 PIL Image 或 numpy array
+        batch_size = images_clip.shape[0]
+        device = images_clip.device
+        dtype = images_clip.dtype
+        
+        # 将张量转换为 numpy (B, H, W, C) 格式
+        images_np = images_clip.permute(0, 2, 3, 1).cpu().numpy().astype('uint8')
+        
+        # 使用 CLIP 预处理器处理每张图像
+        processed_images_list = []
+        for i in range(batch_size):
+            # 预处理单张图像
+            processed = self.clip_image_processor(
+                images=images_np[i],
+                return_tensors="pt"
+            )
+            processed_images_list.append(processed['pixel_values'][0])
+        
+        # 堆叠并转移到原始设备
+        processed_images = torch.stack(processed_images_list).to(device=device, dtype=dtype)
+        
+        return processed_images
 
     def forward(self, **kwargs):
         """
@@ -614,6 +657,10 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             n_batch = 1
             length = input_ids.shape[0]
             assert images_clip.shape[0] == 1
+            
+            # 预处理 CLIP 图像
+            images_clip = self.preprocess_clip_images(images_clip)
+            
             # 扩展图像以匹配序列长度
             images_clip_extend = images_clip.expand(length, -1, -1, -1).contiguous()
 
@@ -650,6 +697,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 )
                 images_clip_list.append(images_clip_i)
             images_clip = torch.cat(images_clip_list, dim=0)
+            
+            # 预处理 CLIP 图像
+            images_clip = self.preprocess_clip_images(images_clip)
 
             # 调用父类前向传播（LLaVA）
             output = super().forward(
@@ -877,6 +927,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         """
         with torch.no_grad():
             """ -------------------------------------- VLM process part ----------------------------------- """
+            # 预处理 CLIP 图像
+            images_clip = self.preprocess_clip_images(images_clip)
+            
             # 生成文本（包含 [SEG] token）
             outputs = self.generate(
                 images=images_clip,
