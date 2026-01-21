@@ -799,8 +799,8 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 seg_token_mask,
                 torch.zeros((seg_token_mask.shape[0], 1)).bool().cuda(),
             ],
-            dim=1,
-        )
+                dim=1,
+            )
 
         # 统一处理图像预处理和扩展
         if has_image:
@@ -967,8 +967,23 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         
         mask_3d_loss = mask_3d_bce_loss + mask_3d_dice_loss
 
-        # 总损失
-        loss = ce_loss + mask_loss + mask_3d_loss
+        # ========== 添加虚拟损失以保持所有参数连接到计算图 ==========
+        # 这确保即使某些模块在当前批次中未使用，它们的参数仍然连接到 Loss
+        dummy_loss = ce_loss * 0.0  # 虚拟损失的值始终为0
+        
+        # 1. 确保 point_cloud_segmentor 的所有参数连接到计算图
+        for param in self.model.point_cloud_segmentor.parameters():
+            if param.requires_grad:
+                dummy_loss = dummy_loss + (param ** 2).sum() * 0.0
+        
+        # 2. 确保 SAM mask_decoder 的所有参数连接到计算图
+        if hasattr(self.model, 'visual_model') and hasattr(self.model.visual_model, 'mask_decoder'):
+            for param in self.model.visual_model.mask_decoder.parameters():
+                if param.requires_grad:
+                    dummy_loss = dummy_loss + (param ** 2).sum() * 0.0
+
+        # 总损失（包含虚拟损失以保持计算图完整）
+        loss = ce_loss + mask_loss + mask_3d_loss + dummy_loss
 
         return {
             "loss": loss,
