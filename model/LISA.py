@@ -901,10 +901,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # 计算语言模型损失（交叉熵）
         ce_loss = output.loss * self.ce_loss_weight
         
-        # 计算 2D 分割掩码损失（仅在有图像输入时）
-        # 使用 ce_loss * 0 保持计算图连接
-        mask_bce_loss = ce_loss * 0.0
-        mask_dice_loss = ce_loss * 0.0
+        # 计算 2D 掩码损失初始化为 0，如果没有图像输入则保持为 0
+        mask_bce_loss = 0.0
+        mask_dice_loss = 0.0
         
         if has_image and len(pred_masks) > 0:
             mask_bce_loss_sum = 0
@@ -927,10 +926,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         
         mask_loss = mask_bce_loss + mask_dice_loss
 
-        # 计算 3D 点云掩码损失（仅在有点云输入时）
-        # 使用 ce_loss * 0 保持计算图连接
-        mask_3d_bce_loss = ce_loss * 0.0
-        mask_3d_dice_loss = ce_loss * 0.0
+        # 计算 3D 点云掩码损失初始化为 0，如果没有点云输入则保持为 0
+        mask_3d_bce_loss = 0.0
+        mask_3d_dice_loss = 0.0
         
         if has_point_cloud and len(pred_3d_masks) > 0 and point_masks_list is not None:
             mask_3d_bce_loss_sum = 0
@@ -965,19 +963,19 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         mask_3d_loss = mask_3d_bce_loss + mask_3d_dice_loss
 
         # ========== 添加虚拟损失以保持所有参数连接到计算图 ==========
-        # 这确保即使某些模块在当前批次中未使用，它们的参数仍然连接到 Loss
-        dummy_loss = ce_loss * 0.0  # 虚拟损失的值始终为0
+        # 使用1e-8而不是0避免torch梯度图优化掉，确保即使某些模块在当前批次中未使用，它们的参数仍然连接到 Loss
+        dummy_loss = 0.0
         
         # 1. 确保 point_cloud_segmentor 的所有参数连接到计算图
         for param in self.model.point_cloud_segmentor.parameters():
             if param.requires_grad:
-                dummy_loss = dummy_loss + (param ** 2).sum() * 0.0
+                dummy_loss = dummy_loss + (param ** 2).sum() * 1e-8
         
         # 2. 确保 SAM mask_decoder 的所有参数连接到计算图
         if hasattr(self.model, 'visual_model') and hasattr(self.model.visual_model, 'mask_decoder'):
             for param in self.model.visual_model.mask_decoder.parameters():
                 if param.requires_grad:
-                    dummy_loss = dummy_loss + (param ** 2).sum() * 0.0
+                    dummy_loss = dummy_loss + (param ** 2).sum() * 1e-8
 
         # 总损失（包含虚拟损失以保持计算图完整）
         loss = ce_loss + mask_loss + mask_3d_loss + dummy_loss
