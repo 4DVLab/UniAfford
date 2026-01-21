@@ -644,7 +644,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         
         return token_embeddings_list
     
-    def _generate_2d_masks(self, pred_embeddings_list, image_embeddings, resize_list, label_list):
+    def _generate_2d_masks(self, pred_embeddings_list, image_embeddings, resize_list, original_size_list):
         """
         使用 SAM 生成 2D 分割掩码
         
@@ -652,7 +652,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             pred_embeddings_list: 按样本分组的预测嵌入列表
             image_embeddings: SAM 图像嵌入
             resize_list: 图像尺寸调整列表
-            label_list: 原始图像尺寸列表
+            original_size_list: 原始图像尺寸列表
             
         Returns:
             pred_masks: 预测的 2D 掩码列表
@@ -682,7 +682,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 pred_mask = self.model.visual_model.postprocess_masks(
                     low_res_masks,
                     input_size=resize_list[i],
-                    original_size=label_list[i],
+                    original_size=original_size_list[i],
                 )
                 pred_masks.append(pred_mask[:, 0])
         
@@ -731,7 +731,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         attention_masks: torch.LongTensor = None,
         offset: torch.LongTensor = None,
         masks_list: List[torch.FloatTensor] = None,
-        label_list: List[torch.Tensor] = None,
+        original_size_list: List[torch.Tensor] = None,
         resize_list: List[tuple] = None,
         inference: bool = False,
         point_clouds: torch.FloatTensor = None,  # 3D点云输入 [B, 3, N] 或 [B, N, 3]
@@ -745,21 +745,18 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             images: SAM 输入图像，形状 [batch_size, C, H, W]，可选
             images_clip: CLIP 输入图像，形状 [batch_size, C, H', W']，可选
             input_ids: 输入 token IDs
-            labels: 标签（用于计算语言模型损失）
+            labels: 文本标签（用于计算语言模型损失）
             attention_masks: 注意力掩码
             offset: 批次偏移量，用于处理不同长度的序列
-            masks_list: 真实分割掩码列表
-            label_list: 标签列表
-            resize_list: 图像尺寸调整列表
+            masks_list: 真实分割掩码列表（Ground Truth）
+            original_size_list: 原始图像尺寸列表 [(H, W), ...]
+            resize_list: 调整后的图像尺寸列表 [(H, W), ...]
             inference: 是否为推理模式（不计算损失）
             point_clouds: 3D点云输入
             point_masks_list: 3D点云真实掩码列表
-            generate_mode: 是否使用生成模式（用于 evaluate，会生成新的 token）
-            max_new_tokens: 生成模式下的最大 token 数
             
         Returns:
-            如果 generate_mode=True: (output_ids, pred_2d_masks, pred_3d_masks)
-            否则: 包含损失和预测结果的字典
+            包含损失和预测结果的字典
         """
         # 判断输入模态
         has_image = images is not None and images_clip is not None
@@ -884,7 +881,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # ========== 2D 分割：使用 SAM 生成分割掩码（仅在有图像输入时）==========
         pred_masks = []
         if has_image:
-            pred_masks = self._generate_2d_masks(pred_embeddings, image_embeddings, resize_list, label_list)
+            pred_masks = self._generate_2d_masks(pred_embeddings, image_embeddings, resize_list, original_size_list)
 
         # ========== 3D 分割：使用 PointNet++ 处理点云（仅在有点云输入时）==========
         pred_3d_masks = []

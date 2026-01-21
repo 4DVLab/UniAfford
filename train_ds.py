@@ -133,7 +133,7 @@ def main(args):
     tokenizer.pad_token = tokenizer.unk_token
     
     # 添加特殊标记
-    num_added_tokens = tokenizer.add_tokens("[SEG]")  # 2D分割标记
+    tokenizer.add_tokens("[SEG]")  # 2D分割标记
     tokenizer.add_tokens("[AFF]")  # 3D affordance标记
     args.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
     args.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
@@ -446,7 +446,7 @@ def train(
     ce_losses = AverageMeter("CeLoss", ":.4f")
     mask_bce_losses = AverageMeter("MaskBCELoss", ":.4f")
     mask_dice_losses = AverageMeter("MaskDICELoss", ":.4f")
-    mask_losses = AverageMeter("MaskLoss", ":.4f")
+    mask_losses = AverageMeter("MaskLoss", ":.4f")ww
     mask_3d_bce_losses = AverageMeter("Mask3DBCELoss", ":.4f")
     mask_3d_dice_losses = AverageMeter("Mask3DDICELoss", ":.4f")
     mask_3d_losses = AverageMeter("Mask3DLoss", ":.4f")

@@ -311,17 +311,45 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
         if instruction:
             question = instruction
         else:
+            raise RuntimeError("没有获取到输入指令") # debug
             question = f"Please identify the {aff_type} affordance region of the {obj_type}."
         
-        # 根据模态构建回答
+        # 根据模态构建回答（增加随机性）
         answer_parts = []
+        
         if has_image:
-            answer_parts.append("The 2D affordance region is [SEG].")
+            # 2D 图像回答模板（随机选择）
+            image_templates = [
+                f"The {aff_type} affordance region of the {obj_type} is [SEG].",
+                f"Here is the {aff_type} region: [SEG].",
+                f"The {aff_type} area for the {obj_type} is highlighted as [SEG].",
+                f"I've identified the {aff_type} affordance: [SEG].",
+                f"The region for {aff_type} interaction is [SEG].",
+                f"[SEG] shows the {aff_type} affordance of the {obj_type}.",
+            ]
+            answer_parts.append(random.choice(image_templates))
+        
         if has_pc:
-            answer_parts.append("The 3D affordance region is [AFF].")
+            # 3D 点云回答模板（随机选择）
+            pc_templates = [
+                f"The 3D {aff_type} affordance region is [AFF].",
+                f"In 3D space, the {aff_type} region is [AFF].",
+                f"The point cloud shows the {aff_type} area as [AFF].",
+                f"[AFF] represents the 3D {aff_type} affordance.",
+                f"The {aff_type} region in the point cloud is [AFF].",
+                f"For 3D interaction, the {aff_type} area is [AFF].",
+            ]
+            answer_parts.append(random.choice(pc_templates))
         
         if not answer_parts:
-            answer_parts.append("I cannot identify the affordance region without visual input.")
+            # 无输入时的回答模板（随机选择）
+            no_input_templates = [
+                "I cannot identify the affordance region without visual input.",
+                "I need visual information to identify the affordance region.",
+                "Please provide an image or point cloud to analyze the affordance.",
+                "Visual input is required to determine the affordance region.",
+            ]
+            answer_parts.append(random.choice(no_input_templates))
         
         answer = " ".join(answer_parts)
         
@@ -352,14 +380,25 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
         # 创建标签（只计算回答部分的损失）
         labels = input_ids.clone()
         
-        # 找到回答开始的位置，将问题部分的标签设为 IGNORE_INDEX
+        # 精确定位回答开始的位置，将问题部分的标签设为 IGNORE_INDEX
         sep = conv_instance.sep + conv_instance.roles[1] + ": "
-        sep_ids = tokenizer(sep, add_special_tokens=False).input_ids
         
-        # 简化处理：将前半部分设为 IGNORE_INDEX
-        total_len = len(input_ids)
-        answer_start = total_len // 2  # 粗略估计
-        labels[:answer_start] = IGNORE_INDEX
+        # 将完整的 prompt 分词以找到分隔符的位置
+        parts = prompt.split(sep)
+        if len(parts) >= 2:
+            # 计算问题部分的长度（包括分隔符）
+            question_part = parts[0] + sep
+            question_ids = tokenizer_image_token(question_part, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+            question_len = len(question_ids)
+            
+            # 将问题部分的标签设为 IGNORE_INDEX
+            labels[:question_len] = IGNORE_INDEX
+        else:
+            raise RuntimeError("无法在 prompt 中定位回答的起始分隔符（sep + role）！请检查对话模板。") # debug
+            # 如果无法找到分隔符，使用保守策略：只保留后半部分
+            total_len = len(input_ids)
+            answer_start = total_len // 2
+            labels[:answer_start] = IGNORE_INDEX
         
         input_ids_list.append(input_ids)
         labels_list.append(labels)
@@ -390,14 +429,14 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
         result['images_clip'] = torch.stack(images_clip_list)
         result['masks_list'] = masks_list
         result['resize_list'] = [(img.shape[1], img.shape[2]) for img in images_list]
-        result['label_list'] = [mask.shape[-2:] for mask in masks_list] if masks_list else []
+        result['original_size_list'] = [mask.shape[-2:] for mask in masks_list] if masks_list else []
     else:
         # 创建占位符
-        result['images'] = torch.zeros(batch_size, 3, 1024, 1024)
-        result['images_clip'] = torch.zeros(batch_size, 3, 224, 224)
-        result['masks_list'] = []
-        result['resize_list'] = [(1024, 1024)] * batch_size
-        result['label_list'] = []
+        result['images'] = None
+        result['images_clip'] = None
+        result['masks_list'] = None
+        result['resize_list'] = None
+        result['original_size_list'] = None
     
     # 处理点云数据
     if point_clouds_list:

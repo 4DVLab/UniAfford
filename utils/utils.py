@@ -197,3 +197,68 @@ def load_checkpoint(filename, model, optimizer=None, scheduler=None):
     if scheduler is not None and 'scheduler_state_dict' in checkpoint:
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
     return checkpoint.get('epoch', 0), checkpoint.get('best_score', 0)
+
+
+def debug_gradient_graph(loss, model, params_to_train):
+    print("\n=== 开始梯度图连通性检查 ===")
+    
+    # 1. 获取所有应该被训练的参数的 ID 集合
+    # 我们用 id() 来作为唯一标识
+    trainable_param_ids = {id(p): n for n, p in model.named_parameters() if p.requires_grad}
+    print(f"理论上应该更新的参数数量: {len(trainable_param_ids)}")
+
+    # 2. 遍历 Loss 的梯度图，找到所有实际参与计算的参数
+    # BFS 遍历
+    queue = [loss.grad_fn]
+    visited_nodes = set()
+    connected_param_ids = set()
+    
+    # 计数器
+    step = 0
+    
+    while queue:
+        cur_fn = queue.pop(0)
+        
+        # 跳过空节点和已访问节点
+        if cur_fn is None or cur_fn in visited_nodes:
+            continue
+            
+        visited_nodes.add(cur_fn)
+        step += 1
+
+        # 检查当前节点是否是参数的累积梯度节点 (AccumulateGrad)
+        # 在 PyTorch 中，叶子参数的 grad_fn 是 AccumulateGrad
+        if hasattr(cur_fn, 'variable'):
+            param = cur_fn.variable
+            p_id = id(param)
+            connected_param_ids.add(p_id)
+        
+        # 将父节点加入队列
+        for next_fn, _ in cur_fn.next_functions:
+            if next_fn is not None:
+                queue.append(next_fn)
+
+    print(f"梯度图遍历完成，共访问 {step} 个计算节点。")
+    print(f"实际连接到 Loss 的参数数量: {len(connected_param_ids)}")
+
+    # 3. 核心对比：找出断开的参数
+    # 存在于 trainable_param_ids 但不存在于 connected_param_ids 的，就是“断链”的元凶
+    disconnected_params = []
+    
+    # 注意：我们比较的是我们传给DeepSpeed的那些参数 (假设 params_to_train 里的都在 trainable_param_ids 里)
+    # 为了严谨，我们直接检查所有 requires_grad=True 的参数
+    for p_id, name in trainable_param_ids.items():
+        if p_id not in connected_param_ids:
+            disconnected_params.append(name)
+
+    print("\n=== 诊断结果 ===")
+    if not disconnected_params:
+        print("✅ 通过检查：所有可训练参数都成功连接到了 Loss 上。")
+    else:
+        print(f"❌ 发现 {len(disconnected_params)} 个参数虽然 requires_grad=True，但没有连接到 Loss！")
+        print("这会导致 DeepSpeed 报错 'NoneType' object has no attribute 'next_functions'。")
+        print("断开连接的参数列表（前20个）：")
+        for name in disconnected_params[:20]:
+            print(f" - {name}")
+            
+    return disconnected_params
