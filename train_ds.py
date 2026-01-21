@@ -446,7 +446,7 @@ def train(
     ce_losses = AverageMeter("CeLoss", ":.4f")
     mask_bce_losses = AverageMeter("MaskBCELoss", ":.4f")
     mask_dice_losses = AverageMeter("MaskDICELoss", ":.4f")
-    mask_losses = AverageMeter("MaskLoss", ":.4f")ww
+    mask_losses = AverageMeter("MaskLoss", ":.4f")
     mask_3d_bce_losses = AverageMeter("Mask3DBCELoss", ":.4f")
     mask_3d_dice_losses = AverageMeter("Mask3DDICELoss", ":.4f")
     mask_3d_losses = AverageMeter("Mask3DLoss", ":.4f")

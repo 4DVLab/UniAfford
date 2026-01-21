@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from transformers import BitsAndBytesConfig, CLIPVisionModel, CLIPImageProcessor
 
 from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
-                         DEFAULT_IMAGE_PATCH_TOKEN)
+                         DEFAULT_IMAGE_PATCH_TOKEN, debug_gradient_graph)
 
 from .llava.model.language_model.llava_llama import (LlavaLlamaForCausalLM,
                                                      LlavaLlamaModel)
