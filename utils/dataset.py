@@ -370,35 +370,25 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
     
     for question, answer in conversations:
         conv_instance = conv.copy()
+        
+        # 分别构建问题和回答的 prompt
         conv_instance.append_message(conv_instance.roles[0], question)
-        conv_instance.append_message(conv_instance.roles[1], answer)
-        prompt = conv_instance.get_prompt()
+        conv_instance.append_message(conv_instance.roles[1], None)  # 先不添加回答内容
+        question_prompt = conv_instance.get_prompt()
         
-        # 分词
-        input_ids = tokenizer_image_token(prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+        # 分别对问题和回答进行分词
+        question_ids = tokenizer_image_token(question_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
         
-        # 创建标签（只计算回答部分的损失）
-        labels = input_ids.clone()
+        # 对回答进行分词（不包含特殊的对话格式）
+        answer_ids = tokenizer_image_token(answer, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
         
-        # 精确定位回答开始的位置，将问题部分的标签设为 IGNORE_INDEX
-        sep = conv_instance.sep + conv_instance.roles[1] + ": "
+        # 合并 input_ids：问题 + 回答
+        input_ids = torch.cat([question_ids, answer_ids], dim=0)
         
-        # 将完整的 prompt 分词以找到分隔符的位置
-        parts = prompt.split(sep)
-        if len(parts) >= 2:
-            # 计算问题部分的长度（包括分隔符）
-            question_part = parts[0] + sep
-            question_ids = tokenizer_image_token(question_part, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-            question_len = len(question_ids)
-            
-            # 将问题部分的标签设为 IGNORE_INDEX
-            labels[:question_len] = IGNORE_INDEX
-        else:
-            raise RuntimeError("无法在 prompt 中定位回答的起始分隔符（sep + role）！请检查对话模板。") # debug
-            # 如果无法找到分隔符，使用保守策略：只保留后半部分
-            total_len = len(input_ids)
-            answer_start = total_len // 2
-            labels[:answer_start] = IGNORE_INDEX
+        # 创建 labels：问题部分设为 IGNORE_INDEX，回答部分保留原始 ids
+        question_labels = torch.full_like(question_ids, IGNORE_INDEX)
+        answer_labels = answer_ids.clone()
+        labels = torch.cat([question_labels, answer_labels], dim=0)
         
         input_ids_list.append(input_ids)
         labels_list.append(labels)
