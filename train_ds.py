@@ -18,7 +18,7 @@ from model.llava import conversation as conversation_lib
 from utils.dataset import DatasetManager, HybridDataset, ValDataset, collate_fn
 from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
                          AverageMeter, ProgressMeter, Summary, dict_to_cuda,
-                         intersectionAndUnionGPU)
+                         intersectionAndUnionGPU, debug_gradient_graph)
 
 
 def parse_args(args):
@@ -112,8 +112,10 @@ def parse_args(args):
     parser.add_argument("--test_ratio", default=0.15, type=float, help="test set ratio")
     return parser.parse_args(args)
 
+params_to_train = []
 
 def main(args):
+    global params_to_train
     args = parse_args(args)
     args.log_dir = os.path.join(args.log_base_dir, args.exp_name)
     if args.local_rank == 0:
@@ -440,6 +442,8 @@ def train(
     args,
 ):
     """Main training loop."""
+    global params_to_train
+
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     losses = AverageMeter("Loss", ":.4f")
