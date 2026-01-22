@@ -44,8 +44,8 @@ than CUDA forward + backward.
 import math
 
 import torch
-import triton_pre_mlir as triton
-import triton_pre_mlir.language as tl
+import triton
+import triton.language as tl
 
 
 @triton.heuristics(
