@@ -623,12 +623,12 @@ def validate(val_loader, model_engine, epoch, writer, args):
     # 2D 分割评估指标
     intersection_meter = AverageMeter("Intersec", ":6.3f", Summary.SUM)
     union_meter = AverageMeter("Union", ":6.3f", Summary.SUM)
-    acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.SUM)
+    acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.AVERAGE)  # 使用 AVERAGE
     
     # 3D 点云评估指标
     intersection_meter_3d = AverageMeter("Intersec3D", ":6.3f", Summary.SUM)
     union_meter_3d = AverageMeter("Union3D", ":6.3f", Summary.SUM)
-    acc_iou_meter_3d = AverageMeter("gIoU3D", ":6.3f", Summary.SUM)
+    acc_iou_meter_3d = AverageMeter("gIoU3D", ":6.3f", Summary.AVERAGE)  # 使用 AVERAGE
 
     model_engine.eval()
 

@@ -56,10 +56,28 @@ class AverageMeter:
             device = torch.device("mps")
         else:
             device = torch.device("cpu")
-        total = torch.tensor([self.sum, self.count], dtype=torch.float32, device=device)
-        dist.all_reduce(total, dist.ReduceOp.SUM, async_op=False)
-        self.sum, self.count = total.tolist()
-        self.avg = self.sum / self.count
+        
+        # 检查 self.sum 是否是向量（numpy 数组或列表）
+        import numpy as np
+        if isinstance(self.sum, (np.ndarray, list)):
+            # 向量情况：self.sum 是 shape(N,) 的数组
+            sum_array = np.array(self.sum) if isinstance(self.sum, list) else self.sum
+            sum_tensor = torch.tensor(sum_array, dtype=torch.float32, device=device)
+            count_tensor = torch.tensor([self.count], dtype=torch.float32, device=device)
+            
+            # 分别对 sum 和 count 进行 all_reduce
+            dist.all_reduce(sum_tensor, dist.ReduceOp.SUM, async_op=False)
+            dist.all_reduce(count_tensor, dist.ReduceOp.SUM, async_op=False)
+            
+            self.sum = sum_tensor.cpu().numpy()
+            self.count = count_tensor.item()
+            self.avg = self.sum / self.count
+        else:
+            # 标量情况：self.sum 是单个数值
+            total = torch.tensor([self.sum, self.count], dtype=torch.float32, device=device)
+            dist.all_reduce(total, dist.ReduceOp.SUM, async_op=False)
+            self.sum, self.count = total.tolist()
+            self.avg = self.sum / self.count
 
     def __str__(self):
         fmtstr = "{name} {val" + self.fmt + "} ({avg" + self.fmt + "})"
