@@ -174,7 +174,7 @@ def main(args):
     model.config.pad_token_id = tokenizer.pad_token_id
 
     model.enable_input_require_grads()
-    model.gradient_checkpointing_enable()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
 
     # 初始化视觉模块
     model.get_model().initialize_vision_modules(model.get_model().config)
