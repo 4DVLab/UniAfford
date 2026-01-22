@@ -646,7 +646,7 @@ def validate(val_loader, model_engine, epoch, writer, args):
         # 评估 2D 分割（如果有图像数据）
         if "pred_masks" in output_dict and output_dict["pred_masks"] is not None:
             pred_masks = output_dict["pred_masks"]
-            masks_list = output_dict["masks"][0].int()
+            masks_list = output_dict["gt_masks"][0].int()
             output_list = (pred_masks[0] > 0).int()
             assert len(pred_masks) == 1
 
@@ -668,7 +668,7 @@ def validate(val_loader, model_engine, epoch, writer, args):
         # 评估 3D 点云分割（如果有点云数据）
         if "pred_masks_3d" in output_dict and output_dict["pred_masks_3d"] is not None:
             pred_masks_3d = output_dict["pred_masks_3d"]
-            masks_3d_list = output_dict["masks_3d"][0].int()
+            masks_3d_list = output_dict["gt_masks_3d"][0].int()
             output_3d_list = (pred_masks_3d[0] > 0).int()
             assert len(pred_masks_3d) == 1
 
