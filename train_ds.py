@@ -702,8 +702,15 @@ def validate(val_loader, model_engine, epoch, writer, args):
     acc_iou_meter_3d.all_reduce()
 
     iou_class_3d = intersection_meter_3d.sum / (union_meter_3d.sum + 1e-10)
-    ciou_3d = iou_class_3d[1]
-    giou_3d = acc_iou_meter_3d.avg[1]
+    if isinstance(iou_class_3d, np.ndarray) and iou_class_3d.size > 1:
+        ciou_3d = iou_class_3d[1]
+    else:
+        ciou_3d = float(iou_class_3d) if not isinstance(iou_class_3d, np.ndarray) else iou_class_3d.item()
+    
+    if isinstance(acc_iou_meter_3d.avg, np.ndarray) and acc_iou_meter_3d.avg.size > 1:
+        giou_3d = acc_iou_meter_3d.avg[1]
+    else:
+        giou_3d = float(acc_iou_meter_3d.avg) if not isinstance(acc_iou_meter_3d.avg, np.ndarray) else acc_iou_meter_3d.avg.item()
 
     if args.local_rank == 0:
         # 记录 2D 分割指标
