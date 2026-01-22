@@ -167,7 +167,7 @@ def main(args):
     
     # 初始化魔改后的 LISA 模型
     model = LISAForCausalLM.from_pretrained(
-        args.version, torch_dtype=torch_dtype, low_cpu_mem_usage=True, **model_args
+        args.version, dtype=torch_dtype, low_cpu_mem_usage=True, **model_args
     )
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
@@ -506,6 +506,17 @@ def train(
                     point_clouds = point_clouds.permute(0, 2, 1).contiguous()
                 input_dict["point_clouds"] = point_clouds
 
+            # 计算实际的 batch size（支持动态模态输入）
+            if "images" in input_dict and input_dict["images"] is not None:
+                batch_size = input_dict["images"].size(0)
+            elif "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
+                batch_size = input_dict["point_clouds"].size(0)
+            else:
+                batch_size = 1  # 默认值
+            
+            # 将 batch_size 写入 input_dict 传入模型
+            input_dict["batch_size"] = batch_size
+
             # 调用魔改后的 LISA 模型
             output_dict = model(**input_dict)
 
@@ -518,14 +529,14 @@ def train(
             mask_3d_dice_loss = output_dict.get("mask_3d_dice_loss", torch.tensor(0.0))
             mask_3d_loss = output_dict.get("mask_3d_loss", torch.tensor(0.0))
 
-            losses.update(loss.item(), input_dict["images"].size(0))
-            ce_losses.update(ce_loss.item(), input_dict["images"].size(0))
-            mask_bce_losses.update(mask_bce_loss.item(), input_dict["images"].size(0))
-            mask_dice_losses.update(mask_dice_loss.item(), input_dict["images"].size(0))
-            mask_losses.update(mask_loss.item(), input_dict["images"].size(0))
-            mask_3d_bce_losses.update(mask_3d_bce_loss.item(), input_dict["images"].size(0))
-            mask_3d_dice_losses.update(mask_3d_dice_loss.item(), input_dict["images"].size(0))
-            mask_3d_losses.update(mask_3d_loss.item(), input_dict["images"].size(0))
+            losses.update(loss.item(), batch_size)
+            ce_losses.update(ce_loss.item(), batch_size)
+            mask_bce_losses.update(mask_bce_loss.item(), batch_size)
+            mask_dice_losses.update(mask_dice_loss.item(), batch_size)
+            mask_losses.update(mask_loss.item(), batch_size)
+            mask_3d_bce_losses.update(mask_3d_bce_loss.item(), batch_size)
+            mask_3d_dice_losses.update(mask_3d_dice_loss.item(), batch_size)
+            mask_3d_losses.update(mask_3d_loss.item(), batch_size)
             
             model.backward(loss)
             model.step()

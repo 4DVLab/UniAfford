@@ -248,12 +248,13 @@ class PointCloud3DSegmentor(nn.Module):
         
         # 应用文本掩码
         if text_mask is not None:
-            decoded_text = decoded_text * text_mask.unsqueeze(-1).float()
+            decoded_text = decoded_text * text_mask.unsqueeze(-1).to(decoded_text.dtype)
         
         # ========== 生成掩码 ==========
         # 使用点积计算每个点与文本的相关性
         # decoded_text: [B, L, C], up_feat: [B, C, N]
         # 输出: [B, L, N]
+        up_feat = up_feat.to(decoded_text.dtype)
         point_text_sim = torch.einsum('blc,bcn->bln', decoded_text, up_feat)
         
         # 对文本维度求平均（考虑掩码）
@@ -736,6 +737,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         inference: bool = False,
         point_clouds: torch.FloatTensor = None,  # 3D点云输入 [B, 3, N] 或 [B, N, 3]
         point_masks_list: List[torch.FloatTensor] = None,  # 3D点云真实掩码列表
+        batch_size: int = None,  # 从外部传入的 batch_size（可选）
         **kwargs,
     ):
         """
@@ -754,6 +756,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             inference: 是否为推理模式（不计算损失）
             point_clouds: 3D点云输入
             point_masks_list: 3D点云真实掩码列表
+            batch_size: 从外部传入的 batch_size（可选，如果未提供则自动计算）
             
         Returns:
             包含损失和预测结果的字典
@@ -766,13 +769,14 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         if not has_image and not has_point_cloud:
             raise ValueError("至少需要提供图像或点云输入")
         
-        # 获取 batch_size
-        if has_image:
-            batch_size = images.shape[0]
-            if offset is not None:
-                assert batch_size == len(offset) - 1
-        else:
-            batch_size = point_clouds.shape[0] if has_point_cloud else 1
+        # 获取 batch_size（优先使用传入的值，否则自动计算）
+        if batch_size is None:
+            if has_image:
+                batch_size = images.shape[0]
+                if offset is not None:
+                    assert batch_size == len(offset) - 1
+            else:
+                batch_size = point_clouds.shape[0] if has_point_cloud else 1
         
         # 获取 SAM 图像嵌入（仅在有图像输入时）
         image_embeddings = None

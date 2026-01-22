@@ -6,3 +6,5 @@ tqdm
 deepspeed
 peft
 tensorboard
+sentencepiece
+protobuf
