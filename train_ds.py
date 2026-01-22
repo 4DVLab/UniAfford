@@ -8,7 +8,7 @@ from functools import partial
 import deepspeed
 import numpy as np
 import torch
-import tqdm
+from tqdm import tqdm
 import transformers
 from peft import LoraConfig, get_peft_model
 from torch.utils.tensorboard import SummaryWriter
@@ -632,7 +632,7 @@ def validate(val_loader, model_engine, epoch, writer, args):
 
     model_engine.eval()
 
-    for input_dict in tqdm.tqdm(val_loader):
+    for input_dict in tqdm(val_loader, desc='Validating'):
         torch.cuda.empty_cache()
 
         input_dict = dict_to_cuda(input_dict)

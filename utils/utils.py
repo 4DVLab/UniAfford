@@ -46,7 +46,8 @@ class AverageMeter:
         self.val = val
         self.sum += val * n
         self.count += n
-        self.avg = self.sum / self.count
+        # 防止除零错误
+        self.avg = self.sum / self.count if self.count > 0 else 0
 
     def all_reduce(self):
         """分布式训练时同步所有进程的统计值"""
@@ -71,13 +72,15 @@ class AverageMeter:
             
             self.sum = sum_tensor.cpu().numpy()
             self.count = count_tensor.item()
-            self.avg = self.sum / self.count
+            # 防止除零错误
+            self.avg = self.sum / self.count if self.count > 0 else self.sum
         else:
             # 标量情况：self.sum 是单个数值
             total = torch.tensor([self.sum, self.count], dtype=torch.float32, device=device)
             dist.all_reduce(total, dist.ReduceOp.SUM, async_op=False)
             self.sum, self.count = total.tolist()
-            self.avg = self.sum / self.count
+            # 防止除零错误
+            self.avg = self.sum / self.count if self.count > 0 else 0.0
 
     def __str__(self):
         fmtstr = "{name} {val" + self.fmt + "} ({avg" + self.fmt + "})"
