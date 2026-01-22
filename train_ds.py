@@ -181,19 +181,32 @@ def main(args):
     vision_tower = model.get_model().get_vision_tower()
     vision_tower.to(dtype=torch_dtype, device=args.local_rank)
     
+    conversation_lib.default_conversation = conversation_lib.conv_templates[
+        args.conv_type
+    ]
+
+    model.resize_token_embeddings(len(tokenizer))
+    
     # 初始化 LISA 模块（包括 SAM 和 3D 点云分割器）
     if not args.eval_only:
         model.get_model().initialize_lisa_modules(model.get_model().config)
 
-    # 冻结视觉编码器和投影层
-    for p in vision_tower.parameters():
-        p.requires_grad = False
-    for p in model.get_model().mm_projector.parameters():
+    # # 冻结视觉编码器和投影层
+    # for p in vision_tower.parameters():
+    #     p.requires_grad = False
+    # for p in model.get_model().mm_projector.parameters():
+    #     p.requires_grad = False
+
+
+    # 先把所有参数冻结 (作为基底)
+    for p in model.parameters():
         p.requires_grad = False
 
-    conversation_lib.default_conversation = conversation_lib.conv_templates[
-        args.conv_type
-    ]
+    # 开启非 LoRA 的关键模块 (Projector, Mask Decoder 等)
+    target_modules = ["mask_decoder", "text_hidden_fcs", "mm_projector", "lm_head", "embed_tokens", "point_cloud_segmentor"]
+    for n, p in model.named_parameters():
+        if any(t in n for t in target_modules):
+            p.requires_grad = True
 
     # LoRA 配置（可选）
     lora_r = args.lora_r
@@ -237,32 +250,15 @@ def main(args):
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
-    model.resize_token_embeddings(len(tokenizer))
-
-    # 设置可训练的模块
-    # 首先确保所有参数的 requires_grad 状态正确
-    for n, p in model.named_parameters():
-        if any(
-            [
-                x in n
-                for x in ["lm_head", "embed_tokens", "mask_decoder", "text_hidden_fcs", "point_cloud_segmentor"]
-            ]
-        ):
-            p.requires_grad = True
-        else:
-            # 明确冻结其他参数
-            p.requires_grad = False
     
-    # 收集所有 requires_grad=True 的参数
-    params_to_train = []
-    for n, p in model.named_parameters():
-        if p.requires_grad:
-            print("Trainable parameter: ", n, "shape: ", p.shape)
-            params_to_train.append(p)
-    
+    params_to_train = [p for p in model.parameters() if p.requires_grad]
+    # 打印检查
+    print(f"\n最终训练参数统计:")
     print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
-    print(f"Trainable parameters: {sum(p.numel() for p in params_to_train)}")
-
+    print(f"Trainable parameters: {len(params_to_train)} tensors, {sum(p.numel() for p in params_to_train)} elements")
+    
+    if len(params_to_train) == 0:
+        raise ValueError("严重错误：没有发现可训练参数！请检查冻结逻辑。")
     world_size = torch.cuda.device_count()
     args.distributed = world_size > 1
     
