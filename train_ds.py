@@ -467,20 +467,41 @@ def main(args):
 
         if args.no_eval or is_best:
             save_dir = os.path.join(args.log_dir, "ckpt_model")
+            
+            # 方案1：保存完整的 DeepSpeed checkpoint（包含优化器状态，用于断点续训）
             if args.local_rank == 0:
-                torch.save(
-                    {"epoch": epoch},
-                    os.path.join(
-                        args.log_dir,
-                        "meta_log_giou{:.3f}_ciou{:.3f}.pth".format(
-                            best_score, cur_ciou
-                        ),
-                    ),
-                )
                 if os.path.exists(save_dir):
                     shutil.rmtree(save_dir)
             torch.distributed.barrier()
             model_engine.save_checkpoint(save_dir)
+            
+            # 方案2：额外保存轻量级的仅模型权重 checkpoint（用于推理）
+            if args.local_rank == 0:
+                # 只保存可训练参数
+                trainable_state_dict = {
+                    name: param.cpu() 
+                    for name, param in model_engine.module.named_parameters() 
+                    if param.requires_grad
+                }
+                
+                lightweight_ckpt = {
+                    "epoch": epoch,
+                    "model_state_dict": trainable_state_dict,
+                    "best_giou": best_score,
+                    "best_ciou": cur_ciou,
+                }
+                
+                lightweight_path = os.path.join(
+                    args.log_dir,
+                    "lightweight_giou{:.3f}_ciou{:.3f}.pth".format(best_score, cur_ciou)
+                )
+                torch.save(lightweight_ckpt, lightweight_path)
+                print(f"Saved lightweight checkpoint to {lightweight_path}")
+                
+                # 删除旧的轻量级 checkpoint
+                for old_ckpt in os.listdir(args.log_dir):
+                    if old_ckpt.startswith("lightweight_") and old_ckpt != os.path.basename(lightweight_path):
+                        os.remove(os.path.join(args.log_dir, old_ckpt))
 
 
 def train(
