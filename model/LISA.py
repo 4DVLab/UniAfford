@@ -901,9 +901,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # 计算语言模型损失（交叉熵）
         ce_loss = output.loss * self.ce_loss_weight
         
-        # 计算 2D 掩码损失初始化为 0，如果没有图像输入则保持为 0
-        mask_bce_loss = 0.0
-        mask_dice_loss = 0.0
+        # 计算 2D 掩码损失初始化为与 ce_loss 相同设备的零张量，如果没有图像输入则保持为 0
+        mask_bce_loss = torch.zeros_like(ce_loss)
+        mask_dice_loss = torch.zeros_like(ce_loss)
         
         if has_image and len(pred_masks) > 0:
             mask_bce_loss_sum = 0
@@ -927,8 +927,8 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         mask_loss = mask_bce_loss + mask_dice_loss
 
         # 计算 3D 点云掩码损失初始化为 0，如果没有点云输入则保持为 0
-        mask_3d_bce_loss = 0.0
-        mask_3d_dice_loss = 0.0
+        mask_3d_bce_loss = torch.zeros_like(ce_loss)
+        mask_3d_dice_loss = torch.zeros_like(ce_loss)
         
         if has_point_cloud and len(pred_3d_masks) > 0 and point_masks_list is not None:
             mask_3d_bce_loss_sum = 0
@@ -964,7 +964,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
 
         # ========== 添加虚拟损失以保持所有参数连接到计算图 ==========
         # 使用1e-8而不是0避免torch梯度图优化掉，确保即使某些模块在当前批次中未使用，它们的参数仍然连接到 Loss
-        dummy_loss = 0.0
+        dummy_loss = torch.zeros_like(ce_loss)
         
         # 1. 确保 point_cloud_segmentor 的所有参数连接到计算图
         for param in self.model.point_cloud_segmentor.parameters():

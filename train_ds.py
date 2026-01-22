@@ -482,17 +482,19 @@ def train(
 
             data_time.update(time.time() - end)
             input_dict = dict_to_cuda(input_dict)
+            
 
             # 处理图像数据
-            if args.precision == "fp16":
-                input_dict["images"] = input_dict["images"].half()
-                input_dict["images_clip"] = input_dict["images_clip"].half()
-            elif args.precision == "bf16":
-                input_dict["images"] = input_dict["images"].bfloat16()
-                input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
-            else:
-                input_dict["images"] = input_dict["images"].float()
-                input_dict["images_clip"] = input_dict["images_clip"].float()
+            if "images" in input_dict and input_dict["images"] is not None:
+                if args.precision == "fp16":
+                    input_dict["images"] = input_dict["images"].half()
+                    input_dict["images_clip"] = input_dict["images_clip"].half()
+                elif args.precision == "bf16":
+                    input_dict["images"] = input_dict["images"].bfloat16()
+                    input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
+                else:
+                    input_dict["images"] = input_dict["images"].float()
+                    input_dict["images_clip"] = input_dict["images_clip"].float()
 
             # 处理点云数据
             if "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
