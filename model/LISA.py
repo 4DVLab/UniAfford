@@ -843,7 +843,11 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         assert len(self.model.text_hidden_fcs) == 1
         last_hidden_state = self.model.text_hidden_fcs[0](output_hidden_states[-1])
         
-        # 关键修复：动态调整 seg_token_mask 的长度以匹配 last_hidden_state
+        # HACK: 确保 last_hidden_state 始终是 3D 张量 [B, L', C]
+        if last_hidden_state.dim() == 2:
+            last_hidden_state = last_hidden_state.unsqueeze(0)  # [1, L', C]
+        
+        # 动态调整 seg_token_mask 的长度以匹配 last_hidden_state
         # last_hidden_state.shape: [B, L', C]
         # seg_token_mask.shape: [B, L]
         # 需要将 seg_token_mask 扩展到 L' 的长度
