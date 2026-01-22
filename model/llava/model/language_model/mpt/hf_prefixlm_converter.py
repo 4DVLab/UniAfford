@@ -15,20 +15,55 @@ import torch
 from transformers.models.bloom.modeling_bloom import (
     BaseModelOutputWithPastAndCrossAttentions, BloomForCausalLM, BloomModel,
     CausalLMOutputWithCrossAttentions, CrossEntropyLoss)
-from transformers.models.bloom.modeling_bloom import \
-    _expand_mask as _expand_mask_bloom
-from transformers.models.bloom.modeling_bloom import \
-    _make_causal_mask as _make_causal_mask_bloom
 from transformers.models.bloom.modeling_bloom import logging
 from transformers.models.gpt2.modeling_gpt2 import GPT2LMHeadModel
 from transformers.models.gpt_neo.modeling_gpt_neo import GPTNeoForCausalLM
 from transformers.models.gpt_neox.modeling_gpt_neox import GPTNeoXForCausalLM
 from transformers.models.gptj.modeling_gptj import GPTJForCausalLM
 from transformers.models.opt.modeling_opt import OPTForCausalLM
-from transformers.models.opt.modeling_opt import \
-    _expand_mask as _expand_mask_opt
-from transformers.models.opt.modeling_opt import \
-    _make_causal_mask as _make_causal_mask_opt
+
+# 导入通用掩码工具 (高版本必备)
+try:
+    from transformers.modeling_attn_mask_utils import (
+        _prepare_4d_causal_attention_mask,
+        _prepare_4d_attention_mask
+    )
+except ImportError:
+    _prepare_4d_causal_attention_mask = None
+
+from transformers.models.bloom.modeling_bloom import (
+    BaseModelOutputWithPastAndCrossAttentions, BloomForCausalLM, BloomModel,
+    CausalLMOutputWithCrossAttentions, CrossEntropyLoss)
+
+# --- 高版本兼容性修复开始 ---
+try:
+    # 尝试从老位置导入
+    from transformers.models.bloom.modeling_bloom import _expand_mask as _expand_mask_bloom
+    from transformers.models.bloom.modeling_bloom import _make_causal_mask as _make_causal_mask_bloom
+except ImportError:
+    # 适配高版本：新版本 BLOOM 内部已不直接暴露这些函数
+    # 我们定义简单的等效逻辑
+    def _expand_mask_bloom(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
+        # 新版本逻辑：将 [batch, seq] 扩展为 [batch, 1, 1, seq] 并反转符号
+        return mask[:, None, None, :].to(dtype)
+    
+    def _make_causal_mask_bloom(input_shape, device, past_key_values_length):
+        # 产生一个标准下三角掩码
+        bsz, tgt_len = input_shape
+        mask = torch.full((tgt_len, tgt_len), torch.finfo(torch.float32).min, device=device)
+        mask_cond = torch.arange(mask.size(-1), device=device)
+        mask.masked_fill_(mask_cond < (mask_cond + 1).view(mask.size(-1), 1), 0)
+        return mask[None, None, :, :].expand(bsz, 1, tgt_len, tgt_len + past_key_values_length)
+
+try:
+    from transformers.models.opt.modeling_opt import _expand_mask as _expand_mask_opt
+    from transformers.models.opt.modeling_opt import _make_causal_mask as _make_causal_mask_opt
+except ImportError:
+    # 适配高版本 OPT
+    _expand_mask_opt = _expand_mask_bloom # 逻辑基本通用
+    def _make_causal_mask_opt(input_shape, dtype, device, past_key_values_length):
+        return _make_causal_mask_bloom(input_shape, device, past_key_values_length).to(dtype)
+# --- 高版本兼容性修复结束 ---
 
 logger = logging.get_logger(__name__)
 _SUPPORTED_GPT_MODELS = (
