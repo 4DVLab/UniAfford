@@ -151,8 +151,8 @@ class PointCloud3DSegmentor(nn.Module):
         )
         self.transformer_decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_decoder_layers)
         
-        # 位置编码
-        self.pos_1d = nn.Parameter(torch.randn(1, max_text_len, embed_dim) * 0.02)
+        # 位置编码（初始化时使用float32，会在forward时自动转换为输入的dtype）
+        self.pos_1d = nn.Parameter(torch.randn(1, max_text_len, embed_dim, dtype=torch.float32) * 0.02)
         
         # ========== 输出头 ==========
         # 不需要额外的输出头，直接使用点积计算掩码
@@ -230,8 +230,8 @@ class PointCloud3DSegmentor(nn.Module):
         # up_feat: [B, C, N] -> [B, N, C]
         memory = up_feat.transpose(-2, -1)  # [B, N, C]
         
-        # 添加位置编码
-        query_pos = self.pos_1d[:, :L, :]  # [1, L, C]
+        # 添加位置编码（确保类型与 text_feat 一致）
+        query_pos = self.pos_1d[:, :L, :].to(dtype=text_feat.dtype, device=text_feat.device)  # [1, L, C]
         tgt = text_feat + query_pos
         
         # Transformer Decoder
@@ -622,7 +622,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             # 需要在前面填充（图像特征被插入到序列开头）
             padding_len = actual_seq_len - current_mask_len
             token_mask = torch.cat(
-                [torch.zeros((token_mask.shape[0], padding_len)).bool().cuda(), token_mask],
+                [torch.zeros((token_mask.shape[0], padding_len), dtype=torch.bool, device=token_mask.device), token_mask],
                 dim=1,
             )
         elif actual_seq_len < current_mask_len:
@@ -635,7 +635,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # 按样本分组
         token_counts = token_mask.int().sum(-1)
         token_offset = token_counts.cumsum(-1)
-        token_offset = torch.cat([torch.zeros(1).long().cuda(), token_offset], dim=0)
+        token_offset = torch.cat([torch.zeros(1, dtype=torch.long, device=token_offset.device), token_offset], dim=0)
         
         token_embeddings_list = []
         for i in range(len(token_offset) - 1):
@@ -718,7 +718,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 pred_3d_masks.append(pred_3d_mask.squeeze(0))  # [N]
             else:
                 # 如果没有特殊 token，返回全零掩码
-                pred_3d_masks.append(torch.zeros(point_clouds.shape[2], device=point_clouds.device))
+                pred_3d_masks.append(torch.zeros(point_clouds.shape[2], dtype=point_clouds.dtype, device=point_clouds.device))
         
         return pred_3d_masks
 
@@ -794,7 +794,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         seg_token_mask = torch.cat(
             [
                 seg_token_mask,
-                torch.zeros((seg_token_mask.shape[0], 1)).bool().cuda(),
+                torch.zeros((seg_token_mask.shape[0], 1), dtype=torch.bool, device=seg_token_mask.device),
             ],
                 dim=1,
             )
@@ -850,7 +850,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             # 需要在前面填充（图像特征被插入到序列开头）
             padding_len = actual_seq_len - current_mask_len
             seg_token_mask = torch.cat(
-                [torch.zeros((seg_token_mask.shape[0], padding_len)).bool().cuda(), seg_token_mask],
+                [torch.zeros((seg_token_mask.shape[0], padding_len), dtype=torch.bool, device=seg_token_mask.device), seg_token_mask],
                 dim=1,
             )
         elif actual_seq_len < current_mask_len:
@@ -864,7 +864,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # 计算特殊 token 的累积偏移量
         seg_token_offset = seg_token_counts.cumsum(-1)
         seg_token_offset = torch.cat(
-            [torch.zeros(1).long().cuda(), seg_token_offset], dim=0
+            [torch.zeros(1, dtype=torch.long, device=seg_token_offset.device), seg_token_offset], dim=0
         )
 
         # 根据批次偏移量调整（只有在有 offset 时才调整）
