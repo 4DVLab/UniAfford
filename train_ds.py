@@ -114,6 +114,61 @@ def parse_args(args):
 
 params_to_train = []
 
+
+def preprocess_input_data(input_dict, precision):
+    """
+    预处理输入数据（图像和点云），支持动态模态输入
+    
+    Args:
+        input_dict: 输入字典，包含 images, images_clip, point_clouds 等
+        precision: 精度类型 ("fp16", "bf16", "fp32")
+    
+    Returns:
+        batch_size: 计算出的 batch size
+    
+    Note:
+        该函数会直接修改 input_dict，添加 batch_size 字段
+    """
+    # 处理图像数据
+    if "images" in input_dict and input_dict["images"] is not None:
+        if precision == "fp16":
+            input_dict["images"] = input_dict["images"].half()
+            input_dict["images_clip"] = input_dict["images_clip"].half()
+        elif precision == "bf16":
+            input_dict["images"] = input_dict["images"].bfloat16()
+            input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
+        else:
+            input_dict["images"] = input_dict["images"].float()
+            input_dict["images_clip"] = input_dict["images_clip"].float()
+
+    # 处理点云数据
+    if "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
+        point_clouds = input_dict["point_clouds"]
+        if precision == "fp16":
+            point_clouds = point_clouds.half()
+        elif precision == "bf16":
+            point_clouds = point_clouds.bfloat16()
+        else:
+            point_clouds = point_clouds.float()
+        # 转换为 [B, C, N] 格式（如果是 [B, N, C]）
+        if point_clouds.dim() == 3 and point_clouds.size(-1) == 3:
+            point_clouds = point_clouds.permute(0, 2, 1).contiguous()
+        input_dict["point_clouds"] = point_clouds
+
+    # 计算实际的 batch size（支持动态模态输入）
+    if "images" in input_dict and input_dict["images"] is not None:
+        batch_size = input_dict["images"].size(0)
+    elif "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
+        batch_size = input_dict["point_clouds"].size(0)
+    else:
+        batch_size = 1  # 默认值
+    
+    # 将 batch_size 写入 input_dict 传入模型
+    input_dict["batch_size"] = batch_size
+    
+    return batch_size
+
+
 def main(args):
     global params_to_train
     args = parse_args(args)
@@ -430,7 +485,7 @@ def main(args):
 
 def train(
     train_loader,
-    model,
+    model_engine,
     epoch,
     scheduler,
     writer,
@@ -466,7 +521,7 @@ def train(
     )
 
     # switch to train mode
-    model.train()
+    model_engine.train()
     end = time.time()
     for global_step in range(args.steps_per_epoch):
         for i in range(args.grad_accumulation_steps):
@@ -479,46 +534,11 @@ def train(
             data_time.update(time.time() - end)
             input_dict = dict_to_cuda(input_dict)
             
-
-            # 处理图像数据
-            if "images" in input_dict and input_dict["images"] is not None:
-                if args.precision == "fp16":
-                    input_dict["images"] = input_dict["images"].half()
-                    input_dict["images_clip"] = input_dict["images_clip"].half()
-                elif args.precision == "bf16":
-                    input_dict["images"] = input_dict["images"].bfloat16()
-                    input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
-                else:
-                    input_dict["images"] = input_dict["images"].float()
-                    input_dict["images_clip"] = input_dict["images_clip"].float()
-
-            # 处理点云数据
-            if "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
-                point_clouds = input_dict["point_clouds"]
-                if args.precision == "fp16":
-                    point_clouds = point_clouds.half()
-                elif args.precision == "bf16":
-                    point_clouds = point_clouds.bfloat16()
-                else:
-                    point_clouds = point_clouds.float()
-                # 转换为 [B, C, N] 格式（如果是 [B, N, C]）
-                if point_clouds.dim() == 3 and point_clouds.size(-1) == 3:
-                    point_clouds = point_clouds.permute(0, 2, 1).contiguous()
-                input_dict["point_clouds"] = point_clouds
-
-            # 计算实际的 batch size（支持动态模态输入）
-            if "images" in input_dict and input_dict["images"] is not None:
-                batch_size = input_dict["images"].size(0)
-            elif "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
-                batch_size = input_dict["point_clouds"].size(0)
-            else:
-                batch_size = 1  # 默认值
-            
-            # 将 batch_size 写入 input_dict 传入模型
-            input_dict["batch_size"] = batch_size
+            # 预处理输入数据（图像和点云）并计算 batch_size
+            batch_size = preprocess_input_data(input_dict, args.precision)
 
             # 调用魔改后的 LISA 模型
-            output_dict = model(**input_dict)
+            output_dict = model_engine(**input_dict)
 
             loss = output_dict["loss"]
             ce_loss = output_dict["ce_loss"]
@@ -538,8 +558,8 @@ def train(
             mask_3d_dice_losses.update(mask_3d_dice_loss.item(), batch_size)
             mask_3d_losses.update(mask_3d_loss.item(), batch_size)
             
-            model.backward(loss)
-            model.step()
+            model_engine.backward(loss)
+            model_engine.step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
@@ -600,9 +620,15 @@ def train(
 
 
 def validate(val_loader, model_engine, epoch, writer, args):
+    # 2D 分割评估指标
     intersection_meter = AverageMeter("Intersec", ":6.3f", Summary.SUM)
     union_meter = AverageMeter("Union", ":6.3f", Summary.SUM)
     acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.SUM)
+    
+    # 3D 点云评估指标
+    intersection_meter_3d = AverageMeter("Intersec3D", ":6.3f", Summary.SUM)
+    union_meter_3d = AverageMeter("Union3D", ":6.3f", Summary.SUM)
+    acc_iou_meter_3d = AverageMeter("gIoU3D", ":6.3f", Summary.SUM)
 
     model_engine.eval()
 
@@ -611,55 +637,57 @@ def validate(val_loader, model_engine, epoch, writer, args):
 
         input_dict = dict_to_cuda(input_dict)
         
-        # 处理图像数据
-        if args.precision == "fp16":
-            input_dict["images"] = input_dict["images"].half()
-            input_dict["images_clip"] = input_dict["images_clip"].half()
-        elif args.precision == "bf16":
-            input_dict["images"] = input_dict["images"].bfloat16()
-            input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
-        else:
-            input_dict["images"] = input_dict["images"].float()
-            input_dict["images_clip"] = input_dict["images_clip"].float()
-
-        # 处理点云数据
-        if "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
-            point_clouds = input_dict["point_clouds"]
-            if args.precision == "fp16":
-                point_clouds = point_clouds.half()
-            elif args.precision == "bf16":
-                point_clouds = point_clouds.bfloat16()
-            else:
-                point_clouds = point_clouds.float()
-            # 转换为 [B, C, N] 格式
-            if point_clouds.dim() == 3 and point_clouds.size(-1) == 3:
-                point_clouds = point_clouds.permute(0, 2, 1).contiguous()
-            input_dict["point_clouds"] = point_clouds
+        # 预处理输入数据（图像和点云）并计算 batch_size
+        batch_size = preprocess_input_data(input_dict, args.precision)
 
         with torch.no_grad():
-            output_dict = model_engine(**input_dict)
+            output_dict = model_engine(**input_dict, inference=True)
 
-        # 评估 2D 分割
-        pred_masks = output_dict["pred_masks"]
-        masks_list = output_dict["gt_masks"][0].int()
-        output_list = (pred_masks[0] > 0).int()
-        assert len(pred_masks) == 1
+        # 评估 2D 分割（如果有图像数据）
+        if "pred_masks" in output_dict and output_dict["pred_masks"] is not None:
+            pred_masks = output_dict["pred_masks"]
+            masks_list = output_dict["masks"][0].int()
+            output_list = (pred_masks[0] > 0).int()
+            assert len(pred_masks) == 1
 
-        intersection, union, acc_iou = 0.0, 0.0, 0.0
-        for mask_i, output_i in zip(masks_list, output_list):
-            intersection_i, union_i, _ = intersectionAndUnionGPU(
-                output_i.contiguous().clone(), mask_i.contiguous(), 2, ignore_index=255
-            )
-            intersection += intersection_i
-            union += union_i
-            acc_iou += intersection_i / (union_i + 1e-5)
-            acc_iou[union_i == 0] += 1.0  # no-object target
-        intersection, union = intersection.cpu().numpy(), union.cpu().numpy()
-        acc_iou = acc_iou.cpu().numpy() / masks_list.shape[0]
-        intersection_meter.update(intersection), union_meter.update(
-            union
-        ), acc_iou_meter.update(acc_iou, n=masks_list.shape[0])
+            intersection, union, acc_iou = 0.0, 0.0, 0.0
+            for mask_i, output_i in zip(masks_list, output_list):
+                intersection_i, union_i, _ = intersectionAndUnionGPU(
+                    output_i.contiguous().clone(), mask_i.contiguous(), 2, ignore_index=255
+                )
+                intersection += intersection_i
+                union += union_i
+                acc_iou += intersection_i / (union_i + 1e-5)
+                acc_iou[union_i == 0] += 1.0  # no-object target
+            intersection, union = intersection.cpu().numpy(), union.cpu().numpy()
+            acc_iou = acc_iou.cpu().numpy() / masks_list.shape[0]
+            intersection_meter.update(intersection), union_meter.update(
+                union
+            ), acc_iou_meter.update(acc_iou, n=masks_list.shape[0])
+        
+        # 评估 3D 点云分割（如果有点云数据）
+        if "pred_masks_3d" in output_dict and output_dict["pred_masks_3d"] is not None:
+            pred_masks_3d = output_dict["pred_masks_3d"]
+            masks_3d_list = output_dict["masks_3d"][0].int()
+            output_3d_list = (pred_masks_3d[0] > 0).int()
+            assert len(pred_masks_3d) == 1
 
+            intersection_3d, union_3d, acc_iou_3d = 0.0, 0.0, 0.0
+            for mask_3d_i, output_3d_i in zip(masks_3d_list, output_3d_list):
+                intersection_3d_i, union_3d_i, _ = intersectionAndUnionGPU(
+                    output_3d_i.contiguous().clone(), mask_3d_i.contiguous(), 2, ignore_index=255
+                )
+                intersection_3d += intersection_3d_i
+                union_3d += union_3d_i
+                acc_iou_3d += intersection_3d_i / (union_3d_i + 1e-5)
+                acc_iou_3d[union_3d_i == 0] += 1.0  # no-object target
+            intersection_3d, union_3d = intersection_3d.cpu().numpy(), union_3d.cpu().numpy()
+            acc_iou_3d = acc_iou_3d.cpu().numpy() / masks_3d_list.shape[0]
+            intersection_meter_3d.update(intersection_3d), union_meter_3d.update(
+                union_3d
+            ), acc_iou_meter_3d.update(acc_iou_3d, n=masks_3d_list.shape[0])
+
+    # 汇总 2D 分割结果
     intersection_meter.all_reduce()
     union_meter.all_reduce()
     acc_iou_meter.all_reduce()
@@ -667,11 +695,26 @@ def validate(val_loader, model_engine, epoch, writer, args):
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
     ciou = iou_class[1]
     giou = acc_iou_meter.avg[1]
+    
+    # 汇总 3D 点云分割结果
+    intersection_meter_3d.all_reduce()
+    union_meter_3d.all_reduce()
+    acc_iou_meter_3d.all_reduce()
+
+    iou_class_3d = intersection_meter_3d.sum / (union_meter_3d.sum + 1e-10)
+    ciou_3d = iou_class_3d[1]
+    giou_3d = acc_iou_meter_3d.avg[1]
 
     if args.local_rank == 0:
+        # 记录 2D 分割指标
         writer.add_scalar("val/giou", giou, epoch)
         writer.add_scalar("val/ciou", ciou, epoch)
-        print("giou: {:.4f}, ciou: {:.4f}".format(giou, ciou))
+        print("2D Segmentation - giou: {:.4f}, ciou: {:.4f}".format(giou, ciou))
+        
+        # 记录 3D 点云分割指标
+        writer.add_scalar("val/giou_3d", giou_3d, epoch)
+        writer.add_scalar("val/ciou_3d", ciou_3d, epoch)
+        print("3D Point Cloud - giou: {:.4f}, ciou: {:.4f}".format(giou_3d, ciou_3d))
 
     return giou, ciou
 

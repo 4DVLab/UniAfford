@@ -208,7 +208,7 @@ class HybridDataset(_BaseDataset):
         random.shuffle(self.sample_indices)
     
     def __len__(self): 
-        return self.samples_per_epoch
+        return len(self.samples)
     
     def __getitem__(self, index: int) -> Dict[str, Any]:
         # 使用取模运算动态映射到实际样本，避免创建大列表
