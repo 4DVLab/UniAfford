@@ -785,15 +785,19 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
 
         # 找到所有 [SEG] token 和 [AFF] token 的位置
         # 根据输入模态决定要查找的 token
-        if has_image and has_point_cloud:
-            # 两种模态都有，查找 [SEG] 和 [AFF]
-            seg_token_mask = (input_ids[:, 1:] == self.seg_token_idx) | (input_ids[:, 1:] == self.aff_token_idx)
-        elif has_image:
-            # 只有图像，只查找 [SEG]
-            seg_token_mask = (input_ids[:, 1:] == self.seg_token_idx)
-        else:
-            # 只有点云，只查找 [AFF]
-            seg_token_mask = (input_ids[:, 1:] == self.aff_token_idx)
+        # if has_image and has_point_cloud:
+        #     # 两种模态都有，查找 [SEG] 和 [AFF]
+        #     seg_token_mask = (input_ids[:, 1:] == self.seg_token_idx) | (input_ids[:, 1:] == self.aff_token_idx)
+        # elif has_image:
+        #     # 只有图像，只查找 [SEG]
+        #     seg_token_mask = (input_ids[:, 1:] == self.seg_token_idx)
+        # else:
+        #     # 只有点云，只查找 [AFF]
+        #     seg_token_mask = (input_ids[:, 1:] == self.aff_token_idx)
+        
+        # 使用 [SEG] 同时作为点云和图片的token
+        if has_image or has_point_cloud:
+            seg_token_mask = input_ids[:, 1:] == self.seg_token_idx
         
         seg_token_mask = torch.cat(
             [
@@ -1077,8 +1081,12 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             pred_3d_masks = []
             if has_point_cloud:
                 # 提取 [AFF] token 的嵌入
+                # aff_embeddings_list = self._extract_token_embeddings(
+                #     output_ids, last_hidden_state, self.aff_token_idx, has_image
+                # )
+                
                 aff_embeddings_list = self._extract_token_embeddings(
-                    output_ids, last_hidden_state, self.aff_token_idx, has_image
+                    output_ids, last_hidden_state, self.seg_token_idx, has_image
                 )
                 
                 # 生成 3D 掩码
