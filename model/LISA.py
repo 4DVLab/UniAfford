@@ -691,35 +691,74 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
     
     def _generate_3d_masks(self, pred_embeddings_list, point_clouds):
         """
-        使用 PointNet++ 生成 3D 点云掩码
+        使用 PointNet++ 生成 3D 点云掩码（支持批处理）
         
         Args:
-            pred_embeddings_list: 按样本分组的预测嵌入列表
+            pred_embeddings_list: 按样本分组的预测嵌入列表，每个元素形状 [num_tokens_i, embed_dim]
             point_clouds: 点云数据 [B, 3, N]
             
         Returns:
-            pred_3d_masks: 预测的 3D 掩码列表
+            pred_3d_masks: 预测的 3D 掩码列表，每个元素形状 [N]
         """
         # 确保点云格式为 [B, 3, N]
         if point_clouds.shape[1] != 3:
             point_clouds = point_clouds.permute(0, 2, 1)
         
-        pred_3d_masks = []
         batch_size = point_clouds.shape[0]
+        num_points = point_clouds.shape[2]
         
+        # 检查哪些样本有有效的嵌入
+        valid_indices = [i for i in range(batch_size) if len(pred_embeddings_list[i]) > 0]
+        
+        if len(valid_indices) == 0:
+            # 所有样本都没有特殊 token，返回全零掩码
+            return [torch.zeros(num_points, dtype=point_clouds.dtype, device=point_clouds.device) 
+                    for _ in range(batch_size)]
+        
+        # 准备批处理数据
+        # 1. 收集有效样本的点云
+        valid_point_clouds = point_clouds[valid_indices]  # [B_valid, 3, N]
+        
+        # 2. 填充文本特征到相同长度
+        max_text_len = max(len(pred_embeddings_list[i]) for i in valid_indices)
+        embed_dim = pred_embeddings_list[valid_indices[0]].shape[-1]
+        
+        # 创建批处理的文本特征和掩码
+        batch_text_feat = torch.zeros(
+            len(valid_indices), max_text_len, embed_dim,
+            dtype=pred_embeddings_list[valid_indices[0]].dtype,
+            device=pred_embeddings_list[valid_indices[0]].device
+        )
+        batch_text_mask = torch.zeros(
+            len(valid_indices), max_text_len,
+            dtype=torch.bool,
+            device=pred_embeddings_list[valid_indices[0]].device
+        )
+        
+        for batch_idx, orig_idx in enumerate(valid_indices):
+            text_len = len(pred_embeddings_list[orig_idx])
+            batch_text_feat[batch_idx, :text_len] = pred_embeddings_list[orig_idx]
+            batch_text_mask[batch_idx, :text_len] = True
+        
+        # 3. 批量调用 3D 分割器
+        batch_pred_3d_masks = self.model.point_cloud_segmentor(
+            valid_point_clouds,  # [B_valid, 3, N]
+            batch_text_feat,     # [B_valid, max_text_len, embed_dim]
+            batch_text_mask      # [B_valid, max_text_len]
+        )  # [B_valid, N]
+        
+        # 4. 重组输出，为无效样本填充零掩码
+        pred_3d_masks = []
+        valid_idx_counter = 0
         for i in range(batch_size):
-            if len(pred_embeddings_list[i]) > 0:
-                # text_feat: [num_tokens, embed_dim] -> [1, num_tokens, embed_dim]
-                text_feat = pred_embeddings_list[i].unsqueeze(0)
-                text_mask = torch.ones(1, text_feat.shape[1], dtype=torch.bool, device=text_feat.device)
-                pc_i = point_clouds[i:i+1]  # [1, 3, N]
-                
-                # 使用 3D 分割器
-                pred_3d_mask = self.model.point_cloud_segmentor(pc_i, text_feat, text_mask)  # [1, N]
-                pred_3d_masks.append(pred_3d_mask.squeeze(0))  # [N]
+            if i in valid_indices:
+                pred_3d_masks.append(batch_pred_3d_masks[valid_idx_counter])
+                valid_idx_counter += 1
             else:
-                # 如果没有特殊 token，返回全零掩码
-                pred_3d_masks.append(torch.zeros(point_clouds.shape[2], dtype=point_clouds.dtype, device=point_clouds.device))
+                # 没有特殊 token，返回全零掩码
+                pred_3d_masks.append(
+                    torch.zeros(num_points, dtype=point_clouds.dtype, device=point_clouds.device)
+                )
         
         return pred_3d_masks
 
