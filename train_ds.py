@@ -687,11 +687,11 @@ def validate(val_loader, model_engine, epoch, writer, args):
             ), acc_iou_meter.update(acc_iou, n=masks_list.shape[0])
         
         # 评估 3D 点云分割（如果有点云数据）
-        if "pred_masks_3d" in output_dict and output_dict["pred_masks_3d"] is not None:
-            pred_masks_3d = output_dict["pred_masks_3d"]
-            masks_3d_list = output_dict["gt_masks_3d"][0].int()
-            output_3d_list = (pred_masks_3d[0] > 0).int()
-            assert len(pred_masks_3d) == 1
+        if "pred_3d_masks" in output_dict and output_dict["pred_3d_masks"] is not None:
+            pred_3d_masks = output_dict["pred_3d_masks"]
+            masks_3d_list = output_dict["gt_3d_masks"][0].int()
+            output_3d_list = (pred_3d_masks[0] > 0).int()
+            assert len(pred_3d_masks) == 1
 
             intersection_3d, union_3d, acc_iou_3d = 0.0, 0.0, 0.0
             for mask_3d_i, output_3d_i in zip(masks_3d_list, output_3d_list):
