@@ -672,65 +672,67 @@ def validate(val_loader, model_engine, epoch, writer, args):
 
         # 评估 2D 分割（支持任意 batch_size）
         if "pred_masks" in output_dict and output_dict["pred_masks"] is not None:
-            pred_masks = output_dict["pred_masks"]  # List[Tensor], 长度为 batch_size
-            gt_masks = output_dict["masks"]  # List[Tensor], 长度为 batch_size
+            pred_masks = output_dict["pred_masks"]  # List[Tensor], 长度为 batch_size，每个元素形状为 [H, W]
+            gt_masks = output_dict["gt_masks"]  # List[Tensor], 长度为 batch_size，每个元素形状为 [H, W]
             
             # 遍历 batch 中的每个样本
             for batch_idx in range(len(pred_masks)):
                 num_2d_samples += 1
-                masks_list = gt_masks[batch_idx].int()  # [num_masks, H, W]
-                output_list = (pred_masks[batch_idx] > args.mask_threshold_2d).int()  # [num_masks, H, W]
+                mask_2d_gt = gt_masks[batch_idx].int()  # [H, W]
+                mask_2d_pred = (pred_masks[batch_idx] > args.mask_threshold_2d).int()  # [H, W]
                 
-                # 确保预测和真实掩码数量一致
-                assert masks_list.shape[0] == output_list.shape[0], \
-                    f"Mismatch: gt has {masks_list.shape[0]} masks, pred has {output_list.shape[0]} masks"
+                # 确保预测和真实掩码形状一致
+                assert mask_2d_gt.shape == mask_2d_pred.shape, \
+                    f"Mismatch: gt shape {mask_2d_gt.shape}, pred shape {mask_2d_pred.shape}"
 
-                intersection, union, acc_iou = 0.0, 0.0, 0.0
-                for mask_i, output_i in zip(masks_list, output_list):
-                    intersection_i, union_i, _ = intersectionAndUnionGPU(
-                        output_i.contiguous().clone(), mask_i.contiguous(), 2, ignore_index=255
-                    )
-                    intersection += intersection_i
-                    union += union_i
-                    acc_iou += intersection_i / (union_i + 1e-5)
-                    acc_iou[union_i == 0] += 1.0  # no-object target
+                # 对单个样本对调用 intersectionAndUnionGPU
+                intersection_i, union_i, _ = intersectionAndUnionGPU(
+                    mask_2d_pred.contiguous().clone(), mask_2d_gt.contiguous(), 2, ignore_index=255
+                )
                 
-                intersection, union = intersection.cpu().numpy(), union.cpu().numpy()
-                acc_iou = acc_iou.cpu().numpy() / masks_list.shape[0]
+                # 计算 IoU
+                acc_iou = intersection_i / (union_i + 1e-5)
+                acc_iou[union_i == 0] += 1.0  # no-object target
+                
+                intersection = intersection_i.cpu().numpy()
+                union = union_i.cpu().numpy()
+                acc_iou = acc_iou.cpu().numpy()
+                
                 intersection_meter.update(intersection)
                 union_meter.update(union)
-                acc_iou_meter.update(acc_iou, n=masks_list.shape[0])
+                acc_iou_meter.update(acc_iou, n=1)
         
         # 评估 3D 点云分割（支持任意 batch_size）
-        if "pred_masks_3d" in output_dict and output_dict["pred_masks_3d"] is not None:
-            pred_3d_masks = output_dict["pred_masks_3d"]  # List[Tensor], 长度为 batch_size
-            gt_3d_masks = output_dict["masks_3d"]  # List[Tensor], 长度为 batch_size
+        if "pred_3d_masks" in output_dict and output_dict["pred_3d_masks"] is not None:
+            pred_3d_masks = output_dict["pred_3d_masks"]  # List[Tensor], 长度为 batch_size，每个元素形状为 [N]
+            gt_3d_masks = output_dict["gt_3d_masks"]  # List[Tensor], 长度为 batch_size，每个元素形状为 [N]
             
             # 遍历 batch 中的每个样本
             for batch_idx in range(len(pred_3d_masks)):
                 num_3d_samples += 1
-                masks_3d_list = gt_3d_masks[batch_idx].int()  # [num_masks, N]
-                output_3d_list = (pred_3d_masks[batch_idx] > args.mask_threshold_3d).int()  # [num_masks, N]
+                mask_3d_gt = gt_3d_masks[batch_idx].int()  # [N]
+                mask_3d_pred = (pred_3d_masks[batch_idx] > args.mask_threshold_3d).int()  # [N]
                 
-                # 确保预测和真实掩码数量一致
-                assert masks_3d_list.shape[0] == output_3d_list.shape[0], \
-                    f"Mismatch: gt has {masks_3d_list.shape[0]} masks, pred has {output_3d_list.shape[0]} masks"
+                # 确保预测和真实掩码形状一致
+                assert mask_3d_gt.shape == mask_3d_pred.shape, \
+                    f"Mismatch: gt shape {mask_3d_gt.shape}, pred shape {mask_3d_pred.shape}"
 
-                intersection_3d, union_3d, acc_iou_3d = 0.0, 0.0, 0.0
-                for mask_3d_i, output_3d_i in zip(masks_3d_list, output_3d_list):
-                    intersection_3d_i, union_3d_i, _ = intersectionAndUnionGPU(
-                        output_3d_i.contiguous().clone(), mask_3d_i.contiguous(), 2, ignore_index=255
-                    )
-                    intersection_3d += intersection_3d_i
-                    union_3d += union_3d_i
-                    acc_iou_3d += intersection_3d_i / (union_3d_i + 1e-5)
-                    acc_iou_3d[union_3d_i == 0] += 1.0  # no-object target
+                # 对单个样本对调用 intersectionAndUnionGPU
+                intersection_3d_i, union_3d_i, _ = intersectionAndUnionGPU(
+                    mask_3d_pred.contiguous().clone(), mask_3d_gt.contiguous(), 2, ignore_index=255
+                )
                 
-                intersection_3d, union_3d = intersection_3d.cpu().numpy(), union_3d.cpu().numpy()
-                acc_iou_3d = acc_iou_3d.cpu().numpy() / masks_3d_list.shape[0]
+                # 计算 IoU
+                acc_iou_3d = intersection_3d_i / (union_3d_i + 1e-5)
+                acc_iou_3d[union_3d_i == 0] += 1.0  # no-object target
+                
+                intersection_3d = intersection_3d_i.cpu().numpy()
+                union_3d = union_3d_i.cpu().numpy()
+                acc_iou_3d = acc_iou_3d.cpu().numpy()
+                
                 intersection_meter_3d.update(intersection_3d)
                 union_meter_3d.update(union_3d)
-                acc_iou_meter_3d.update(acc_iou_3d, n=masks_3d_list.shape[0])
+                acc_iou_meter_3d.update(acc_iou_3d, n=1)
 
     # 汇总 2D 分割结果
     intersection_meter.all_reduce()
