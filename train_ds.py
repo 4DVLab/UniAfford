@@ -110,6 +110,8 @@ def parse_args(args):
     parser.add_argument("--train_ratio", default=0.7, type=float, help="training set ratio")
     parser.add_argument("--val_ratio", default=0.15, type=float, help="validation set ratio")
     parser.add_argument("--test_ratio", default=0.15, type=float, help="test set ratio")
+    parser.add_argument("--mask_threshold_2d", default=0.0, type=float, help="threshold for 2D mask binarization")
+    parser.add_argument("--mask_threshold_3d", default=0.5, type=float, help="threshold for 3D mask binarization")
     return parser.parse_args(args)
 
 params_to_train = []
@@ -420,7 +422,7 @@ def main(args):
 
     # validation dataset
     if val_dataset is not None:
-        assert args.val_batch_size == 1
+        # 移除 batch_size=1 的限制，支持任意 batch_size
         val_sampler = torch.utils.data.distributed.DistributedSampler(
             val_dataset, shuffle=False, drop_last=False
         )
@@ -644,12 +646,16 @@ def validate(val_loader, model_engine, epoch, writer, args):
     # 2D 分割评估指标
     intersection_meter = AverageMeter("Intersec", ":6.3f", Summary.SUM)
     union_meter = AverageMeter("Union", ":6.3f", Summary.SUM)
-    acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.AVERAGE)  # 使用 AVERAGE
+    acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.AVERAGE)
     
     # 3D 点云评估指标
     intersection_meter_3d = AverageMeter("Intersec3D", ":6.3f", Summary.SUM)
     union_meter_3d = AverageMeter("Union3D", ":6.3f", Summary.SUM)
-    acc_iou_meter_3d = AverageMeter("gIoU3D", ":6.3f", Summary.AVERAGE)  # 使用 AVERAGE
+    acc_iou_meter_3d = AverageMeter("gIoU3D", ":6.3f", Summary.AVERAGE)
+    
+    # 调试计数器
+    num_2d_samples = 0
+    num_3d_samples = 0
 
     model_engine.eval()
 
@@ -664,49 +670,67 @@ def validate(val_loader, model_engine, epoch, writer, args):
         with torch.no_grad():
             output_dict = model_engine(**input_dict, inference=True)
 
-        # 评估 2D 分割（如果有图像数据）
+        # 评估 2D 分割（支持任意 batch_size）
         if "pred_masks" in output_dict and output_dict["pred_masks"] is not None:
-            pred_masks = output_dict["pred_masks"]
-            masks_list = output_dict["gt_masks"][0].int()
-            output_list = (pred_masks[0] > 0).int()
-            assert len(pred_masks) == 1
+            pred_masks = output_dict["pred_masks"]  # List[Tensor], 长度为 batch_size
+            gt_masks = output_dict["masks"]  # List[Tensor], 长度为 batch_size
+            
+            # 遍历 batch 中的每个样本
+            for batch_idx in range(len(pred_masks)):
+                num_2d_samples += 1
+                masks_list = gt_masks[batch_idx].int()  # [num_masks, H, W]
+                output_list = (pred_masks[batch_idx] > args.mask_threshold_2d).int()  # [num_masks, H, W]
+                
+                # 确保预测和真实掩码数量一致
+                assert masks_list.shape[0] == output_list.shape[0], \
+                    f"Mismatch: gt has {masks_list.shape[0]} masks, pred has {output_list.shape[0]} masks"
 
-            intersection, union, acc_iou = 0.0, 0.0, 0.0
-            for mask_i, output_i in zip(masks_list, output_list):
-                intersection_i, union_i, _ = intersectionAndUnionGPU(
-                    output_i.contiguous().clone(), mask_i.contiguous(), 2, ignore_index=255
-                )
-                intersection += intersection_i
-                union += union_i
-                acc_iou += intersection_i / (union_i + 1e-5)
-                acc_iou[union_i == 0] += 1.0  # no-object target
-            intersection, union = intersection.cpu().numpy(), union.cpu().numpy()
-            acc_iou = acc_iou.cpu().numpy() / masks_list.shape[0]
-            intersection_meter.update(intersection), union_meter.update(
-                union
-            ), acc_iou_meter.update(acc_iou, n=masks_list.shape[0])
+                intersection, union, acc_iou = 0.0, 0.0, 0.0
+                for mask_i, output_i in zip(masks_list, output_list):
+                    intersection_i, union_i, _ = intersectionAndUnionGPU(
+                        output_i.contiguous().clone(), mask_i.contiguous(), 2, ignore_index=255
+                    )
+                    intersection += intersection_i
+                    union += union_i
+                    acc_iou += intersection_i / (union_i + 1e-5)
+                    acc_iou[union_i == 0] += 1.0  # no-object target
+                
+                intersection, union = intersection.cpu().numpy(), union.cpu().numpy()
+                acc_iou = acc_iou.cpu().numpy() / masks_list.shape[0]
+                intersection_meter.update(intersection)
+                union_meter.update(union)
+                acc_iou_meter.update(acc_iou, n=masks_list.shape[0])
         
-        # 评估 3D 点云分割（如果有点云数据）
-        if "pred_3d_masks" in output_dict and output_dict["pred_3d_masks"] is not None:
-            pred_3d_masks = output_dict["pred_3d_masks"]
-            masks_3d_list = output_dict["gt_3d_masks"][0].int()
-            output_3d_list = (pred_3d_masks[0] > 0).int()
-            assert len(pred_3d_masks) == 1
+        # 评估 3D 点云分割（支持任意 batch_size）
+        if "pred_masks_3d" in output_dict and output_dict["pred_masks_3d"] is not None:
+            pred_3d_masks = output_dict["pred_masks_3d"]  # List[Tensor], 长度为 batch_size
+            gt_3d_masks = output_dict["masks_3d"]  # List[Tensor], 长度为 batch_size
+            
+            # 遍历 batch 中的每个样本
+            for batch_idx in range(len(pred_3d_masks)):
+                num_3d_samples += 1
+                masks_3d_list = gt_3d_masks[batch_idx].int()  # [num_masks, N]
+                output_3d_list = (pred_3d_masks[batch_idx] > args.mask_threshold_3d).int()  # [num_masks, N]
+                
+                # 确保预测和真实掩码数量一致
+                assert masks_3d_list.shape[0] == output_3d_list.shape[0], \
+                    f"Mismatch: gt has {masks_3d_list.shape[0]} masks, pred has {output_3d_list.shape[0]} masks"
 
-            intersection_3d, union_3d, acc_iou_3d = 0.0, 0.0, 0.0
-            for mask_3d_i, output_3d_i in zip(masks_3d_list, output_3d_list):
-                intersection_3d_i, union_3d_i, _ = intersectionAndUnionGPU(
-                    output_3d_i.contiguous().clone(), mask_3d_i.contiguous(), 2, ignore_index=255
-                )
-                intersection_3d += intersection_3d_i
-                union_3d += union_3d_i
-                acc_iou_3d += intersection_3d_i / (union_3d_i + 1e-5)
-                acc_iou_3d[union_3d_i == 0] += 1.0  # no-object target
-            intersection_3d, union_3d = intersection_3d.cpu().numpy(), union_3d.cpu().numpy()
-            acc_iou_3d = acc_iou_3d.cpu().numpy() / masks_3d_list.shape[0]
-            intersection_meter_3d.update(intersection_3d), union_meter_3d.update(
-                union_3d
-            ), acc_iou_meter_3d.update(acc_iou_3d, n=masks_3d_list.shape[0])
+                intersection_3d, union_3d, acc_iou_3d = 0.0, 0.0, 0.0
+                for mask_3d_i, output_3d_i in zip(masks_3d_list, output_3d_list):
+                    intersection_3d_i, union_3d_i, _ = intersectionAndUnionGPU(
+                        output_3d_i.contiguous().clone(), mask_3d_i.contiguous(), 2, ignore_index=255
+                    )
+                    intersection_3d += intersection_3d_i
+                    union_3d += union_3d_i
+                    acc_iou_3d += intersection_3d_i / (union_3d_i + 1e-5)
+                    acc_iou_3d[union_3d_i == 0] += 1.0  # no-object target
+                
+                intersection_3d, union_3d = intersection_3d.cpu().numpy(), union_3d.cpu().numpy()
+                acc_iou_3d = acc_iou_3d.cpu().numpy() / masks_3d_list.shape[0]
+                intersection_meter_3d.update(intersection_3d)
+                union_meter_3d.update(union_3d)
+                acc_iou_meter_3d.update(acc_iou_3d, n=masks_3d_list.shape[0])
 
     # 汇总 2D 分割结果
     intersection_meter.all_reduce()
@@ -714,8 +738,8 @@ def validate(val_loader, model_engine, epoch, writer, args):
     acc_iou_meter.all_reduce()
 
     iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
-    ciou = iou_class[1]
-    giou = acc_iou_meter.avg[1]
+    ciou = iou_class[1] if isinstance(iou_class, np.ndarray) and iou_class.size > 1 else 0.0
+    giou = acc_iou_meter.avg[1] if isinstance(acc_iou_meter.avg, np.ndarray) and acc_iou_meter.avg.size > 1 else 0.0
     
     # 汇总 3D 点云分割结果
     intersection_meter_3d.all_reduce()
@@ -734,6 +758,13 @@ def validate(val_loader, model_engine, epoch, writer, args):
         giou_3d = float(acc_iou_meter_3d.avg) if not isinstance(acc_iou_meter_3d.avg, np.ndarray) else acc_iou_meter_3d.avg.item()
 
     if args.local_rank == 0:
+        # 打印调试信息
+        print(f"\n{'='*60}")
+        print(f"Validation Summary (Epoch {epoch}):")
+        print(f"  2D samples evaluated: {num_2d_samples}")
+        print(f"  3D samples evaluated: {num_3d_samples}")
+        print(f"{'='*60}")
+        
         # 记录 2D 分割指标
         writer.add_scalar("val/giou", giou, epoch)
         writer.add_scalar("val/ciou", ciou, epoch)
@@ -743,6 +774,15 @@ def validate(val_loader, model_engine, epoch, writer, args):
         writer.add_scalar("val/giou_3d", giou_3d, epoch)
         writer.add_scalar("val/ciou_3d", ciou_3d, epoch)
         print("3D Point Cloud - giou: {:.4f}, ciou: {:.4f}".format(giou_3d, ciou_3d))
+        
+        # 警告信息
+        if num_3d_samples == 0:
+            print(f"\n⚠️  WARNING: No 3D samples were evaluated!")
+            print(f"   Possible reasons:")
+            print(f"   1. Validation dataset has no point cloud data")
+            print(f"   2. Point clouds not being loaded correctly")
+            print(f"   3. Model not generating pred_masks_3d")
+        print(f"{'='*60}\n")
 
     return giou, ciou
 
