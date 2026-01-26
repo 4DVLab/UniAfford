@@ -153,17 +153,20 @@ def compute_3d_mask_loss(
                 pred_3d_mask = pred_3d_masks[batch_idx]  # [N]
                 
                 if gt_3d_mask.shape == pred_3d_mask.shape:
+                    # 确保 gt_3d_mask 和 pred_3d_mask 精度类型一致
+                    gt_3d_mask_float = gt_3d_mask.to(pred_3d_mask.dtype)
+                    
                     # BCE 损失（pred_3d_mask 已经经过 sigmoid）
                     bce = F.binary_cross_entropy(
                         pred_3d_mask.clamp(1e-6, 1-1e-6), 
-                        gt_3d_mask.float(), 
+                        gt_3d_mask_float, 
                         reduction='mean'
                     )
                     mask_3d_bce_loss_sum += bce
                     
                     # Dice 损失
-                    intersection = (pred_3d_mask * gt_3d_mask.float()).sum()
-                    union = pred_3d_mask.sum() + gt_3d_mask.float().sum()
+                    intersection = (pred_3d_mask * gt_3d_mask_float).sum()
+                    union = pred_3d_mask.sum() + gt_3d_mask_float.sum()
                     dice = 1 - (2 * intersection + 1e-6) / (union + 1e-6)
                     mask_3d_dice_loss_sum += dice
                     num_3d_masks += 1

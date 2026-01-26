@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BitsAndBytesConfig, CLIPVisionModel, CLIPImageProcessor
 
-from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
+from utils.common import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
                          DEFAULT_IMAGE_PATCH_TOKEN)
 
 from .llava.model.language_model.llava_llama import (LlavaLlamaForCausalLM,
