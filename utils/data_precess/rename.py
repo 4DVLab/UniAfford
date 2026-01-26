@@ -4,7 +4,7 @@
 import os
 import shutil
 import argparse
-from base_dataset import Instruction, Image, PointCloud
+from ..base_dataset import Instruction, Image, PointCloud
 
 
 def rename_obj_type(dataset_root, obj_rename, aff_rename=None):

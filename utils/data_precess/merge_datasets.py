@@ -9,7 +9,7 @@ import shutil
 import json
 from common import clean_quotes
 from tqdm import tqdm
-from base_dataset import create_info_dict, load_info, save_info
+from ..base_dataset import create_info_dict, load_info, save_info
 
 
 if __name__ == '__main__':

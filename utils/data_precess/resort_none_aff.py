@@ -7,7 +7,7 @@ import os
 import shutil
 from tqdm import tqdm
 import argparse
-from base_dataset import create_info_dict, load_info, save_info
+from ..base_dataset import create_info_dict, load_info, save_info
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="根据Instruction.csv重新为图片及mask分类aff")

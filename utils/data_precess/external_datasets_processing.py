@@ -10,7 +10,7 @@ import warnings
 import numpy as np
 import cv2
 from collections import defaultdict
-from base_dataset import Instruction, Image, PointCloud, load_info, save_info, create_info_dict
+from ..base_dataset import Instruction, Image, PointCloud, load_info, save_info, create_info_dict
 from common import resolve_path
 
 # 全局参数

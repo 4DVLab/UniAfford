@@ -1,12 +1,9 @@
-import argparse
 import os
 import shutil
-import sys
 import time
 from functools import partial
 
 import deepspeed
-import numpy as np
 import torch
 from tqdm import tqdm
 import transformers
@@ -15,105 +12,264 @@ from torch.utils.tensorboard import SummaryWriter
 
 from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
-from utils.dataset import DatasetManager, HybridDataset, ValDataset, collate_fn
-from utils.utils import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
-                         AverageMeter, ProgressMeter, Summary, dict_to_cuda,
-                         intersectionAndUnionGPU, debug_gradient_graph)
+from utils.dataset import DatasetManager, collate_fn
+from utils.common import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
+                         AverageMeter, ProgressMeter, Summary, dict_to_cuda)
+from utils.metrics import (SegmentationMetrics, LossMetrics, 
+                           evaluate_segmentation_batch, 
+                           print_validation_summary,
+                           log_metrics_to_tensorboard,
+                           compute_2d_mask_loss,
+                           compute_3d_mask_loss,
+                           compute_dummy_loss)
 
 
-def parse_args(args):
-    parser = argparse.ArgumentParser(description="LISA Model Training")
-    parser.add_argument("--local_rank", default=0, type=int, help="node rank")
-    parser.add_argument(
-        "--version", default="liuhaotian/llava-llama-2-13b-chat-lightning-preview"
-    )
-    parser.add_argument("--vis_save_path", default="./vis_output", type=str)
-    parser.add_argument(
-        "--precision",
-        default="bf16",
-        type=str,
-        choices=["fp32", "bf16", "fp16"],
-        help="precision for inference",
-    )
-    parser.add_argument("--image_size", default=1024, type=int, help="image size")
-    parser.add_argument("--model_max_length", default=512, type=int)
-    parser.add_argument("--lora_r", default=8, type=int)
-    parser.add_argument(
-        "--vision-tower", default="openai/clip-vit-large-patch14", type=str
-    )
-    parser.add_argument("--load_in_8bit", action="store_true", default=False)
-    parser.add_argument("--load_in_4bit", action="store_true", default=False)
-
-    parser.add_argument(
-        "--dataset", default="sem_seg||refer_seg||vqa||reason_seg", type=str
-    )
-    parser.add_argument("--sample_rates", default="9,3,3,1", type=str)
-    parser.add_argument(
-        "--sem_seg_data",
-        default="ade20k||cocostuff||pascal_part||paco_lvis||mapillary",
-        type=str,
-    )
-    parser.add_argument(
-        "--refer_seg_data", default="refclef||refcoco||refcoco+||refcocog", type=str
-    )
-    parser.add_argument("--vqa_data", default="llava_instruct_150k", type=str)
-    parser.add_argument("--reason_seg_data", default="ReasonSeg|train", type=str)
-    parser.add_argument("--val_dataset", default="ReasonSeg|val", type=str)
-    parser.add_argument("--dataset_dir", default="./dataset", type=str)
-    parser.add_argument("--log_base_dir", default="./runs", type=str)
-    parser.add_argument("--exp_name", default="lisa", type=str)
-    parser.add_argument("--epochs", default=10, type=int)
-    parser.add_argument("--steps_per_epoch", default=500, type=int)
-    parser.add_argument(
-        "--batch_size", default=2, type=int, help="batch size per device per step"
-    )
-    parser.add_argument(
-        "--grad_accumulation_steps",
-        default=10,
-        type=int,
-    )
-    parser.add_argument("--val_batch_size", default=1, type=int)
-    parser.add_argument("--workers", default=4, type=int)
-    parser.add_argument("--lr", default=0.0003, type=float)
-    parser.add_argument("--ce_loss_weight", default=1.0, type=float)
-    parser.add_argument("--dice_loss_weight", default=0.5, type=float)
-    parser.add_argument("--bce_loss_weight", default=2.0, type=float)
-    parser.add_argument("--lora_alpha", default=16, type=int)
-    parser.add_argument("--lora_dropout", default=0.05, type=float)
-    parser.add_argument("--lora_target_modules", default="q_proj,v_proj", type=str)
-    parser.add_argument("--explanatory", default=0.1, type=float)
-    parser.add_argument("--beta1", default=0.9, type=float)
-    parser.add_argument("--beta2", default=0.95, type=float)
-    parser.add_argument("--num_classes_per_sample", default=3, type=int)
-    parser.add_argument("--exclude_val", action="store_true", default=False)
-    parser.add_argument("--no_eval", action="store_true", default=False)
-    parser.add_argument("--eval_only", action="store_true", default=False)
-    parser.add_argument("--vision_pretrained", default="PATH_TO_SAM_ViT-H", type=str)
-    parser.add_argument("--out_dim", default=256, type=int)
-    parser.add_argument("--resume", default="", type=str)
-    parser.add_argument("--print_freq", default=1, type=int)
-    parser.add_argument("--start_epoch", default=0, type=int)
-    parser.add_argument("--gradient_checkpointing", action="store_true", default=True)
-    parser.add_argument("--train_mask_decoder", action="store_true", default=True)
-    parser.add_argument("--use_mm_start_end", action="store_true", default=True)
-    parser.add_argument("--auto_resume", action="store_true", default=True)
-    parser.add_argument(
-        "--conv_type",
-        default="llava_llama_2",
-        type=str,
-        choices=["llava_v1", "llava_llama_2"],
-    )
-    # 点云相关参数
-    parser.add_argument("--num_points", default=2048, type=int, help="number of points in point cloud")
-    parser.add_argument("--use_pointcloud", action="store_true", default=True, help="use point cloud modality")
-    parser.add_argument("--pc_loss_weight", default=1.0, type=float, help="weight for point cloud loss")
-    parser.add_argument("--train_ratio", default=0.7, type=float, help="training set ratio")
-    parser.add_argument("--val_ratio", default=0.15, type=float, help="validation set ratio")
-    parser.add_argument("--test_ratio", default=0.15, type=float, help="test set ratio")
-    parser.add_argument("--mask_threshold_2d", default=0.0, type=float, help="threshold for 2D mask binarization")
-    parser.add_argument("--mask_threshold_3d", default=0.5, type=float, help="threshold for 3D mask binarization")
-    return parser.parse_args(args)
-
+class TrainingConfig:
+    """
+    训练配置类，用于存储 LISA 模型训练的所有超参数。
+    
+    Args:
+        local_rank (`int`, *optional*, defaults to 0):
+            分布式训练中的节点排名。
+        version (`str`, *optional*, defaults to "liuhaotian/llava-llama-2-13b-chat-lightning-preview"):
+            预训练模型的版本或路径。
+        vis_save_path (`str`, *optional*, defaults to "./vis_output"):
+            可视化结果保存路径。
+        precision (`str`, *optional*, defaults to "bf16"):
+            训练精度，可选 ["fp32", "bf16", "fp16"]。
+        image_size (`int`, *optional*, defaults to 1024):
+            输入图像的尺寸。
+        model_max_length (`int`, *optional*, defaults to 512):
+            模型的最大序列长度。
+        lora_r (`int`, *optional*, defaults to 8):
+            LoRA 的秩。
+        vision_tower (`str`, *optional*, defaults to "openai/clip-vit-large-patch14"):
+            视觉编码器的名称或路径。
+        load_in_8bit (`bool`, *optional*, defaults to False):
+            是否以 8bit 精度加载模型。
+        load_in_4bit (`bool`, *optional*, defaults to False):
+            是否以 4bit 精度加载模型。
+        dataset_dir (`str`, *optional*, defaults to "./dataset"):
+            数据集目录路径。
+        log_base_dir (`str`, *optional*, defaults to "./runs"):
+            日志基础目录。
+        exp_name (`str`, *optional*, defaults to "lisa"):
+            实验名称。
+        epochs (`int`, *optional*, defaults to 10):
+            训练轮数。
+        steps_per_epoch (`int`, *optional*, defaults to 500):
+            每个 epoch 的步数。
+        batch_size (`int`, *optional*, defaults to 2):
+            每个设备每步的 batch size。
+        grad_accumulation_steps (`int`, *optional*, defaults to 10):
+            梯度累积步数。
+        val_batch_size (`int`, *optional*, defaults to 1):
+            验证时的 batch size。
+        workers (`int`, *optional*, defaults to 4):
+            数据加载的工作进程数。
+        lr (`float`, *optional*, defaults to 0.0003):
+            学习率。
+        ce_loss_weight (`float`, *optional*, defaults to 1.0):
+            交叉熵损失权重。
+        dice_loss_weight (`float`, *optional*, defaults to 0.5):
+            Dice 损失权重。
+        bce_loss_weight (`float`, *optional*, defaults to 2.0):
+            BCE 损失权重。
+        lora_alpha (`int`, *optional*, defaults to 16):
+            LoRA 的 alpha 参数。
+        lora_dropout (`float`, *optional*, defaults to 0.05):
+            LoRA 的 dropout 率。
+        lora_target_modules (`str`, *optional*, defaults to "q_proj,v_proj"):
+            LoRA 目标模块，用逗号分隔。
+        explanatory (`float`, *optional*, defaults to 0.1):
+            解释性损失权重。
+        beta1 (`float`, *optional*, defaults to 0.9):
+            Adam 优化器的 beta1 参数。
+        beta2 (`float`, *optional*, defaults to 0.95):
+            Adam 优化器的 beta2 参数。
+        num_classes_per_sample (`int`, *optional*, defaults to 3):
+            每个样本的类别数。
+        exclude_val (`bool`, *optional*, defaults to False):
+            是否排除验证集。
+        no_eval (`bool`, *optional*, defaults to False):
+            是否不进行评估。
+        eval_only (`bool`, *optional*, defaults to False):
+            是否仅进行评估。
+        vision_pretrained (`str`, *optional*, defaults to "PATH_TO_SAM_ViT-H"):
+            预训练视觉模型的路径。
+        out_dim (`int`, *optional*, defaults to 256):
+            输出维度。
+        resume (`str`, *optional*, defaults to ""):
+            恢复训练的 checkpoint 路径。
+        print_freq (`int`, *optional*, defaults to 1):
+            打印频率。
+        start_epoch (`int`, *optional*, defaults to 0):
+            起始 epoch。
+        gradient_checkpointing (`bool`, *optional*, defaults to True):
+            是否使用梯度检查点。
+        train_mask_decoder (`bool`, *optional*, defaults to True):
+            是否训练 mask decoder。
+        use_mm_start_end (`bool`, *optional*, defaults to True):
+            是否使用多模态起始结束标记。
+        auto_resume (`bool`, *optional*, defaults to True):
+            是否自动恢复训练。
+        conv_type (`str`, *optional*, defaults to "llava_llama_2"):
+            对话类型，可选 ["llava_v1", "llava_llama_2"]。
+        num_points (`int`, *optional*, defaults to 2048):
+            点云中的点数。
+        use_pointcloud (`bool`, *optional*, defaults to True):
+            是否使用点云模态。
+        pc_loss_weight (`float`, *optional*, defaults to 1.0):
+            点云损失权重。
+        train_ratio (`float`, *optional*, defaults to 0.7):
+            训练集比例。
+        val_ratio (`float`, *optional*, defaults to 0.15):
+            验证集比例。
+        test_ratio (`float`, *optional*, defaults to 0.15):
+            测试集比例。
+        mask_threshold_2d (`float`, *optional*, defaults to 0.0):
+            2D mask 二值化阈值。
+        mask_threshold_3d (`float`, *optional*, defaults to 0.5):
+            3D mask 二值化阈值。
+    """
+    
+    def __init__(
+        self,
+        local_rank=0,
+        version="liuhaotian/llava-llama-2-13b-chat-lightning-preview",
+        vis_save_path="./vis_output",
+        precision="bf16",
+        image_size=1024,
+        model_max_length=512,
+        lora_r=8,
+        vision_tower="openai/clip-vit-large-patch14",
+        load_in_8bit=False,
+        load_in_4bit=False,
+        dataset_dir="./dataset",
+        log_base_dir="./runs",
+        exp_name="lisa",
+        epochs=10,
+        steps_per_epoch=500,
+        batch_size=2,
+        grad_accumulation_steps=10,
+        val_batch_size=1,
+        workers=4,
+        lr=0.0003,
+        beta1=0.9,
+        beta2=0.95,
+        ce_loss_weight=1.0,
+        dice_loss_weight=0.5,
+        bce_loss_weight=2.0,
+        explanatory=0.1,
+        lora_alpha=16,
+        lora_dropout=0.05,
+        lora_target_modules="q_proj,v_proj",
+        num_classes_per_sample=3,
+        exclude_val=False,
+        no_eval=False,
+        eval_only=False,
+        vision_pretrained="PATH_TO_SAM_ViT-H",
+        out_dim=256,
+        resume="",
+        print_freq=1,
+        start_epoch=0,
+        gradient_checkpointing=True,
+        train_mask_decoder=True,
+        use_mm_start_end=True,
+        auto_resume=True,
+        conv_type="llava_llama_2",
+        num_points=2048,
+        use_pointcloud=True,
+        pc_loss_weight=1.0,
+        train_ratio=0.7,
+        val_ratio=0.15,
+        test_ratio=0.15,
+        mask_threshold_2d=0.0,
+        mask_threshold_3d=0.5,
+    ):
+        # 基础配置
+        self.local_rank = local_rank
+        self.version = version
+        self.vis_save_path = vis_save_path
+        self.precision = precision
+        
+        # 模型配置
+        self.image_size = image_size
+        self.model_max_length = model_max_length
+        self.lora_r = lora_r
+        self.vision_tower = vision_tower
+        self.load_in_8bit = load_in_8bit
+        self.load_in_4bit = load_in_4bit
+        
+        # 数据配置
+        self.dataset_dir = dataset_dir
+        self.log_base_dir = log_base_dir
+        self.exp_name = exp_name
+        
+        # 训练配置
+        self.epochs = epochs
+        self.steps_per_epoch = steps_per_epoch
+        self.batch_size = batch_size
+        self.grad_accumulation_steps = grad_accumulation_steps
+        self.val_batch_size = val_batch_size
+        self.workers = workers
+        
+        # 优化器配置
+        self.lr = lr
+        self.beta1 = beta1
+        self.beta2 = beta2
+        
+        # 损失权重
+        self.ce_loss_weight = ce_loss_weight
+        self.dice_loss_weight = dice_loss_weight
+        self.bce_loss_weight = bce_loss_weight
+        self.explanatory = explanatory
+        
+        # LoRA 配置
+        self.lora_alpha = lora_alpha
+        self.lora_dropout = lora_dropout
+        self.lora_target_modules = lora_target_modules
+        
+        # 其他配置
+        self.num_classes_per_sample = num_classes_per_sample
+        self.exclude_val = exclude_val
+        self.no_eval = no_eval
+        self.eval_only = eval_only
+        self.vision_pretrained = vision_pretrained
+        self.out_dim = out_dim
+        self.resume = resume
+        self.print_freq = print_freq
+        self.start_epoch = start_epoch
+        self.gradient_checkpointing = gradient_checkpointing
+        self.train_mask_decoder = train_mask_decoder
+        self.use_mm_start_end = use_mm_start_end
+        self.auto_resume = auto_resume
+        self.conv_type = conv_type
+        
+        # 点云相关配置
+        self.num_points = num_points
+        self.use_pointcloud = use_pointcloud
+        self.pc_loss_weight = pc_loss_weight
+        self.train_ratio = train_ratio
+        self.val_ratio = val_ratio
+        self.test_ratio = test_ratio
+        self.mask_threshold_2d = mask_threshold_2d
+        self.mask_threshold_3d = mask_threshold_3d
+        
+        # 运行时计算的属性
+        self.log_dir = os.path.join(self.log_base_dir, self.exp_name)
+        self.seg_token_idx = None
+        self.aff_token_idx = None
+        self.distributed = False
+        
+        # 验证精度选项
+        if self.precision not in ["fp32", "bf16", "fp16"]:
+            raise ValueError(f"precision must be one of ['fp32', 'bf16', 'fp16'], got {self.precision}")
+        
+        # 验证对话类型
+        if self.conv_type not in ["llava_v1", "llava_llama_2"]:
+            raise ValueError(f"conv_type must be one of ['llava_v1', 'llava_llama_2'], got {self.conv_type}")
+    
 params_to_train = []
 
 
@@ -171,21 +327,20 @@ def preprocess_input_data(input_dict, precision):
     return batch_size
 
 
-def main(args):
+def main():
     global params_to_train
-    args = parse_args(args)
-    args.log_dir = os.path.join(args.log_base_dir, args.exp_name)
-    if args.local_rank == 0:
-        os.makedirs(args.log_dir, exist_ok=True)
-        writer = SummaryWriter(args.log_dir)
+    config = TrainingConfig()
+    if config.local_rank == 0:
+        os.makedirs(config.log_dir, exist_ok=True)
+        writer = SummaryWriter(config.log_dir)
     else:
         writer = None
 
     # Create model - 使用魔改后的 LISAForCausalLM 模型（已支持点云）
     tokenizer = transformers.AutoTokenizer.from_pretrained(
-        args.version,
+        config.version,
         cache_dir=None,
-        model_max_length=args.model_max_length,
+        model_max_length=config.model_max_length,
         padding_side="right",
         use_fast=False,
     )
@@ -194,37 +349,37 @@ def main(args):
     # 添加特殊标记
     tokenizer.add_tokens("[SEG]")  # 2D分割标记
     tokenizer.add_tokens("[AFF]")  # 3D affordance标记
-    args.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
-    args.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
+    config.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
+    config.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
 
-    if args.use_mm_start_end:
+    if config.use_mm_start_end:
         tokenizer.add_tokens(
             [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
         )
 
     # 模型参数配置
     model_args = {
-        "train_mask_decoder": args.train_mask_decoder,
-        "out_dim": args.out_dim,
-        "ce_loss_weight": args.ce_loss_weight,
-        "dice_loss_weight": args.dice_loss_weight,
-        "bce_loss_weight": args.bce_loss_weight,
-        "seg_token_idx": args.seg_token_idx,
-        "aff_token_idx": args.aff_token_idx,  # 3D affordance token
-        "vision_pretrained": args.vision_pretrained,
-        "vision_tower": args.vision_tower,
-        "use_mm_start_end": args.use_mm_start_end,
+        "train_mask_decoder": config.train_mask_decoder,
+        "out_dim": config.out_dim,
+        "ce_loss_weight": config.ce_loss_weight,
+        "dice_loss_weight": config.dice_loss_weight,
+        "bce_loss_weight": config.bce_loss_weight,
+        "seg_token_idx": config.seg_token_idx,
+        "aff_token_idx": config.aff_token_idx,  # 3D affordance token
+        "vision_pretrained": config.vision_pretrained,
+        "vision_tower": config.vision_tower,
+        "use_mm_start_end": config.use_mm_start_end,
     }
     
     torch_dtype = torch.float32
-    if args.precision == "bf16":
+    if config.precision == "bf16":
         torch_dtype = torch.bfloat16
-    elif args.precision == "fp16":
+    elif config.precision == "fp16":
         torch_dtype = torch.half
     
     # 初始化魔改后的 LISA 模型
     model = LISAForCausalLM.from_pretrained(
-        args.version, dtype=torch_dtype, low_cpu_mem_usage=True, **model_args
+        config.version, dtype=torch_dtype, low_cpu_mem_usage=True, **model_args
     )
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
@@ -236,16 +391,16 @@ def main(args):
     # 初始化视觉模块
     model.get_model().initialize_vision_modules(model.get_model().config)
     vision_tower = model.get_model().get_vision_tower()
-    vision_tower.to(dtype=torch_dtype, device=args.local_rank)
+    vision_tower.to(dtype=torch_dtype, device=config.local_rank)
     
     conversation_lib.default_conversation = conversation_lib.conv_templates[
-        args.conv_type
+        config.conv_type
     ]
 
     model.resize_token_embeddings(len(tokenizer))
     
     # 初始化 LISA 模块（包括 SAM 和 3D 点云分割器）
-    if not args.eval_only:
+    if not config.eval_only:
         model.get_model().initialize_lisa_modules(model.get_model().config)
 
     # # 冻结视觉编码器和投影层
@@ -266,7 +421,7 @@ def main(args):
             p.requires_grad = True
 
     # LoRA 配置（可选）
-    lora_r = args.lora_r
+    lora_r = config.lora_r
     if lora_r > 0:
         def find_linear_layers(model, lora_target_modules):
             cls = torch.nn.Linear
@@ -291,10 +446,10 @@ def main(args):
                     lora_module_names.add(name)
             return sorted(list(lora_module_names))
 
-        lora_alpha = args.lora_alpha
-        lora_dropout = args.lora_dropout
+        lora_alpha = config.lora_alpha
+        lora_dropout = config.lora_dropout
         lora_target_modules = find_linear_layers(
-            model, args.lora_target_modules.split(",")
+            model, config.lora_target_modules.split(",")
         )
         lora_config = LoraConfig(
             r=lora_r,
@@ -317,30 +472,30 @@ def main(args):
     if len(params_to_train) == 0:
         raise ValueError("严重错误：没有发现可训练参数！请检查冻结逻辑。")
     world_size = torch.cuda.device_count()
-    args.distributed = world_size > 1
+    config.distributed = world_size > 1
     
     # 使用新的 DatasetManager 创建数据集
     dataset_manager = DatasetManager(
-        dataset_dir=args.dataset_dir,
+        dataset_dir=config.dataset_dir,
         tokenizer=tokenizer,
-        vision_tower=args.vision_tower,
-        samples_per_epoch=args.batch_size
-        * args.grad_accumulation_steps
-        * args.steps_per_epoch
+        vision_tower=config.vision_tower,
+        samples_per_epoch=config.batch_size
+        * config.grad_accumulation_steps
+        * config.steps_per_epoch
         * world_size,
-        precision=args.precision,
-        image_size=args.image_size,
-        num_points=args.num_points,
-        num_classes_per_sample=args.num_classes_per_sample,
-        exclude_val=args.exclude_val,
-        train_ratio=args.train_ratio,
-        val_ratio=args.val_ratio,
-        test_ratio=args.test_ratio,
+        precision=config.precision,
+        image_size=config.image_size,
+        num_points=config.num_points,
+        num_classes_per_sample=config.num_classes_per_sample,
+        exclude_val=config.exclude_val,
+        train_ratio=config.train_ratio,
+        val_ratio=config.val_ratio,
+        test_ratio=config.test_ratio,
     )
     
     train_dataset = dataset_manager.get_train_dataset()
 
-    if args.no_eval == False:
+    if config.no_eval == False:
         val_dataset = dataset_manager.get_val_dataset()
         print(
             f"Training with {len(train_dataset)} examples and validating with {len(val_dataset)} examples."
@@ -350,31 +505,31 @@ def main(args):
         print(f"Training with {len(train_dataset)} examples.")
 
     ds_config = {
-        "train_micro_batch_size_per_gpu": args.batch_size,
-        "gradient_accumulation_steps": args.grad_accumulation_steps,
+        "train_micro_batch_size_per_gpu": config.batch_size,
+        "gradient_accumulation_steps": config.grad_accumulation_steps,
         "optimizer": {
             "type": "AdamW",
             "params": {
-                "lr": args.lr,
+                "lr": config.lr,
                 "weight_decay": 0.0,
-                "betas": (args.beta1, args.beta2),
+                "betas": (config.beta1, config.beta2),
             },
         },
         "scheduler": {
             "type": "WarmupDecayLR",
             "params": {
-                "total_num_steps": args.epochs * args.steps_per_epoch,
+                "total_num_steps": config.epochs * config.steps_per_epoch,
                 "warmup_min_lr": 0,
-                "warmup_max_lr": args.lr,
+                "warmup_max_lr": config.lr,
                 "warmup_num_steps": 100,
                 "warmup_type": "linear",
             },
         },
         "fp16": {
-            "enabled": args.precision == "fp16",
+            "enabled": config.precision == "fp16",
         },
         "bf16": {
-            "enabled": args.precision == "bf16",
+            "enabled": config.precision == "bf16",
         },
         "gradient_clipping": 1.0,
         "zero_optimization": {
@@ -394,29 +549,29 @@ def main(args):
         collate_fn=partial(
             collate_fn,
             tokenizer=tokenizer,
-            conv_type=args.conv_type,
-            use_mm_start_end=args.use_mm_start_end,
-            local_rank=args.local_rank,
+            conv_type=config.conv_type,
+            use_mm_start_end=config.use_mm_start_end,
+            local_rank=config.local_rank,
         ),
         config=ds_config,
     )
 
     # resume deepspeed checkpoint
-    if args.auto_resume and len(args.resume) == 0:
-        resume = os.path.join(args.log_dir, "ckpt_model")
+    if config.auto_resume and len(config.resume) == 0:
+        resume = os.path.join(config.log_dir, "ckpt_model")
         if os.path.exists(resume):
-            args.resume = resume
+            config.resume = resume
 
-    if args.resume:
-        load_path, client_state = model_engine.load_checkpoint(args.resume)
-        with open(os.path.join(args.resume, "latest"), "r") as f:
+    if config.resume:
+        load_path, client_state = model_engine.load_checkpoint(config.resume)
+        with open(os.path.join(config.resume, "latest"), "r") as f:
             ckpt_dir = f.readlines()[0].strip()
-        args.start_epoch = (
-            int(ckpt_dir.replace("global_step", "")) // args.steps_per_epoch
+        config.start_epoch = (
+            int(ckpt_dir.replace("global_step", "")) // config.steps_per_epoch
         )
         print(
             "resume training from {}, start from epoch {}".format(
-                args.resume, args.start_epoch
+                config.resume, config.start_epoch
             )
         )
 
@@ -428,28 +583,28 @@ def main(args):
         )
         val_loader = torch.utils.data.DataLoader(
             val_dataset,
-            batch_size=args.val_batch_size,
+            batch_size=config.val_batch_size,
             shuffle=False,
-            num_workers=args.workers,
+            num_workers=config.workers,
             pin_memory=False,
             sampler=val_sampler,
             collate_fn=partial(
                 collate_fn,
                 tokenizer=tokenizer,
-                conv_type=args.conv_type,
-                use_mm_start_end=args.use_mm_start_end,
-                local_rank=args.local_rank,
+                conv_type=config.conv_type,
+                use_mm_start_end=config.use_mm_start_end,
+                local_rank=config.local_rank,
             ),
         )
 
     train_iter = iter(train_loader)
     best_score, cur_ciou = 0.0, 0.0
 
-    if args.eval_only:
-        giou, ciou = validate(val_loader, model_engine, 0, writer, args)
+    if config.eval_only:
+        giou, ciou = validate(val_loader, model_engine, 0, writer, config)
         exit()
 
-    for epoch in range(args.start_epoch, args.epochs):
+    for epoch in range(config.start_epoch, config.epochs):
         # train for one epoch
         train_iter = train(
             train_loader,
@@ -458,27 +613,27 @@ def main(args):
             scheduler,
             writer,
             train_iter,
-            args,
+            config,
         )
 
-        if args.no_eval == False:
-            giou, ciou = validate(val_loader, model_engine, epoch, writer, args)
+        if config.no_eval == False:
+            giou, ciou = validate(val_loader, model_engine, epoch, writer, config)
             is_best = giou > best_score
             best_score = max(giou, best_score)
             cur_ciou = ciou if is_best else cur_ciou
 
-        if args.no_eval or is_best:
-            save_dir = os.path.join(args.log_dir, "ckpt_model")
+        if config.no_eval or is_best:
+            save_dir = os.path.join(config.log_dir, "ckpt_model")
             
             # 方案1：保存完整的 DeepSpeed checkpoint（包含优化器状态，用于断点续训）
-            if args.local_rank == 0:
+            if config.local_rank == 0:
                 if os.path.exists(save_dir):
                     shutil.rmtree(save_dir)
             torch.distributed.barrier()
             model_engine.save_checkpoint(save_dir)
             
             # 方案2：额外保存轻量级的仅模型权重 checkpoint（用于推理）
-            if args.local_rank == 0:
+            if config.local_rank == 0:
                 # 只保存可训练参数
                 trainable_state_dict = {
                     name: param.cpu() 
@@ -494,16 +649,16 @@ def main(args):
                 }
                 
                 lightweight_path = os.path.join(
-                    args.log_dir,
+                    config.log_dir,
                     "lightweight_giou{:.3f}_ciou{:.3f}.pth".format(best_score, cur_ciou)
                 )
                 torch.save(lightweight_ckpt, lightweight_path)
                 print(f"Saved lightweight checkpoint to {lightweight_path}")
                 
                 # 删除旧的轻量级 checkpoint
-                for old_ckpt in os.listdir(args.log_dir):
+                for old_ckpt in os.listdir(config.log_dir):
                     if old_ckpt.startswith("lightweight_") and old_ckpt != os.path.basename(lightweight_path):
-                        os.remove(os.path.join(args.log_dir, old_ckpt))
+                        os.remove(os.path.join(config.log_dir, old_ckpt))
 
 
 def train(
@@ -513,32 +668,28 @@ def train(
     scheduler,
     writer,
     train_iter,
-    args,
+    config,
 ):
     """Main training loop."""
     global params_to_train
 
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
-    losses = AverageMeter("Loss", ":.4f")
-    ce_losses = AverageMeter("CeLoss", ":.4f")
-    mask_bce_losses = AverageMeter("MaskBCELoss", ":.4f")
-    mask_dice_losses = AverageMeter("MaskDICELoss", ":.4f")
-    mask_losses = AverageMeter("MaskLoss", ":.4f")
-    mask_3d_bce_losses = AverageMeter("Mask3DBCELoss", ":.4f")
-    mask_3d_dice_losses = AverageMeter("Mask3DDICELoss", ":.4f")
-    mask_3d_losses = AverageMeter("Mask3DLoss", ":.4f")
+    
+    # 使用 LossMetrics 类管理所有损失
+    loss_metrics = LossMetrics()
+    loss_meters = loss_metrics.get_meters()
 
     progress = ProgressMeter(
-        args.steps_per_epoch,
+        config.steps_per_epoch,
         [
             batch_time,
-            losses,
-            ce_losses,
-            mask_losses,
-            mask_bce_losses,
-            mask_dice_losses,
-            mask_3d_losses,
+            loss_meters["loss"],
+            loss_meters["ce_loss"],
+            loss_meters["mask_loss"],
+            loss_meters["mask_bce_loss"],
+            loss_meters["mask_dice_loss"],
+            loss_meters["mask_3d_loss"],
         ],
         prefix="Epoch: [{}]".format(epoch),
     )
@@ -546,8 +697,10 @@ def train(
     # switch to train mode
     model_engine.train()
     end = time.time()
-    for global_step in range(args.steps_per_epoch):
-        for i in range(args.grad_accumulation_steps):
+    for local_step in range(config.steps_per_epoch):
+        # 计算全局步数
+        global_step = epoch * config.steps_per_epoch + local_step
+        for i in range(config.grad_accumulation_steps):
             try:
                 input_dict = next(train_iter)
             except:
@@ -558,64 +711,82 @@ def train(
             input_dict = dict_to_cuda(input_dict)
             
             # 预处理输入数据（图像和点云）并计算 batch_size
-            batch_size = preprocess_input_data(input_dict, args.precision)
+            batch_size = preprocess_input_data(input_dict, config.precision)
 
             # 调用魔改后的 LISA 模型
             output_dict = model_engine(**input_dict)
 
-            loss = output_dict["loss"]
-            ce_loss = output_dict["ce_loss"]
-            mask_bce_loss = output_dict["mask_bce_loss"]
-            mask_dice_loss = output_dict["mask_dice_loss"]
-            mask_loss = output_dict["mask_loss"]
-            mask_3d_bce_loss = output_dict.get("mask_3d_bce_loss", torch.tensor(0.0))
-            mask_3d_dice_loss = output_dict.get("mask_3d_dice_loss", torch.tensor(0.0))
-            mask_3d_loss = output_dict.get("mask_3d_loss", torch.tensor(0.0))
+            # ========== 在训练脚本中计算损失 ==========
+            if not output_dict.get("inference", False):
+                # 1. 计算语言模型损失（交叉熵）
+                ce_loss = output_dict["output"].loss * model_engine.module.ce_loss_weight
+                
+                # 2. 计算 2D 掩码损失
+                mask_bce_loss, mask_dice_loss, mask_loss = compute_2d_mask_loss(
+                    pred_masks=output_dict["pred_masks"] if output_dict["has_image"] else [],
+                    gt_masks=output_dict["gt_masks"] if output_dict["has_image"] else [],
+                    bce_loss_weight=model_engine.module.bce_loss_weight,
+                    dice_loss_weight=model_engine.module.dice_loss_weight,
+                    device=ce_loss.device,
+                )
+                
+                # 3. 计算 3D 点云掩码损失
+                mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss = compute_3d_mask_loss(
+                    pred_3d_masks=output_dict["pred_3d_masks"] if output_dict["has_point_cloud"] else [],
+                    gt_3d_masks=output_dict["gt_3d_masks"] if output_dict["has_point_cloud"] else [],
+                    bce_loss_weight=model_engine.module.bce_loss_weight,
+                    dice_loss_weight=model_engine.module.dice_loss_weight,
+                    device=ce_loss.device,
+                )
+                
+                # 4. 计算虚拟损失以保持所有参数连接到计算图
+                dummy_loss = compute_dummy_loss(model_engine.module.model, ce_loss.device)
+                
+                # 5. 总损失
+                loss = ce_loss + mask_loss + mask_3d_loss + dummy_loss
+                
+                # 构建损失字典
+                output_dict["loss"] = loss
+                output_dict["ce_loss"] = ce_loss
+                output_dict["mask_bce_loss"] = mask_bce_loss
+                output_dict["mask_dice_loss"] = mask_dice_loss
+                output_dict["mask_loss"] = mask_loss
+                output_dict["mask_3d_bce_loss"] = mask_3d_bce_loss
+                output_dict["mask_3d_dice_loss"] = mask_3d_dice_loss
+                output_dict["mask_3d_loss"] = mask_3d_loss
 
-            losses.update(loss.item(), batch_size)
-            ce_losses.update(ce_loss.item(), batch_size)
-            mask_bce_losses.update(mask_bce_loss.item(), batch_size)
-            mask_dice_losses.update(mask_dice_loss.item(), batch_size)
-            mask_losses.update(mask_loss.item(), batch_size)
-            mask_3d_bce_losses.update(mask_3d_bce_loss.item(), batch_size)
-            mask_3d_dice_losses.update(mask_3d_dice_loss.item(), batch_size)
-            mask_3d_losses.update(mask_3d_loss.item(), batch_size)
+            # 使用 LossMetrics 更新所有损失
+            loss_metrics.update(output_dict, batch_size)
             
-            model_engine.backward(loss)
+            model_engine.backward(output_dict["loss"])
             model_engine.step()
 
         # measure elapsed time
         batch_time.update(time.time() - end)
         end = time.time()
 
-        if global_step % args.print_freq == 0:
-            if args.distributed:
+        if local_step % config.print_freq == 0:
+            if config.distributed:
                 batch_time.all_reduce()
                 data_time.all_reduce()
+                loss_metrics.all_reduce()
 
-                losses.all_reduce()
-                ce_losses.all_reduce()
-                mask_bce_losses.all_reduce()
-                mask_dice_losses.all_reduce()
-                mask_losses.all_reduce()
-                mask_3d_bce_losses.all_reduce()
-                mask_3d_dice_losses.all_reduce()
-                mask_3d_losses.all_reduce()
-
-            if args.local_rank == 0:
-                progress.display(global_step + 1)
-                writer.add_scalar("train/loss", losses.avg, global_step)
-                writer.add_scalar("train/ce_loss", ce_losses.avg, global_step)
-                writer.add_scalar(
-                    "train/mask_bce_loss", mask_bce_losses.avg, global_step
-                )
-                writer.add_scalar(
-                    "train/mask_dice_loss", mask_dice_losses.avg, global_step
-                )
-                writer.add_scalar("train/mask_loss", mask_losses.avg, global_step)
-                writer.add_scalar("train/mask_3d_bce_loss", mask_3d_bce_losses.avg, global_step)
-                writer.add_scalar("train/mask_3d_dice_loss", mask_3d_dice_losses.avg, global_step)
-                writer.add_scalar("train/mask_3d_loss", mask_3d_losses.avg, global_step)
+            if config.local_rank == 0:
+                progress.display(local_step + 1)
+                
+                # 记录所有损失到 TensorBoard
+                metrics_dict = {
+                    "loss": loss_meters["loss"].avg,
+                    "ce_loss": loss_meters["ce_loss"].avg,
+                    "mask_bce_loss": loss_meters["mask_bce_loss"].avg,
+                    "mask_dice_loss": loss_meters["mask_dice_loss"].avg,
+                    "mask_loss": loss_meters["mask_loss"].avg,
+                    "mask_3d_bce_loss": loss_meters["mask_3d_bce_loss"].avg,
+                    "mask_3d_dice_loss": loss_meters["mask_3d_dice_loss"].avg,
+                    "mask_3d_loss": loss_meters["mask_3d_loss"].avg,
+                }
+                log_metrics_to_tensorboard(writer, metrics_dict, global_step, prefix="train")
+                
                 writer.add_scalar(
                     "metrics/total_secs_per_batch", batch_time.avg, global_step
                 )
@@ -625,38 +796,21 @@ def train(
 
             batch_time.reset()
             data_time.reset()
-            losses.reset()
-            ce_losses.reset()
-            mask_bce_losses.reset()
-            mask_dice_losses.reset()
-            mask_losses.reset()
-            mask_3d_bce_losses.reset()
-            mask_3d_dice_losses.reset()
-            mask_3d_losses.reset()
+            loss_metrics.reset()
 
-        if global_step != 0:
+        if local_step != 0:
             curr_lr = scheduler.get_last_lr()
-            if args.local_rank == 0:
+            if config.local_rank == 0:
                 writer.add_scalar("train/lr", curr_lr[0], global_step)
 
     return train_iter
 
 
-def validate(val_loader, model_engine, epoch, writer, args):
-    # 2D 分割评估指标
-    intersection_meter = AverageMeter("Intersec", ":6.3f", Summary.SUM)
-    union_meter = AverageMeter("Union", ":6.3f", Summary.SUM)
-    acc_iou_meter = AverageMeter("gIoU", ":6.3f", Summary.AVERAGE)
+def validate(val_loader, model_engine, epoch, writer, config):
+    """验证函数"""
+    # 使用 SegmentationMetrics 类管理所有评估指标
+    metrics = SegmentationMetrics()
     
-    # 3D 点云评估指标
-    intersection_meter_3d = AverageMeter("Intersec3D", ":6.3f", Summary.SUM)
-    union_meter_3d = AverageMeter("Union3D", ":6.3f", Summary.SUM)
-    acc_iou_meter_3d = AverageMeter("gIoU3D", ":6.3f", Summary.AVERAGE)
-    
-    # 调试计数器
-    num_2d_samples = 0
-    num_3d_samples = 0
-
     model_engine.eval()
 
     for input_dict in tqdm(val_loader, desc='Validating'):
@@ -665,129 +819,41 @@ def validate(val_loader, model_engine, epoch, writer, args):
         input_dict = dict_to_cuda(input_dict)
         
         # 预处理输入数据（图像和点云）并计算 batch_size
-        batch_size = preprocess_input_data(input_dict, args.precision)
+        batch_size = preprocess_input_data(input_dict, config.precision)
 
         with torch.no_grad():
             output_dict = model_engine(**input_dict, inference=True)
 
-        # 评估 2D 分割（支持任意 batch_size）
-        if "pred_masks" in output_dict and output_dict["pred_masks"] is not None:
-            pred_masks = output_dict["pred_masks"]  # List[Tensor], 长度为 batch_size，每个元素形状为 [H, W]
-            gt_masks = output_dict["gt_masks"]  # List[Tensor], 长度为 batch_size，每个元素形状为 [H, W]
-            
-            # 遍历 batch 中的每个样本
-            for batch_idx in range(len(pred_masks)):
-                num_2d_samples += 1
-                mask_2d_gt = gt_masks[batch_idx].int()  # [H, W]
-                mask_2d_pred = (pred_masks[batch_idx] > args.mask_threshold_2d).int()  # [H, W]
-                
-                # 确保预测和真实掩码形状一致
-                assert mask_2d_gt.shape == mask_2d_pred.shape, \
-                    f"Mismatch: gt shape {mask_2d_gt.shape}, pred shape {mask_2d_pred.shape}"
+        # 使用统一的评估函数
+        evaluate_segmentation_batch(
+            output_dict,
+            metrics,
+            mask_threshold_2d=config.mask_threshold_2d,
+            mask_threshold_3d=config.mask_threshold_3d
+        )
 
-                # 对单个样本对调用 intersectionAndUnionGPU
-                intersection_i, union_i, _ = intersectionAndUnionGPU(
-                    mask_2d_pred.contiguous().clone(), mask_2d_gt.contiguous(), 2, ignore_index=255
-                )
-                
-                # 计算 IoU
-                acc_iou = intersection_i / (union_i + 1e-5)
-                acc_iou[union_i == 0] += 1.0  # no-object target
-                
-                intersection = intersection_i.cpu().numpy()
-                union = union_i.cpu().numpy()
-                acc_iou = acc_iou.cpu().numpy()
-                
-                intersection_meter.update(intersection)
-                union_meter.update(union)
-                acc_iou_meter.update(acc_iou, n=1)
+    # 计算最终结果
+    giou, ciou = metrics.compute_2d_results()
+    giou_3d, ciou_3d = metrics.compute_3d_results()
+
+    if config.local_rank == 0:
+        # 计算当前的全局步数（用于与训练指标对齐）
+        global_step = (epoch + 1) * config.steps_per_epoch
         
-        # 评估 3D 点云分割（支持任意 batch_size）
-        if "pred_3d_masks" in output_dict and output_dict["pred_3d_masks"] is not None:
-            pred_3d_masks = output_dict["pred_3d_masks"]  # List[Tensor], 长度为 batch_size，每个元素形状为 [N]
-            gt_3d_masks = output_dict["gt_3d_masks"]  # List[Tensor], 长度为 batch_size，每个元素形状为 [N]
-            
-            # 遍历 batch 中的每个样本
-            for batch_idx in range(len(pred_3d_masks)):
-                num_3d_samples += 1
-                mask_3d_gt = gt_3d_masks[batch_idx].int()  # [N]
-                mask_3d_pred = (pred_3d_masks[batch_idx] > args.mask_threshold_3d).int()  # [N]
-                
-                # 确保预测和真实掩码形状一致
-                assert mask_3d_gt.shape == mask_3d_pred.shape, \
-                    f"Mismatch: gt shape {mask_3d_gt.shape}, pred shape {mask_3d_pred.shape}"
-
-                # 对单个样本对调用 intersectionAndUnionGPU
-                intersection_3d_i, union_3d_i, _ = intersectionAndUnionGPU(
-                    mask_3d_pred.contiguous().clone(), mask_3d_gt.contiguous(), 2, ignore_index=255
-                )
-                
-                # 计算 IoU
-                acc_iou_3d = intersection_3d_i / (union_3d_i + 1e-5)
-                acc_iou_3d[union_3d_i == 0] += 1.0  # no-object target
-                
-                intersection_3d = intersection_3d_i.cpu().numpy()
-                union_3d = union_3d_i.cpu().numpy()
-                acc_iou_3d = acc_iou_3d.cpu().numpy()
-                
-                intersection_meter_3d.update(intersection_3d)
-                union_meter_3d.update(union_3d)
-                acc_iou_meter_3d.update(acc_iou_3d, n=1)
-
-    # 汇总 2D 分割结果
-    intersection_meter.all_reduce()
-    union_meter.all_reduce()
-    acc_iou_meter.all_reduce()
-
-    iou_class = intersection_meter.sum / (union_meter.sum + 1e-10)
-    ciou = iou_class[1] if isinstance(iou_class, np.ndarray) and iou_class.size > 1 else 0.0
-    giou = acc_iou_meter.avg[1] if isinstance(acc_iou_meter.avg, np.ndarray) and acc_iou_meter.avg.size > 1 else 0.0
-    
-    # 汇总 3D 点云分割结果
-    intersection_meter_3d.all_reduce()
-    union_meter_3d.all_reduce()
-    acc_iou_meter_3d.all_reduce()
-
-    iou_class_3d = intersection_meter_3d.sum / (union_meter_3d.sum + 1e-10)
-    if isinstance(iou_class_3d, np.ndarray) and iou_class_3d.size > 1:
-        ciou_3d = iou_class_3d[1]
-    else:
-        ciou_3d = float(iou_class_3d) if not isinstance(iou_class_3d, np.ndarray) else iou_class_3d.item()
-    
-    if isinstance(acc_iou_meter_3d.avg, np.ndarray) and acc_iou_meter_3d.avg.size > 1:
-        giou_3d = acc_iou_meter_3d.avg[1]
-    else:
-        giou_3d = float(acc_iou_meter_3d.avg) if not isinstance(acc_iou_meter_3d.avg, np.ndarray) else acc_iou_meter_3d.avg.item()
-
-    if args.local_rank == 0:
-        # 打印调试信息
-        print(f"\n{'='*60}")
-        print(f"Validation Summary (Epoch {epoch}):")
-        print(f"  2D samples evaluated: {num_2d_samples}")
-        print(f"  3D samples evaluated: {num_3d_samples}")
-        print(f"{'='*60}")
+        # 打印验证摘要
+        print_validation_summary(epoch, metrics, giou, ciou, giou_3d, ciou_3d)
         
-        # 记录 2D 分割指标
-        writer.add_scalar("val/giou", giou, epoch)
-        writer.add_scalar("val/ciou", ciou, epoch)
-        print("2D Segmentation - giou: {:.4f}, ciou: {:.4f}".format(giou, ciou))
-        
-        # 记录 3D 点云分割指标
-        writer.add_scalar("val/giou_3d", giou_3d, epoch)
-        writer.add_scalar("val/ciou_3d", ciou_3d, epoch)
-        print("3D Point Cloud - giou: {:.4f}, ciou: {:.4f}".format(giou_3d, ciou_3d))
-        
-        # 警告信息
-        if num_3d_samples == 0:
-            print(f"\n⚠️  WARNING: No 3D samples were evaluated!")
-            print(f"   Possible reasons:")
-            print(f"   1. Validation dataset has no point cloud data")
-            print(f"   2. Point clouds not being loaded correctly")
-            print(f"   3. Model not generating pred_masks_3d")
-        print(f"{'='*60}\n")
+        # 记录指标到 TensorBoard
+        val_metrics_dict = {
+            "giou": giou,
+            "ciou": ciou,
+            "giou_3d": giou_3d,
+            "ciou_3d": ciou_3d,
+        }
+        log_metrics_to_tensorboard(writer, val_metrics_dict, global_step, prefix="val")
 
     return giou, ciou
 
 
 if __name__ == "__main__":
-    main(sys.argv[1:])
+    main()
