@@ -22,260 +22,10 @@ from utils.metrics import (SegmentationMetrics, LossMetrics,
                            compute_2d_mask_loss,
                            compute_3d_mask_loss,
                            compute_dummy_loss)
+from configs import TrainingConfig
 
 
-class TrainingConfig:
-    """
-    训练配置类，用于存储 LISA 模型训练的所有超参数。
-    
-    Args:
-        local_rank (`int`, *optional*, defaults to 0):
-            分布式训练中的节点排名。
-        version (`str`, *optional*, defaults to "liuhaotian/llava-llama-2-13b-chat-lightning-preview"):
-            预训练模型的版本或路径。
-        vis_save_path (`str`, *optional*, defaults to "./vis_output"):
-            可视化结果保存路径。
-        precision (`str`, *optional*, defaults to "bf16"):
-            训练精度，可选 ["fp32", "bf16", "fp16"]。
-        image_size (`int`, *optional*, defaults to 1024):
-            输入图像的尺寸。
-        model_max_length (`int`, *optional*, defaults to 512):
-            模型的最大序列长度。
-        lora_r (`int`, *optional*, defaults to 8):
-            LoRA 的秩。
-        vision_tower (`str`, *optional*, defaults to "openai/clip-vit-large-patch14"):
-            视觉编码器的名称或路径。
-        load_in_8bit (`bool`, *optional*, defaults to False):
-            是否以 8bit 精度加载模型。
-        load_in_4bit (`bool`, *optional*, defaults to False):
-            是否以 4bit 精度加载模型。
-        dataset_dir (`str`, *optional*, defaults to "./dataset"):
-            数据集目录路径。
-        log_base_dir (`str`, *optional*, defaults to "./runs"):
-            日志基础目录。
-        exp_name (`str`, *optional*, defaults to "lisa"):
-            实验名称。
-        epochs (`int`, *optional*, defaults to 10):
-            训练轮数。
-        steps_per_epoch (`int`, *optional*, defaults to 500):
-            每个 epoch 的步数。
-        batch_size (`int`, *optional*, defaults to 2):
-            每个设备每步的 batch size。
-        grad_accumulation_steps (`int`, *optional*, defaults to 10):
-            梯度累积步数。
-        val_batch_size (`int`, *optional*, defaults to 1):
-            验证时的 batch size。
-        workers (`int`, *optional*, defaults to 4):
-            数据加载的工作进程数。
-        lr (`float`, *optional*, defaults to 0.0003):
-            学习率。
-        ce_loss_weight (`float`, *optional*, defaults to 1.0):
-            交叉熵损失权重。
-        dice_loss_weight (`float`, *optional*, defaults to 0.5):
-            Dice 损失权重。
-        bce_loss_weight (`float`, *optional*, defaults to 2.0):
-            BCE 损失权重。
-        lora_alpha (`int`, *optional*, defaults to 16):
-            LoRA 的 alpha 参数。
-        lora_dropout (`float`, *optional*, defaults to 0.05):
-            LoRA 的 dropout 率。
-        lora_target_modules (`str`, *optional*, defaults to "q_proj,v_proj"):
-            LoRA 目标模块，用逗号分隔。
-        explanatory (`float`, *optional*, defaults to 0.1):
-            解释性损失权重。
-        beta1 (`float`, *optional*, defaults to 0.9):
-            Adam 优化器的 beta1 参数。
-        beta2 (`float`, *optional*, defaults to 0.95):
-            Adam 优化器的 beta2 参数。
-        num_classes_per_sample (`int`, *optional*, defaults to 3):
-            每个样本的类别数。
-        exclude_val (`bool`, *optional*, defaults to False):
-            是否排除验证集。
-        no_eval (`bool`, *optional*, defaults to False):
-            是否不进行评估。
-        eval_only (`bool`, *optional*, defaults to False):
-            是否仅进行评估。
-        vision_pretrained (`str`, *optional*, defaults to "PATH_TO_SAM_ViT-H"):
-            预训练视觉模型的路径。
-        out_dim (`int`, *optional*, defaults to 256):
-            输出维度。
-        resume (`str`, *optional*, defaults to ""):
-            恢复训练的 checkpoint 路径。
-        print_freq (`int`, *optional*, defaults to 1):
-            打印频率。
-        start_epoch (`int`, *optional*, defaults to 0):
-            起始 epoch。
-        gradient_checkpointing (`bool`, *optional*, defaults to True):
-            是否使用梯度检查点。
-        train_mask_decoder (`bool`, *optional*, defaults to True):
-            是否训练 mask decoder。
-        use_mm_start_end (`bool`, *optional*, defaults to True):
-            是否使用多模态起始结束标记。
-        auto_resume (`bool`, *optional*, defaults to True):
-            是否自动恢复训练。
-        conv_type (`str`, *optional*, defaults to "llava_llama_2"):
-            对话类型，可选 ["llava_v1", "llava_llama_2"]。
-        num_points (`int`, *optional*, defaults to 2048):
-            点云中的点数。
-        use_pointcloud (`bool`, *optional*, defaults to True):
-            是否使用点云模态。
-        pc_loss_weight (`float`, *optional*, defaults to 1.0):
-            点云损失权重。
-        train_ratio (`float`, *optional*, defaults to 0.7):
-            训练集比例。
-        val_ratio (`float`, *optional*, defaults to 0.15):
-            验证集比例。
-        test_ratio (`float`, *optional*, defaults to 0.15):
-            测试集比例。
-        mask_threshold_2d (`float`, *optional*, defaults to 0.0):
-            2D mask 二值化阈值。
-        mask_threshold_3d (`float`, *optional*, defaults to 0.5):
-            3D mask 二值化阈值。
-    """
-    
-    def __init__(
-        self,
-        local_rank=0,
-        version="../pretrained/llava-llama-2-13b-chat-lightning-preview",
-        vis_save_path="./vis_output",
-        precision="fp16",
-        image_size=1024,
-        model_max_length=512,
-        lora_r=8,
-        vision_tower="../pretrained/clip-vit-large-patch14",
-        load_in_8bit=False,
-        load_in_4bit=False,
-        dataset_dir="../datasets/merged1-2-3/",
-        log_base_dir="./runs",
-        exp_name="lisa",
-        epochs=250,
-        steps_per_epoch=100,
-        batch_size=1,  # 目前只能设置为1，否则报错
-        grad_accumulation_steps=10,
-        val_batch_size=1,
-        workers=4,
-        lr=0.003,
-        beta1=0.9,
-        beta2=0.95,
-        ce_loss_weight=1.0,
-        dice_loss_weight=0.5,
-        bce_loss_weight=2.0,
-        explanatory=0.1,
-        lora_alpha=16,
-        lora_dropout=0.05,
-        lora_target_modules="q_proj,v_proj",
-        num_classes_per_sample=3,
-        exclude_val=False,
-        no_eval=False,
-        eval_only=False,
-        vision_pretrained="../pretrained/sam_vit_h_4b8939.pth",
-        out_dim=256,
-        resume="",
-        print_freq=1,
-        start_epoch=0,
-        gradient_checkpointing=True,
-        train_mask_decoder=True,
-        use_mm_start_end=True,
-        auto_resume=True,
-        conv_type="llava_llama_2",
-        num_points=2048,
-        use_pointcloud=True,
-        pc_loss_weight=1.0,
-        train_ratio=0.7,
-        val_ratio=0.15,
-        test_ratio=0.15,
-        mask_threshold_2d=0.0,
-        mask_threshold_3d=0.5,
-    ):
-        # 基础配置
-        self.local_rank = local_rank
-        self.version = version
-        self.vis_save_path = vis_save_path
-        self.precision = precision
-        
-        # 模型配置
-        self.image_size = image_size
-        self.model_max_length = model_max_length
-        self.lora_r = lora_r
-        self.vision_tower = vision_tower
-        self.load_in_8bit = load_in_8bit
-        self.load_in_4bit = load_in_4bit
-        
-        # 数据配置
-        self.dataset_dir = dataset_dir
-        self.log_base_dir = log_base_dir
-        self.exp_name = exp_name
-        
-        # 训练配置
-        self.epochs = epochs
-        self.steps_per_epoch = steps_per_epoch
-        self.batch_size = batch_size
-        self.grad_accumulation_steps = grad_accumulation_steps
-        self.val_batch_size = val_batch_size
-        self.workers = workers
-        
-        # 优化器配置
-        self.lr = lr
-        self.beta1 = beta1
-        self.beta2 = beta2
-        
-        # 分层学习率配置（可选）
-        self.llm_lr = lr * 0.1  # LLM 部分使用较小的学习率
-        self.vision_2d_lr = lr  # 2D 视觉部分使用标准学习率
-        self.vision_3d_lr = lr  # 3D 点云部分使用标准学习率
-        self.use_layerwise_lr = True  # 是否启用分层学习率
-        
-        # 损失权重
-        self.ce_loss_weight = ce_loss_weight
-        self.dice_loss_weight = dice_loss_weight
-        self.bce_loss_weight = bce_loss_weight
-        self.explanatory = explanatory
-        
-        # LoRA 配置
-        self.lora_alpha = lora_alpha
-        self.lora_dropout = lora_dropout
-        self.lora_target_modules = lora_target_modules
-        
-        # 其他配置
-        self.num_classes_per_sample = num_classes_per_sample
-        self.exclude_val = exclude_val
-        self.no_eval = no_eval
-        self.eval_only = eval_only
-        self.vision_pretrained = vision_pretrained
-        self.out_dim = out_dim
-        self.resume = resume
-        self.print_freq = print_freq
-        self.start_epoch = start_epoch
-        self.gradient_checkpointing = gradient_checkpointing
-        self.train_mask_decoder = train_mask_decoder
-        self.use_mm_start_end = use_mm_start_end
-        self.auto_resume = auto_resume
-        self.conv_type = conv_type
-        
-        # 点云相关配置
-        self.num_points = num_points
-        self.use_pointcloud = use_pointcloud
-        self.pc_loss_weight = pc_loss_weight
-        self.train_ratio = train_ratio
-        self.val_ratio = val_ratio
-        self.test_ratio = test_ratio
-        self.mask_threshold_2d = mask_threshold_2d
-        self.mask_threshold_3d = mask_threshold_3d
-        
-        # 运行时计算的属性
-        self.log_dir = os.path.join(self.log_base_dir, self.exp_name)
-        self.seg_token_idx = None
-        self.aff_token_idx = None
-        self.distributed = False
-        
-        # 验证精度选项
-        if self.precision not in ["fp32", "bf16", "fp16"]:
-            raise ValueError(f"precision must be one of ['fp32', 'bf16', 'fp16'], got {self.precision}")
-        
-        # 验证对话类型
-        if self.conv_type not in ["llava_v1", "llava_llama_2"]:
-            raise ValueError(f"conv_type must be one of ['llava_v1', 'llava_llama_2'], got {self.conv_type}")
-    
+# 全局变量
 params_to_train = []
 
 
@@ -504,50 +254,27 @@ def main():
         p.requires_grad = False
 
     # 开启非 LoRA 的关键模块 (Projector, Mask Decoder 等)
-    target_modules = ["mask_decoder", "text_hidden_fcs", "mm_projector", "lm_head", "embed_tokens", "point_cloud_segmentor"]
     for n, p in model.named_parameters():
-        if any(t in n for t in target_modules):
+        if any(t in n for t in config.name_of_params_to_train):
             p.requires_grad = True
 
     # LoRA 配置（可选）
-    lora_r = config.lora_r
-    if lora_r > 0:
+    if config.lora_r > 0:
         def find_linear_layers(model, lora_target_modules):
             cls = torch.nn.Linear
             lora_module_names = set()
             for name, module in model.named_modules():
                 if (
                     isinstance(module, cls)
-                    and all(
-                        [
-                            x not in name
-                            for x in [
-                                "visual_model",
-                                "vision_tower",
-                                "mm_projector",
-                                "text_hidden_fcs",
-                                "point_cloud_segmentor",
-                            ]
-                        ]
-                    )
+                    and all([x not in name for x in config.name_of_params_to_train])
                     and any([x in name for x in lora_target_modules])
                 ):
                     lora_module_names.add(name)
             return sorted(list(lora_module_names))
 
-        lora_alpha = config.lora_alpha
-        lora_dropout = config.lora_dropout
-        lora_target_modules = find_linear_layers(
-            model, config.lora_target_modules.split(",")
-        )
-        lora_config = LoraConfig(
-            r=lora_r,
-            lora_alpha=lora_alpha,
-            target_modules=lora_target_modules,
-            lora_dropout=lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
-        )
+        lora_target_modules = find_linear_layers(model, config.lora_target_modules)
+        lora_config = config.get_lora_config()
+        lora_config.target_modules = lora_target_modules  # 使用动态查找的模块
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
@@ -603,44 +330,7 @@ def main():
         val_dataset = None
         print(f"Training with {len(train_dataset)} examples.")
 
-    ds_config = {
-        "train_micro_batch_size_per_gpu": config.batch_size,
-        "gradient_accumulation_steps": config.grad_accumulation_steps,
-        "optimizer": {
-            "type": "AdamW",
-            "params": {
-                "lr": config.lr,  # 默认学习率（当不使用参数组时）
-                "weight_decay": 0.0,
-                "betas": (config.beta1, config.beta2),
-            },
-        },
-        "scheduler": {
-            "type": "WarmupDecayLR",
-            "params": {
-                "total_num_steps": config.epochs * config.steps_per_epoch,
-                "warmup_min_lr": 0,
-                "warmup_max_lr": config.lr,  # 使用最大学习率作为 warmup 目标
-                "warmup_num_steps": 100,
-                "warmup_type": "linear",
-            },
-        },
-        "fp16": {
-            "enabled": config.precision == "fp16",
-        },
-        "bf16": {
-            "enabled": config.precision == "bf16",
-        },
-        "gradient_clipping": 1.0,
-        "zero_optimization": {
-            "stage": 2,
-            "contiguous_gradients": True,
-            "overlap_comm": True,
-            "reduce_scatter": True,
-            "reduce_bucket_size": 5e8,
-            "allgather_bucket_size": 5e8,
-        },
-    }
-
+    # DeepSpeed 配置
     model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
         model=model,
         model_parameters=params_to_train,
@@ -652,7 +342,7 @@ def main():
             use_mm_start_end=config.use_mm_start_end,
             local_rank=config.local_rank,
         ),
-        config=ds_config,
+        config=config.get_deepspeed_config(),
     )
 
     # resume deepspeed checkpoint
