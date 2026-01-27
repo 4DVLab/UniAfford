@@ -154,7 +154,7 @@ class TrainingConfig:
         grad_accumulation_steps=10,
         val_batch_size=1,
         workers=4,
-        lr=0.0003,
+        lr=0.003,
         beta1=0.9,
         beta2=0.95,
         ce_loss_weight=1.0,
@@ -219,6 +219,12 @@ class TrainingConfig:
         self.beta1 = beta1
         self.beta2 = beta2
         
+        # 分层学习率配置（可选）
+        self.llm_lr = lr * 0.1  # LLM 部分使用较小的学习率
+        self.vision_2d_lr = lr  # 2D 视觉部分使用标准学习率
+        self.vision_3d_lr = lr  # 3D 点云部分使用标准学习率
+        self.use_layerwise_lr = True  # 是否启用分层学习率
+        
         # 损失权重
         self.ce_loss_weight = ce_loss_weight
         self.dice_loss_weight = dice_loss_weight
@@ -271,6 +277,89 @@ class TrainingConfig:
             raise ValueError(f"conv_type must be one of ['llava_v1', 'llava_llama_2'], got {self.conv_type}")
     
 params_to_train = []
+
+
+def create_param_groups(model, config):
+    """
+    创建参数组，为不同模块设置不同的学习率
+    
+    Args:
+        model: LISA 模型
+        config: 训练配置
+        
+    Returns:
+        param_groups: 参数组列表，每组包含参数和对应的学习率
+    """
+    if not config.use_layerwise_lr:
+        # 不使用分层学习率，返回所有可训练参数
+        return [p for p in model.parameters() if p.requires_grad]
+    
+    # 分组参数
+    llm_params = []          # LLM 部分（LoRA 层）
+    vision_2d_params = []    # 2D 视觉部分（SAM mask_decoder, text_hidden_fcs）
+    vision_3d_params = []    # 3D 点云部分（point_cloud_segmentor）
+    other_params = []        # 其他参数（mm_projector, lm_head, embed_tokens）
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        
+        # LLM 部分（LoRA 层）
+        if 'lora_' in name or 'base_layer' in name:
+            llm_params.append(param)
+            print(f"[LLM] {name}")
+        
+        # 2D 视觉部分
+        elif 'mask_decoder' in name or 'text_hidden_fcs' in name:
+            vision_2d_params.append(param)
+            print(f"[2D Vision] {name}")
+        
+        # 3D 点云部分
+        elif 'point_cloud_segmentor' in name:
+            vision_3d_params.append(param)
+            print(f"[3D Vision] {name}")
+        
+        # 其他参数
+        else:
+            other_params.append(param)
+            print(f"[Other] {name}")
+    
+    # 创建参数组
+    param_groups = []
+    
+    if llm_params:
+        param_groups.append({
+            'params': llm_params,
+            'lr': config.llm_lr,
+            'name': 'llm'
+        })
+        print(f"\n✓ LLM 参数组: {len(llm_params)} 个参数, lr={config.llm_lr}")
+    
+    if vision_2d_params:
+        param_groups.append({
+            'params': vision_2d_params,
+            'lr': config.vision_2d_lr,
+            'name': 'vision_2d'
+        })
+        print(f"✓ 2D 视觉参数组: {len(vision_2d_params)} 个参数, lr={config.vision_2d_lr}")
+    
+    if vision_3d_params:
+        param_groups.append({
+            'params': vision_3d_params,
+            'lr': config.vision_3d_lr,
+            'name': 'vision_3d'
+        })
+        print(f"✓ 3D 视觉参数组: {len(vision_3d_params)} 个参数, lr={config.vision_3d_lr}")
+    
+    if other_params:
+        param_groups.append({
+            'params': other_params,
+            'lr': config.lr,
+            'name': 'other'
+        })
+        print(f"✓ 其他参数组: {len(other_params)} 个参数, lr={config.lr}\n")
+    
+    return param_groups
 
 
 def preprocess_input_data(input_dict, precision):
@@ -463,11 +552,21 @@ def main():
         model.print_trainable_parameters()
 
     
-    params_to_train = [p for p in model.parameters() if p.requires_grad]
+    params_to_train = create_param_groups(model, config)
+    
     # 打印检查
-    print(f"\n最终训练参数统计:")
-    print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
-    print(f"Trainable parameters: {len(params_to_train)} tensors, {sum(p.numel() for p in params_to_train)} elements")
+    if isinstance(params_to_train, list) and len(params_to_train) > 0:
+        if isinstance(params_to_train[0], dict):
+            # 参数组模式
+            total_params = sum(sum(p.numel() for p in group['params']) for group in params_to_train)
+            print(f"\n最终训练参数统计 (分层学习率模式):")
+            print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+            print(f"Trainable parameters: {total_params} elements in {len(params_to_train)} groups")
+        else:
+            # 单一学习率模式
+            print(f"\n最终训练参数统计 (单一学习率模式):")
+            print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
+            print(f"Trainable parameters: {len(params_to_train)} tensors, {sum(p.numel() for p in params_to_train)} elements")
     
     if len(params_to_train) == 0:
         raise ValueError("严重错误：没有发现可训练参数！请检查冻结逻辑。")
@@ -510,7 +609,7 @@ def main():
         "optimizer": {
             "type": "AdamW",
             "params": {
-                "lr": config.lr,
+                "lr": config.lr,  # 默认学习率（当不使用参数组时）
                 "weight_decay": 0.0,
                 "betas": (config.beta1, config.beta2),
             },
@@ -520,7 +619,7 @@ def main():
             "params": {
                 "total_num_steps": config.epochs * config.steps_per_epoch,
                 "warmup_min_lr": 0,
-                "warmup_max_lr": config.lr,
+                "warmup_max_lr": config.lr,  # 使用最大学习率作为 warmup 目标
                 "warmup_num_steps": 100,
                 "warmup_type": "linear",
             },
