@@ -1,15 +1,16 @@
 import torch
 import torch.nn.functional as F
+from typing import Dict, Tuple, Optional, List
 
 """
 默认输入形状：
-    img_pred/gt.shape = [Batch, height, width, 1]
-    pc_pred/gt.shape = [Batch, num_points, 1]
+    img_pred/gt.shape = [Batch, height, width]
+    pc_pred/gt.shape = [Batch, num_points]
 """
 
 """ -------------------------------------- 辅助函数 ------------------------------------- """
 # Blue Archwve I and you ~ QAQ
-def BA_I_and_U(pred_mask: torch.Tensor, gt_mask: torch.Tensor) -> tuple(torch.Tensor, torch.Tensor):
+def BA_I_and_U(pred_mask: torch.Tensor, gt_mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     批量计算交集和并集
     Returns:
@@ -42,9 +43,9 @@ def img_DICE_loss(
     """
     batch_size = inputs.shape[0]
     
-    inputs = inputs.sigmoid()  # [Batch, H, W, 1]
-    inputs = inputs.flatten(1)  # [Batch, H*W*1]
-    targets = targets.flatten(1)  # [Batch, H*W*1]
+    inputs = inputs.sigmoid()  # [Batch, H, W]
+    inputs = inputs.flatten(1)  # [Batch, H*W]
+    targets = targets.flatten(1)  # [Batch, H*W]
     
     # 逐样本计算 Dice 系数
     numerator = 2 * (inputs / scale * targets).sum(dim=1)  # [Batch]
@@ -74,7 +75,7 @@ def img_loss(
     gt_masks: torch.Tensor,
     bce_loss_weight: float,
     dice_loss_weight: float,
-) -> tuple(torch.Tensor, torch.Tensor, torch.Tensor):
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     批量计算2D掩码总损失（BCE + Dice）
     Returns:
@@ -112,7 +113,7 @@ def pc_loss(
     gt_3d_masks: torch.Tensor,
     bce_loss_weight: float,
     dice_loss_weight: float,
-) -> tuple(torch.Tensor, torch.Tensor, torch.Tensor):
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     批量计算3D点云掩码总损失（BCE + Dice）
     Returns:
@@ -324,8 +325,8 @@ def pc_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.
     批量计算点云IoU
     
     Args:
-        pred_mask: [Batch, N, 1] 预测掩码，值域 [0, 1]
-        gt_mask: [Batch, N, 1] 真实掩码，值域 {0, 1}
+        pred_mask: [Batch, N] 预测掩码，值域 [0, 1]
+        gt_mask: [Batch, N] 真实掩码，值域 {0, 1}
         threshold: 二值化阈值
         
     Returns:
@@ -350,8 +351,8 @@ def img_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0
     批量计算2D图像IoU
     
     Args:
-        pred_mask: [Batch, H, W, 1] 预测掩码，值域 [0, 1]
-        gt_mask: [Batch, H, W, 1] 真实掩码，值域 {0, 1}
+        pred_mask: [Batch, H, W] 预测掩码，值域 [0, 1]
+        gt_mask: [Batch, H, W] 真实掩码，值域 {0, 1}
         threshold: 二值化阈值
         
     Returns:

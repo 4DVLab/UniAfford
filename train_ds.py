@@ -16,6 +16,7 @@ from utils.dataset import DatasetManager, collate_fn
 from utils.common import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
                           ProgressMeter, dict_to_cuda)
 from utils.metrics import (
+    AverageMeter,
     MetricsTracker,
     TensorBoardLogger,
     evaluate_segmentation_batch,
@@ -519,7 +520,7 @@ def train(
                     gt_masks=output_dict["gt_masks"] if output_dict["has_image"] else torch.empty(0),
                     bce_loss_weight=model_engine.module.bce_loss_weight,
                     dice_loss_weight=model_engine.module.dice_loss_weight,
-                ) if output_dict.get("has_image") and len(output_dict.get("pred_masks", [])) > 0 else (
+                ) if output_dict.get("has_image") and output_dict.get("pred_masks") is not None else (
                     torch.tensor(0.0, device=ce_loss.device),
                     torch.tensor(0.0, device=ce_loss.device),
                     torch.tensor(0.0, device=ce_loss.device)
@@ -531,7 +532,7 @@ def train(
                     gt_3d_masks=output_dict["gt_3d_masks"] if output_dict["has_point_cloud"] else torch.empty(0),
                     bce_loss_weight=model_engine.module.bce_loss_weight,
                     dice_loss_weight=model_engine.module.dice_loss_weight,
-                ) if output_dict.get("has_point_cloud") and len(output_dict.get("pred_3d_masks", [])) > 0 else (
+                ) if output_dict.get("has_point_cloud") and output_dict.get("pred_3d_masks") is not None else (
                     torch.tensor(0.0, device=ce_loss.device),
                     torch.tensor(0.0, device=ce_loss.device),
                     torch.tensor(0.0, device=ce_loss.device)

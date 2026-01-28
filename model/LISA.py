@@ -309,43 +309,77 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         
         Args:
             pred_embeddings_list: 按样本分组的预测嵌入列表
-            image_embeddings: SAM 图像嵌入
+            image_embeddings: SAM 图像嵌入 [B, C, H, W]
             resize_list: 图像尺寸调整列表
             original_size_list: 原始图像尺寸列表
             
         Returns:
-            pred_masks: 预测的 2D 掩码列表
+            pred_masks: 预测的 2D 掩码张量 [B, H, W] 或 None（如果所有样本都没有有效嵌入）
         """
-        pred_masks = []
+        batch_size = len(pred_embeddings_list)
         multimask_output = False
         
-        for i in range(len(pred_embeddings_list)):
-            if len(pred_embeddings_list[i]) > 0:
-                # 将文本特征转换为 SAM 提示嵌入
-                (sparse_embeddings, dense_embeddings) = self.model.visual_model.prompt_encoder(
-                    points=None, boxes=None, masks=None,
-                    text_embeds=pred_embeddings_list[i].unsqueeze(1),
-                )
-                sparse_embeddings = sparse_embeddings.to(pred_embeddings_list[i].dtype)
-                
-                # 使用 SAM 的 mask decoder 生成掩码
-                low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
-                    image_embeddings=image_embeddings[i].unsqueeze(0),
-                    image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
-                    sparse_prompt_embeddings=sparse_embeddings,
-                    dense_prompt_embeddings=dense_embeddings,
-                    multimask_output=multimask_output,
-                )
-                
-                # 后处理掩码：调整到原始图像尺寸
-                pred_mask = self.model.visual_model.postprocess_masks(
-                    low_res_masks,
-                    input_size=resize_list[i],
-                    original_size=original_size_list[i],
-                )
-                pred_masks.append(pred_mask[:, 0])
+        # 检查哪些样本有有效的嵌入
+        valid_indices = [i for i in range(batch_size) if len(pred_embeddings_list[i]) > 0]
         
-        return pred_masks
+        if len(valid_indices) == 0:
+            # 所有样本都没有特殊 token，返回 None
+            return None
+        
+        # 收集有效样本的掩码
+        pred_masks_list = []
+        
+        for i in valid_indices:
+            # 将文本特征转换为 SAM 提示嵌入
+            (sparse_embeddings, dense_embeddings) = self.model.visual_model.prompt_encoder(
+                points=None, boxes=None, masks=None,
+                text_embeds=pred_embeddings_list[i].unsqueeze(1),
+            )
+            sparse_embeddings = sparse_embeddings.to(pred_embeddings_list[i].dtype)
+            
+            # 使用 SAM 的 mask decoder 生成掩码
+            low_res_masks, iou_predictions = self.model.visual_model.mask_decoder(
+                image_embeddings=image_embeddings[i].unsqueeze(0),
+                image_pe=self.model.visual_model.prompt_encoder.get_dense_pe(),
+                sparse_prompt_embeddings=sparse_embeddings,
+                dense_prompt_embeddings=dense_embeddings,
+                multimask_output=multimask_output,
+            )
+            
+            # 后处理掩码：调整到原始图像尺寸
+            pred_mask = self.model.visual_model.postprocess_masks(
+                low_res_masks,
+                input_size=resize_list[i],
+                original_size=original_size_list[i],
+            )
+            pred_masks_list.append(pred_mask[:, 0])  # [num_tokens, H, W]
+        
+        # 将列表转换为张量 [B_valid, num_tokens, H, W]
+        # 注意：每个样本可能有不同数量的 token，这里假设每个样本只有一个 token
+        # 如果有多个 token，取平均或最大值
+        batch_pred_masks = []
+        for pred_mask in pred_masks_list:
+            if pred_mask.shape[0] > 1:
+                # 多个 token，取平均
+                pred_mask = pred_mask.mean(dim=0, keepdim=True)  # [1, H, W]
+            batch_pred_masks.append(pred_mask[0])  # [H, W]
+        
+        # 堆叠成 [B_valid, H, W]
+        batch_pred_masks = torch.stack(batch_pred_masks, dim=0)
+        
+        # 为无效样本填充零掩码
+        if len(valid_indices) < batch_size:
+            H, W = batch_pred_masks.shape[1], batch_pred_masks.shape[2]
+            full_pred_masks = torch.zeros(
+                batch_size, H, W,
+                dtype=batch_pred_masks.dtype,
+                device=batch_pred_masks.device
+            )
+            for idx, valid_idx in enumerate(valid_indices):
+                full_pred_masks[valid_idx] = batch_pred_masks[idx]
+            return full_pred_masks
+        else:
+            return batch_pred_masks
     
     def _generate_3d_masks(self, pred_embeddings_list, point_clouds):
         """
@@ -356,7 +390,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             point_clouds: 点云数据 [B, 3, N]
             
         Returns:
-            pred_3d_masks: 预测的 3D 掩码列表，每个元素形状 [N]
+            pred_3d_masks: 预测的 3D 掩码张量 [B, N] 或 None（如果所有样本都没有有效嵌入）
         """
         # 确保点云格式为 [B, 3, N]
         if point_clouds.shape[1] != 3:
@@ -369,9 +403,8 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         valid_indices = [i for i in range(batch_size) if len(pred_embeddings_list[i]) > 0]
         
         if len(valid_indices) == 0:
-            # 所有样本都没有特殊 token，返回全零掩码
-            return [torch.zeros(num_points, dtype=point_clouds.dtype, device=point_clouds.device) 
-                    for _ in range(batch_size)]
+            # 所有样本都没有特殊 token，返回 None
+            return None
         
         # 准备批处理数据
         # 1. 收集有效样本的点云
@@ -406,19 +439,20 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         )  # [B_valid, N]
         
         # 4. 重组输出，为无效样本填充零掩码
-        pred_3d_masks = []
-        valid_idx_counter = 0
-        for i in range(batch_size):
-            if i in valid_indices:
-                pred_3d_masks.append(batch_pred_3d_masks[valid_idx_counter])
-                valid_idx_counter += 1
-            else:
-                # 没有特殊 token，返回全零掩码
-                pred_3d_masks.append(
-                    torch.zeros(num_points, dtype=point_clouds.dtype, device=point_clouds.device)
-                )
-        
-        return pred_3d_masks
+        if len(valid_indices) < batch_size:
+            # 创建完整的批次张量
+            full_pred_3d_masks = torch.zeros(
+                batch_size, num_points,
+                dtype=batch_pred_3d_masks.dtype,
+                device=batch_pred_3d_masks.device
+            )
+            # 填充有效样本的预测
+            for idx, valid_idx in enumerate(valid_indices):
+                full_pred_3d_masks[valid_idx] = batch_pred_3d_masks[idx]
+            return full_pred_3d_masks
+        else:
+            # 所有样本都有效，直接返回
+            return batch_pred_3d_masks
 
     def model_forward(
         self,
@@ -588,22 +622,39 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         pred_embeddings = pred_embeddings_
 
         # ========== 2D 分割：使用 SAM 生成分割掩码（仅在有图像输入时）==========
-        pred_masks = []
+        pred_masks = None
+        gt_masks_tensor = None
         if has_image:
             pred_masks = self._generate_2d_masks(pred_embeddings, image_embeddings, resize_list, original_size_list)
+            
+            # 将 GT 掩码列表转换为批量张量 [B, H, W]
+            if masks_list is not None and len(masks_list) > 0:
+                # 假设所有掩码形状相同
+                gt_masks_tensor = torch.stack([
+                    mask.squeeze(-1) if mask.dim() == 3 else mask
+                    for mask in masks_list
+                ], dim=0)  # [B, H, W]
 
         # ========== 3D 分割：使用 PointNet++ 处理点云（仅在有点云输入时）==========
-        pred_3d_masks = []
+        pred_3d_masks = None
+        gt_3d_masks_tensor = None
         if has_point_cloud:
             pred_3d_masks = self._generate_3d_masks(pred_embeddings, point_clouds)
+            
+            # 将 GT 掩码列表转换为批量张量 [B, N]
+            if point_masks_list is not None and len(point_masks_list) > 0:
+                gt_3d_masks_tensor = torch.stack([
+                    mask.squeeze(-1) if mask.dim() == 2 else mask
+                    for mask in point_masks_list
+                ], dim=0)  # [B, N]
 
         # 返回预测结果和中间数据
         return {
             "output": output,  # 语言模型输出
-            "pred_masks": pred_masks if has_image else None,
-            "gt_masks": masks_list if has_image else None,
-            "pred_3d_masks": pred_3d_masks if has_point_cloud else None,
-            "gt_3d_masks": point_masks_list if has_point_cloud else None,
+            "pred_masks": pred_masks,  # [B, H, W] 或 None
+            "gt_masks": gt_masks_tensor,  # [B, H, W] 或 None
+            "pred_3d_masks": pred_3d_masks,  # [B, N] 或 None
+            "gt_3d_masks": gt_3d_masks_tensor,  # [B, N] 或 None
             "has_image": has_image,
             "has_point_cloud": has_point_cloud,
             "inference": inference,
