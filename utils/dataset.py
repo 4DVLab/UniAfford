@@ -235,7 +235,8 @@ class DatasetManager:
                  num_points: int = 2048,
                  train_ratio: float = 0.7, val_ratio: float = 0.15,
                  test_ratio: float = 0.15, random_seed: int = 42,
-                 use_mm_start_end: bool = False):
+                 use_mm_start_end: bool = False,
+                 conv_type: str = None):
         """
         初始化数据集管理器
         
@@ -264,6 +265,7 @@ class DatasetManager:
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
         self.random_seed = random_seed
+        self.conv_type = conv_type
         self.use_mm_start_end = use_mm_start_end
         
         # 只创建一次 JointDataset
@@ -282,6 +284,7 @@ class DatasetManager:
                 num_points=self.num_points,
                 tokenizer=self.tokenizer,
                 precision=self.precision,
+                conv_type = self.conv_type,
                 use_mm_start_end=self.use_mm_start_end,
             )
         self._val_dataset = BaseDataset(
@@ -289,6 +292,8 @@ class DatasetManager:
                 image_size=self.image_size,
                 num_points=self.num_points,
                 precision=self.precision,
+                tokenizer=self.tokenizer,
+                conv_type = self.conv_type,
                 use_mm_start_end=self.use_mm_start_end,
             )
         self._test_dataset = BaseDataset(
@@ -296,6 +301,8 @@ class DatasetManager:
                 image_size=self.image_size,
                 num_points=self.num_points,
                 precision=self.precision,
+                tokenizer=self.tokenizer,
+                conv_type = self.conv_type,
                 use_mm_start_end=self.use_mm_start_end,
             )
     

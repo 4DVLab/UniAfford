@@ -265,7 +265,9 @@ def main():
         train_ratio=config.train_ratio,
         val_ratio=config.val_ratio,
         test_ratio=config.test_ratio,
-        use_mm_start_end=config.use_mm_start_end,  # 传递给 Dataset 用于预处理
+        use_mm_start_end=config.use_mm_start_end,
+        tokenizer=tokenizer,
+        conv_type = config.conv_type,
     )
     
     train_dataset = dataset_manager.get_train_dataset()
@@ -431,6 +433,8 @@ def train(
             loss_meters["mask_bce_loss"],
             loss_meters["mask_dice_loss"],
             loss_meters["mask_3d_loss"],
+            loss_meters["mask_3d_bce_loss"],
+            loss_meters["mask_3d_dice_loss"],
         ],
         prefix="Epoch: [{}]".format(epoch),
     )
