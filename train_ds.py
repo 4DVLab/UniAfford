@@ -287,10 +287,7 @@ def main():
         training_data=train_dataset,
         collate_fn=partial(
             collate_fn,
-            tokenizer=tokenizer,
-            conv_type=config.conv_type,
-            use_mm_start_end=config.use_mm_start_end,
-            local_rank=config.local_rank,
+            tokenizer=tokenizer
         ),
         config=config.get_deepspeed_config(),
     )
@@ -329,10 +326,7 @@ def main():
             sampler=val_sampler,
             collate_fn=partial(
                 collate_fn,
-                tokenizer=tokenizer,
-                conv_type=config.conv_type,
-                use_mm_start_end=config.use_mm_start_end,
-                local_rank=config.local_rank,
+                tokenizer=tokenizer
             ),
         )
 

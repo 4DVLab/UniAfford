@@ -154,8 +154,8 @@ class BaseDataset(Dataset):
         question_prompt = conv.get_prompt()
         
         # 分别对问题和回答进行分词
-        question_ids = tokenizer_image_token(question_prompt, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
-        answer_ids = tokenizer_image_token(answer, tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+        question_ids = tokenizer_image_token(question_prompt, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
+        answer_ids = tokenizer_image_token(answer, self.tokenizer, IMAGE_TOKEN_INDEX, return_tensors="pt")
         
         # 合并 input_ids：问题 + 回答
         input_ids = torch.cat([question_ids, answer_ids], dim=0)
@@ -306,7 +306,7 @@ class DatasetManager:
                 use_mm_start_end=self.use_mm_start_end,
             )
     
-    def get_dataset(self) -> 'BaseDataset':
+    def get_train_dataset(self) -> 'BaseDataset':
         """获取训练数据集"""
         return self._train_dataset
     
@@ -322,7 +322,7 @@ class DatasetManager:
         return self.get_train_dataset(), self.get_val_dataset(), self.get_test_dataset()
 
 
-def collate_fn(batch: List[Dict], tokenizer=None, local_rank: int = 0) -> Dict[str, Any]:
+def collate_fn(batch: List[Dict], tokenizer=None) -> Dict[str, Any]:
     """
     批量数据整理函数（优化版：conversation 已在预处理阶段构建）
     
@@ -333,9 +333,6 @@ def collate_fn(batch: List[Dict], tokenizer=None, local_rank: int = 0) -> Dict[s
     Args:
         batch: 样本列表，每个样本是一个字典
         tokenizer: 分词器
-        conv_type: 对话类型
-        use_mm_start_end: 是否使用多模态开始/结束标记
-        local_rank: 本地进程排名
         
     Returns:
         包含模型输入的字典
