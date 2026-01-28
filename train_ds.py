@@ -14,7 +14,7 @@ from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
 from utils.dataset import DatasetManager, collate_fn
 from utils.common import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
-                          ProgressMeter)
+                          ProgressMeter, dict_to_cuda)
 from utils.metrics import (
     AverageMeter,
     MetricsTracker,
@@ -445,6 +445,7 @@ def train(
                 train_iter = iter(train_loader)
                 input_dict = next(train_iter)
 
+            input_dict = dict_to_cuda(input_dict)
             data_time.update(time.time() - end)
 
             # 调用魔改后的 LISA 模型
@@ -567,6 +568,7 @@ def validate(val_loader, model_engine, epoch, writer, config):
         torch.cuda.empty_cache()
 
         with torch.no_grad():
+            input_dict = dict_to_cuda(input_dict)
             output_dict = model_engine(**input_dict, inference=True)
 
         # 使用统一的评估函数（支持批处理）

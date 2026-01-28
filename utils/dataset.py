@@ -528,12 +528,5 @@ def collate_fn(batch: List[Dict], tokenizer=None) -> Dict[str, Any]:
     
     # 添加有效性标记
     result['pc_valid_mask'] = torch.tensor(has_pc_flags, dtype=torch.bool)
-
-    """ ------------------------------------- 移动到显卡上 ------------------------------------- """
-    for k, v in result.items():
-        if isinstance(v, torch.Tensor):
-            result[k] = v.cuda(non_blocking=True)
-        elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], torch.Tensor):
-            result[k] = [item.cuda(non_blocking=True) for item in v]
-
+    
     return result
