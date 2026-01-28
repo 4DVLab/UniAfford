@@ -246,19 +246,37 @@ class TestDataset(_BaseDataset):
 def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
                use_mm_start_end: bool = False, local_rank: int = 0) -> Dict[str, Any]:
     """
-    批量数据整理函数
+    批量数据整理函数（支持动态batch size和模态padding）
     
     将数据集返回的样本整理成模型所需的输入格式，支持图像和点云两种模态。
+    自动处理不同模态数据的padding和对齐，确保批次内数据形状一致。
+    
+    功能特性：
+    1. 动态batch size：自动适应不同大小的批次
+    2. 模态padding：对图像和点云数据进行智能padding
+    3. 序列对齐：对文本序列进行padding和attention mask生成
+    4. 有效性标记：标记每个样本包含的模态类型（类似attention mask）
     
     Args:
-        batch: 样本列表
+        batch: 样本列表，每个样本是一个字典
         tokenizer: 分词器
         conv_type: 对话类型
         use_mm_start_end: 是否使用多模态开始/结束标记
         local_rank: 本地进程排名
         
     Returns:
-        包含模型输入的字典
+        包含模型输入的字典，包括：
+        - input_ids: [Batch, SeqLen] 文本输入
+        - labels: [Batch, SeqLen] 标签
+        - attention_masks: [Batch, SeqLen] 文本注意力掩码（标记有效token）
+        - images: [Batch, 3, H, W] 图像数据（如果有）
+        - images_clip: [Batch, 3, H, W] CLIP图像数据（如果有）
+        - masks_list: List[Tensor] 图像分割标注掩码（Ground Truth）
+        - point_clouds: [Batch, N, 3] 点云数据（如果有）
+        - point_masks_list: List[Tensor] 点云分割标注掩码（Ground Truth）
+        - image_valid_mask: [Batch] 图像模态有效性标记（标记哪些样本有图像）
+        - pc_valid_mask: [Batch] 点云模态有效性标记（标记哪些样本有点云）
+        - point_valid_lengths: [Batch] 每个样本的有效点数（用于处理padding）
     """
     from model.llava import conversation as conversation_lib
     from model.llava.mm_utils import tokenizer_image_token
@@ -413,13 +431,66 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
         'offset': torch.tensor([0] + [i + 1 for i in range(batch_size)], dtype=torch.long),
     }
     
-    # 处理图像数据
+    # 处理图像数据（支持不同尺寸的padding）
     if images_list:
-        result['images'] = torch.stack(images_list)
-        result['images_clip'] = torch.stack(images_clip_list)
-        result['masks_list'] = masks_list
-        result['resize_list'] = [(img.shape[1], img.shape[2]) for img in images_list]
-        result['original_size_list'] = [mask.shape[-2:] for mask in masks_list] if masks_list else []
+        # 检查所有图像是否具有相同的尺寸
+        image_shapes = [img.shape for img in images_list]
+        
+        if len(set(image_shapes)) > 1:
+            # 尺寸不一致，需要padding到最大尺寸
+            max_h = max(img.shape[1] for img in images_list)
+            max_w = max(img.shape[2] for img in images_list)
+            
+            padded_images = []
+            padded_images_clip = []
+            padded_masks = []
+            resize_list = []
+            original_size_list = []
+            
+            for i, img in enumerate(images_list):
+                c, h, w = img.shape
+                
+                # Padding图像
+                if h < max_h or w < max_w:
+                    pad_h = max_h - h
+                    pad_w = max_w - w
+                    # 使用零填充（黑色背景）
+                    padded_img = torch.nn.functional.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0)
+                else:
+                    padded_img = img
+                padded_images.append(padded_img)
+                padded_images_clip.append(padded_img)  # CLIP使用相同的padding
+                
+                # Padding掩码
+                if masks_list and i < len(masks_list):
+                    mask = masks_list[i]
+                    if mask.dim() == 2:
+                        mask = mask.unsqueeze(0)  # [H, W] -> [1, H, W]
+                    
+                    mask_h, mask_w = mask.shape[1], mask.shape[2]
+                    if mask_h < max_h or mask_w < max_w:
+                        pad_h = max_h - mask_h
+                        pad_w = max_w - mask_w
+                        padded_mask = torch.nn.functional.pad(mask, (0, pad_w, 0, pad_h), mode='constant', value=0)
+                    else:
+                        padded_mask = mask
+                    padded_masks.append(padded_mask)
+                    original_size_list.append((mask_h, mask_w))
+                
+                resize_list.append((h, w))
+            
+            result['images'] = torch.stack(padded_images)  # [Batch, 3, MaxH, MaxW]
+            result['images_clip'] = torch.stack(padded_images_clip)  # [Batch, 3, MaxH, MaxW]
+            result['masks_list'] = padded_masks if padded_masks else None
+            result['resize_list'] = resize_list  # 记录每个样本的原始尺寸
+            result['original_size_list'] = original_size_list if original_size_list else []
+        else:
+            # 尺寸一致，直接stack
+            result['images'] = torch.stack(images_list)
+            result['images_clip'] = torch.stack(images_clip_list)
+            result['masks_list'] = masks_list
+            result['resize_list'] = [(img.shape[1], img.shape[2]) for img in images_list]
+            result['original_size_list'] = [mask.shape[-2:] for mask in masks_list] if masks_list else []
     else:
         # 创建占位符
         result['images'] = None
@@ -428,13 +499,49 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
         result['resize_list'] = None
         result['original_size_list'] = None
     
-    # 处理点云数据
+    # 处理点云数据（支持不同点数的padding）
     if point_clouds_list:
-        result['point_clouds'] = torch.stack(point_clouds_list)
-        result['point_masks_list'] = pc_masks_list if pc_masks_list else None
+        # 检查所有点云是否具有相同的点数
+        point_nums = [pc.shape[0] for pc in point_clouds_list]
+        max_points = max(point_nums)
+        
+        if len(set(point_nums)) > 1:
+            # 点数不一致，需要padding
+            padded_pcs = []
+            padded_pc_masks = []
+            
+            for i, pc in enumerate(point_clouds_list):
+                num_points = pc.shape[0]
+                if num_points < max_points:
+                    # Padding点云：使用零填充
+                    padding = torch.zeros(max_points - num_points, 3, dtype=pc.dtype)
+                    padded_pc = torch.cat([pc, padding], dim=0)
+                else:
+                    padded_pc = pc
+                padded_pcs.append(padded_pc)
+                
+                # Padding掩码
+                if pc_masks_list and i < len(pc_masks_list):
+                    pc_mask = pc_masks_list[i]
+                    if num_points < max_points:
+                        mask_padding = torch.zeros(max_points - num_points, dtype=pc_mask.dtype)
+                        padded_mask = torch.cat([pc_mask, mask_padding], dim=0)
+                    else:
+                        padded_mask = pc_mask
+                    padded_pc_masks.append(padded_mask)
+            
+            result['point_clouds'] = torch.stack(padded_pcs)  # [Batch, MaxPoints, 3]
+            result['point_masks_list'] = padded_pc_masks if padded_pc_masks else None
+            result['point_valid_lengths'] = torch.tensor(point_nums, dtype=torch.long)  # 记录每个样本的有效点数
+        else:
+            # 点数一致，直接stack
+            result['point_clouds'] = torch.stack(point_clouds_list)  # [Batch, NumPoints, 3]
+            result['point_masks_list'] = pc_masks_list if pc_masks_list else None
+            result['point_valid_lengths'] = torch.tensor(point_nums, dtype=torch.long)
     else:
         result['point_clouds'] = None
         result['point_masks_list'] = None
+        result['point_valid_lengths'] = None
     
     # 添加有效性标记
     result['image_valid_mask'] = torch.tensor(has_image_flags, dtype=torch.bool)
