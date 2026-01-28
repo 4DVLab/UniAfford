@@ -70,15 +70,6 @@ class ProgressMeter:
         return "[" + fmt + "/" + fmt.format(num_batches) + "]"
 
 
-def dict_to_cuda(input_dict):
-    """将字典中的所有张量移动到 CUDA 设备"""
-    for k, v in input_dict.items():
-        if isinstance(v, torch.Tensor):
-            input_dict[k] = v.cuda(non_blocking=True)
-        elif isinstance(v, list) and len(v) > 0 and isinstance(v[0], torch.Tensor):
-            input_dict[k] = [item.cuda(non_blocking=True) for item in v]
-    return input_dict
-
 def get_model_device(model):
     """获取模型所在的设备"""
     return next(model.parameters()).device

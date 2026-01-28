@@ -338,7 +338,6 @@ def evaluate_segmentation_batch(
     output_dict: Dict[str, any],
     metrics_tracker: MetricsTracker,
     mask_threshold_2d: float = 0.0,
-    mask_threshold_3d: float = 0.5,
 ):
     """
     评估一个批次的分割结果（支持批处理）
@@ -376,12 +375,12 @@ def evaluate_segmentation_batch(
             for pred_3d_mask, gt_3d_mask in zip(pred_3d_masks, gt_3d_masks):
                 if gt_3d_mask is not None:
                     metrics_tracker.update_3d_seg_metrics(
-                        pred_3d_mask, gt_3d_mask, mask_threshold_3d
+                        pred_3d_mask, gt_3d_mask
                     )
-        # 如果是批量张量 [Batch, N, 1]
+        # 如果是批量张量 [Batch, N] 或 [Batch, N, 1]
         else:
             metrics_tracker.update_3d_seg_metrics(
-                pred_3d_masks, gt_3d_masks, mask_threshold_3d
+                pred_3d_masks, gt_3d_masks
             )
 
 

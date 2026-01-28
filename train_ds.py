@@ -14,7 +14,7 @@ from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
 from utils.dataset import DatasetManager, collate_fn
 from utils.common import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
-                          ProgressMeter, dict_to_cuda)
+                          ProgressMeter)
 from utils.metrics import (
     AverageMeter,
     MetricsTracker,
@@ -265,6 +265,7 @@ def main():
         train_ratio=config.train_ratio,
         val_ratio=config.val_ratio,
         test_ratio=config.test_ratio,
+        use_mm_start_end=config.use_mm_start_end,  # 传递给 Dataset 用于预处理
     )
     
     train_dataset = dataset_manager.get_train_dataset()
@@ -323,7 +324,7 @@ def main():
             batch_size=config.val_batch_size,
             shuffle=False,
             num_workers=config.workers,
-            pin_memory=False,
+            pin_memory=True,  # 优化：启用 pinned memory 加速 CPU->GPU 传输
             sampler=val_sampler,
             collate_fn=partial(
                 collate_fn,
@@ -448,8 +449,6 @@ def train(
                 input_dict = next(train_iter)
 
             data_time.update(time.time() - end)
-            input_dict = dict_to_cuda(input_dict)
-
 
             # 调用魔改后的 LISA 模型
             output_dict = model_engine(**input_dict)
@@ -500,7 +499,7 @@ def train(
                 output_dict["mask_3d_loss"] = mask_3d_loss
 
             # 使用 MetricsTracker 更新所有损失
-            metrics_tracker.update_loss_metrics(output_dict, batch_size)
+            metrics_tracker.update_loss_metrics(output_dict, config.batch_size)
             
             model_engine.backward(output_dict["loss"])
             model_engine.step()
@@ -569,11 +568,6 @@ def validate(val_loader, model_engine, epoch, writer, config):
 
     for input_dict in tqdm(val_loader, desc='Validating'):
         torch.cuda.empty_cache()
-
-        input_dict = dict_to_cuda(input_dict)
-        
-        # 预处理输入数据（图像和点云）并计算 batch_size
-        batch_size = preprocess_input_data(input_dict, config.precision)
 
         with torch.no_grad():
             output_dict = model_engine(**input_dict, inference=True)

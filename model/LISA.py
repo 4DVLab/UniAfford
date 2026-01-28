@@ -657,5 +657,4 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             "gt_3d_masks": gt_3d_masks_tensor,  # [B, N] 或 None
             "has_image": has_image,
             "has_point_cloud": has_point_cloud,
-            "inference": inference,
         }

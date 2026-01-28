@@ -92,45 +92,6 @@ def img_loss(
 
 
 """ -------------------------------------- pc Loss ------------------------------------- """
-def pc_DICE_loss(
-    pred_mask: torch.Tensor,
-    gt_mask: torch.Tensor,
-    eps: float = 1e-6,
-) -> torch.Tensor:
-    """
-    批量计算3D Dice损失（1 - Dice系数）
-    Returns:
-        loss: 标量，所有样本的平均损失
-    """
-    intersection, union = BA_I_and_U(pred_mask, gt_mask)
-    dice = (2 * intersection + eps) / (union + eps)  # [Batch]
-    loss = 1 - dice  # [Batch]
-    return loss.mean()
-
-
-def pc_loss(
-    pred_3d_masks: torch.Tensor,
-    gt_3d_masks: torch.Tensor,
-    bce_loss_weight: float,
-    dice_loss_weight: float,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """
-    批量计算3D点云掩码总损失（BCE + Dice）
-    Returns:
-        mask_3d_bce_loss: BCE损失
-        mask_3d_dice_loss: Dice损失
-        mask_3d_loss: 总损失
-    """
-    mask_3d_bce_loss = sigmoid_CE_loss(pred_3d_masks, gt_3d_masks)
-    mask_3d_dice_loss = pc_DICE_loss(pred_3d_masks, gt_3d_masks)
-    
-    mask_3d_loss = bce_loss_weight * mask_3d_bce_loss + dice_loss_weight * mask_3d_dice_loss
-    
-    return mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss
-
-
-""" -------------------------------------- 热力图损失 ------------------------------------- """
-
 def MSE_loss(pred_heatmap: torch.Tensor, target_heatmap: torch.Tensor) -> torch.Tensor:
     """
     批量计算热力图MSE损失
@@ -174,6 +135,27 @@ def dice_loss_heatmap(pred_heatmap: torch.Tensor, target_heatmap: torch.Tensor, 
     dice = (2 * intersection + eps) / (union + eps)  # [Batch]
     loss = 1 - dice  # [Batch]
     return loss.mean()
+
+
+def pc_loss(
+    pred_3d_masks: torch.Tensor,
+    gt_3d_masks: torch.Tensor,
+    bce_loss_weight: float,
+    dice_loss_weight: float,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    批量计算3D点云掩码总损失（BCE + Dice）
+    Returns:
+        mask_3d_bce_loss: BCE损失
+        mask_3d_dice_loss: Dice损失
+        mask_3d_loss: 总损失
+    """
+    mask_3d_bce_loss = sigmoid_CE_loss(pred_3d_masks, gt_3d_masks)
+    mask_3d_dice_loss = dice_loss_heatmap(pred_3d_masks, gt_3d_masks)
+    
+    mask_3d_loss = bce_loss_weight * mask_3d_bce_loss + dice_loss_weight * mask_3d_dice_loss
+    
+    return mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss
 
 
 """ -------------------------------------- 虚拟损失 ------------------------------------- """
