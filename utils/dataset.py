@@ -100,6 +100,7 @@ class DatasetManager:
                 samples=self.joint_dataset.val_samples,
                 image_size=self.image_size,
                 num_points=self.num_points,
+                precision=self.precision,
             )
         return self._val_dataset
     
@@ -110,6 +111,7 @@ class DatasetManager:
                 samples=self.joint_dataset.test_samples,
                 image_size=self.image_size,
                 num_points=self.num_points,
+                precision=self.precision,
             )
         return self._test_dataset
     
@@ -121,10 +123,11 @@ class DatasetManager:
 class _BaseDataset(Dataset):
     """数据集基类，提供通用的数据处理方法"""
     
-    def __init__(self, samples: List[JointDataSample], image_size: int = 1024, num_points: int = 2048):
+    def __init__(self, samples: List[JointDataSample], image_size: int = 1024, num_points: int = 2048, precision: str = "fp32"):
         self.samples = samples
         self.image_size = image_size
         self.num_points = num_points
+        self.precision = precision  # 添加精度属性
     
     def _process_sample(self, sample: JointDataSample) -> Dict[str, Any]:
         """处理单个样本，返回标准化的数据字典，增加缓存以加速重复访问"""
@@ -145,6 +148,7 @@ class _BaseDataset(Dataset):
             'aff_type': sample.aff_type,
             'has_image': False,
             'has_point_cloud': False,
+            'precision': getattr(self, 'precision', 'fp32'),  # 添加精度信息
         }
         
         # 处理图像数据
@@ -192,10 +196,9 @@ class HybridDataset(_BaseDataset):
     def __init__(self, samples: List[JointDataSample], samples_per_epoch: int = 10000,
                  image_size: int = 1024, num_points: int = 2048,
                  tokenizer=None, precision: str = "bf16"):
-        super().__init__(samples, image_size, num_points)
+        super().__init__(samples, image_size, num_points, precision)
         self.tokenizer = tokenizer
         self.samples_per_epoch = samples_per_epoch
-        self.precision = precision
         self.num_samples = len(self.samples)
         
         # 只创建一个 epoch 大小的打乱索引，避免内存爆炸
@@ -220,8 +223,8 @@ class HybridDataset(_BaseDataset):
 class ValDataset(_BaseDataset):
     """验证数据集"""
     
-    def __init__(self, samples: List[JointDataSample], image_size: int = 1024, num_points: int = 2048):
-        super().__init__(samples, image_size, num_points)
+    def __init__(self, samples: List[JointDataSample], image_size: int = 1024, num_points: int = 2048, precision: str = "fp32"):
+        super().__init__(samples, image_size, num_points, precision)
     
     def __len__(self): 
         return len(self.samples)
@@ -233,8 +236,8 @@ class ValDataset(_BaseDataset):
 class TestDataset(_BaseDataset):
     """测试数据集"""
     
-    def __init__(self, samples: List[JointDataSample], image_size: int = 1024, num_points: int = 2048):
-        super().__init__(samples, image_size, num_points)
+    def __init__(self, samples: List[JointDataSample], image_size: int = 1024, num_points: int = 2048, precision: str = "fp32"):
+        super().__init__(samples, image_size, num_points, precision)
     
     def __len__(self): 
         return len(self.samples)
@@ -466,6 +469,8 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
                     mask = masks_list[i]
                     if mask.dim() == 2:
                         mask = mask.unsqueeze(0)  # [H, W] -> [1, H, W]
+                    elif mask.dim() == 3 and mask.shape[0] == 1:
+                        pass  # 已经是 [1, H, W]
                     
                     mask_h, mask_w = mask.shape[1], mask.shape[2]
                     if mask_h < max_h or mask_w < max_w:
@@ -474,23 +479,35 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
                         padded_mask = torch.nn.functional.pad(mask, (0, pad_w, 0, pad_h), mode='constant', value=0)
                     else:
                         padded_mask = mask
-                    padded_masks.append(padded_mask)
+                    # 去掉第一个维度，变成 [H, W]
+                    padded_masks.append(padded_mask.squeeze(0))
                     original_size_list.append((mask_h, mask_w))
                 
                 resize_list.append((h, w))
             
             result['images'] = torch.stack(padded_images)  # [Batch, 3, MaxH, MaxW]
             result['images_clip'] = torch.stack(padded_images_clip)  # [Batch, 3, MaxH, MaxW]
-            result['masks_list'] = padded_masks if padded_masks else None
+            # 将 masks_list 转换为张量 [Batch, H, W]
+            result['masks_list'] = torch.stack(padded_masks) if padded_masks else None
             result['resize_list'] = resize_list  # 记录每个样本的原始尺寸
             result['original_size_list'] = original_size_list if original_size_list else []
         else:
             # 尺寸一致，直接stack
             result['images'] = torch.stack(images_list)
             result['images_clip'] = torch.stack(images_clip_list)
-            result['masks_list'] = masks_list
+            # 将 masks_list 转换为张量 [Batch, H, W]
+            if masks_list:
+                # 确保所有mask都是2D的
+                processed_masks = []
+                for mask in masks_list:
+                    if mask.dim() == 3:
+                        mask = mask.squeeze(0)  # [1, H, W] -> [H, W]
+                    processed_masks.append(mask)
+                result['masks_list'] = torch.stack(processed_masks)
+            else:
+                result['masks_list'] = None
             result['resize_list'] = [(img.shape[1], img.shape[2]) for img in images_list]
-            result['original_size_list'] = [mask.shape[-2:] for mask in masks_list] if masks_list else []
+            result['original_size_list'] = [mask.shape[-2:] if mask.dim() >= 2 else mask.shape for mask in masks_list] if masks_list else []
     else:
         # 创建占位符
         result['images'] = None
@@ -531,12 +548,14 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
                     padded_pc_masks.append(padded_mask)
             
             result['point_clouds'] = torch.stack(padded_pcs)  # [Batch, MaxPoints, 3]
-            result['point_masks_list'] = padded_pc_masks if padded_pc_masks else None
+            # 将 point_masks_list 转换为张量 [Batch, N]
+            result['point_masks_list'] = torch.stack(padded_pc_masks) if padded_pc_masks else None
             result['point_valid_lengths'] = torch.tensor(point_nums, dtype=torch.long)  # 记录每个样本的有效点数
         else:
             # 点数一致，直接stack
             result['point_clouds'] = torch.stack(point_clouds_list)  # [Batch, NumPoints, 3]
-            result['point_masks_list'] = pc_masks_list if pc_masks_list else None
+            # 将 point_masks_list 转换为张量 [Batch, N]
+            result['point_masks_list'] = torch.stack(pc_masks_list) if pc_masks_list else None
             result['point_valid_lengths'] = torch.tensor(point_nums, dtype=torch.long)
     else:
         result['point_clouds'] = None
@@ -547,4 +566,42 @@ def collate_fn(batch: List[Dict], tokenizer=None, conv_type: str = None,
     result['image_valid_mask'] = torch.tensor(has_image_flags, dtype=torch.bool)
     result['pc_valid_mask'] = torch.tensor(has_pc_flags, dtype=torch.bool)
     
+    # 应用精度转换（根据全局精度设置）
+    # 从第一个样本获取精度设置（假设所有样本使用相同精度）
+    precision = batch[0].get('precision', 'fp32') if hasattr(batch[0], 'get') else 'fp32'
+    result = apply_precision(result, precision)
+    
     return result
+
+
+def apply_precision(data_dict: Dict[str, Any], precision: str) -> Dict[str, Any]:
+    """
+    将数据字典中的浮点张量转换为指定精度
+    
+    Args:
+        data_dict: 包含各种数据的字典
+        precision: 精度类型，可选 "fp32", "fp16", "bf16"
+        
+    Returns:
+        转换精度后的数据字典
+    """
+    # 确定目标数据类型
+    if precision == "fp16":
+        target_dtype = torch.float16
+    elif precision == "bf16":
+        target_dtype = torch.bfloat16
+    elif precision == "fp32":
+        target_dtype = torch.float32
+    else:
+        raise ValueError(f"不支持的精度类型: {precision}，请使用 'fp32', 'fp16' 或 'bf16'")
+    
+    # 需要转换精度的键（只转换浮点类型的张量）
+    float_tensor_keys = ['images', 'images_clip', 'masks_list', 'point_clouds', 'point_masks_list']
+    
+    for key in float_tensor_keys:
+        if key in data_dict and data_dict[key] is not None:
+            tensor = data_dict[key]
+            if isinstance(tensor, torch.Tensor) and tensor.dtype in [torch.float32, torch.float16, torch.bfloat16]:
+                data_dict[key] = tensor.to(dtype=target_dtype)
+    
+    return data_dict

@@ -113,59 +113,6 @@ def create_param_groups(model, config):
     return param_groups
 
 
-def preprocess_input_data(input_dict, precision):
-    """
-    预处理输入数据（图像和点云），支持动态模态输入
-    
-    Args:
-        input_dict: 输入字典，包含 images, images_clip, point_clouds 等
-        precision: 精度类型 ("fp16", "bf16", "fp32")
-    
-    Returns:
-        batch_size: 计算出的 batch size
-    
-    Note:
-        该函数会直接修改 input_dict，添加 batch_size 字段
-    """
-    # 处理图像数据
-    if "images" in input_dict and input_dict["images"] is not None:
-        if precision == "fp16":
-            input_dict["images"] = input_dict["images"].half()
-            input_dict["images_clip"] = input_dict["images_clip"].half()
-        elif precision == "bf16":
-            input_dict["images"] = input_dict["images"].bfloat16()
-            input_dict["images_clip"] = input_dict["images_clip"].bfloat16()
-        else:
-            input_dict["images"] = input_dict["images"].float()
-            input_dict["images_clip"] = input_dict["images_clip"].float()
-
-    # 处理点云数据
-    if "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
-        point_clouds = input_dict["point_clouds"]
-        if precision == "fp16":
-            point_clouds = point_clouds.half()
-        elif precision == "bf16":
-            point_clouds = point_clouds.bfloat16()
-        else:
-            point_clouds = point_clouds.float()
-        # 转换为 [B, C, N] 格式（如果是 [B, N, C]）
-        if point_clouds.dim() == 3 and point_clouds.size(-1) == 3:
-            point_clouds = point_clouds.permute(0, 2, 1).contiguous()
-        input_dict["point_clouds"] = point_clouds
-
-    # 计算实际的 batch size（支持动态模态输入）
-    if "images" in input_dict and input_dict["images"] is not None:
-        batch_size = input_dict["images"].size(0)
-    elif "point_clouds" in input_dict and input_dict["point_clouds"] is not None:
-        batch_size = input_dict["point_clouds"].size(0)
-    else:
-        batch_size = 1  # 默认值
-    
-    # 将 batch_size 写入 input_dict 传入模型
-    input_dict["batch_size"] = batch_size
-    
-    return batch_size
-
 
 def main():
     global params_to_train
@@ -502,9 +449,7 @@ def train(
 
             data_time.update(time.time() - end)
             input_dict = dict_to_cuda(input_dict)
-            
-            # 预处理输入数据（图像和点云）并计算 batch_size
-            batch_size = preprocess_input_data(input_dict, config.precision)
+
 
             # 调用魔改后的 LISA 模型
             output_dict = model_engine(**input_dict)
