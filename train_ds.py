@@ -266,7 +266,6 @@ def main():
         val_ratio=config.val_ratio,
         test_ratio=config.test_ratio,
         use_mm_start_end=config.use_mm_start_end,
-        tokenizer=tokenizer,
         conv_type = config.conv_type,
     )
     
