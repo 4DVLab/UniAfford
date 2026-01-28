@@ -14,14 +14,14 @@ from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
 from utils.dataset import DatasetManager, collate_fn
 from utils.common import (DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN,
-                         AverageMeter, ProgressMeter, Summary, dict_to_cuda)
-from utils.metrics import (SegmentationMetrics, LossMetrics, 
-                           evaluate_segmentation_batch, 
-                           print_validation_summary,
-                           log_metrics_to_tensorboard,
-                           compute_2d_mask_loss,
-                           compute_3d_mask_loss,
-                           compute_dummy_loss)
+                          ProgressMeter, dict_to_cuda)
+from utils.metrics import (
+    MetricsTracker,
+    TensorBoardLogger,
+    evaluate_segmentation_batch,
+    print_validation_summary,
+)
+from utils import calculator as calc
 from configs import TrainingConfig
 
 
@@ -465,9 +465,12 @@ def train(
     batch_time = AverageMeter("Time", ":6.3f")
     data_time = AverageMeter("Data", ":6.3f")
     
-    # 使用 LossMetrics 类管理所有损失
-    loss_metrics = LossMetrics()
-    loss_meters = loss_metrics.get_meters()
+    # 使用 MetricsTracker 管理所有指标
+    metrics_tracker = MetricsTracker()
+    tb_logger = TensorBoardLogger(writer) if writer is not None else None
+    
+    # 获取 loss meters 用于进度显示
+    loss_meters = metrics_tracker.loss_meters
 
     progress = ProgressMeter(
         config.steps_per_epoch,
@@ -511,25 +514,31 @@ def train(
                 ce_loss = output_dict["output"].loss * model_engine.module.ce_loss_weight
                 
                 # 2. 计算 2D 掩码损失
-                mask_bce_loss, mask_dice_loss, mask_loss = compute_2d_mask_loss(
-                    pred_masks=output_dict["pred_masks"] if output_dict["has_image"] else [],
-                    gt_masks=output_dict["gt_masks"] if output_dict["has_image"] else [],
+                mask_bce_loss, mask_dice_loss, mask_loss = calc.img_loss(
+                    pred_masks=output_dict["pred_masks"] if output_dict["has_image"] else torch.empty(0),
+                    gt_masks=output_dict["gt_masks"] if output_dict["has_image"] else torch.empty(0),
                     bce_loss_weight=model_engine.module.bce_loss_weight,
                     dice_loss_weight=model_engine.module.dice_loss_weight,
-                    device=ce_loss.device,
+                ) if output_dict.get("has_image") and len(output_dict.get("pred_masks", [])) > 0 else (
+                    torch.tensor(0.0, device=ce_loss.device),
+                    torch.tensor(0.0, device=ce_loss.device),
+                    torch.tensor(0.0, device=ce_loss.device)
                 )
                 
                 # 3. 计算 3D 点云掩码损失
-                mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss = compute_3d_mask_loss(
-                    pred_3d_masks=output_dict["pred_3d_masks"] if output_dict["has_point_cloud"] else [],
-                    gt_3d_masks=output_dict["gt_3d_masks"] if output_dict["has_point_cloud"] else [],
+                mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss = calc.pc_loss(
+                    pred_3d_masks=output_dict["pred_3d_masks"] if output_dict["has_point_cloud"] else torch.empty(0),
+                    gt_3d_masks=output_dict["gt_3d_masks"] if output_dict["has_point_cloud"] else torch.empty(0),
                     bce_loss_weight=model_engine.module.bce_loss_weight,
                     dice_loss_weight=model_engine.module.dice_loss_weight,
-                    device=ce_loss.device,
+                ) if output_dict.get("has_point_cloud") and len(output_dict.get("pred_3d_masks", [])) > 0 else (
+                    torch.tensor(0.0, device=ce_loss.device),
+                    torch.tensor(0.0, device=ce_loss.device),
+                    torch.tensor(0.0, device=ce_loss.device)
                 )
                 
                 # 4. 计算虚拟损失以保持所有参数连接到计算图
-                dummy_loss = compute_dummy_loss(model_engine.module.model, ce_loss.device)
+                dummy_loss = calc.dummy_loss(model_engine.module.model)
                 
                 # 5. 总损失
                 loss = ce_loss + mask_loss + mask_3d_loss + dummy_loss
@@ -544,8 +553,8 @@ def train(
                 output_dict["mask_3d_dice_loss"] = mask_3d_dice_loss
                 output_dict["mask_3d_loss"] = mask_3d_loss
 
-            # 使用 LossMetrics 更新所有损失
-            loss_metrics.update(output_dict, batch_size)
+            # 使用 MetricsTracker 更新所有损失
+            metrics_tracker.update_loss_metrics(output_dict, batch_size)
             
             model_engine.backward(output_dict["loss"])
             model_engine.step()
@@ -558,47 +567,57 @@ def train(
             if config.distributed:
                 batch_time.all_reduce()
                 data_time.all_reduce()
-                loss_metrics.all_reduce()
+                metrics_tracker.all_reduce()
 
             if config.local_rank == 0:
                 progress.display(local_step + 1)
                 
-                # 记录所有损失到 TensorBoard
-                metrics_dict = {
-                    "loss": loss_meters["loss"].avg,
-                    "ce_loss": loss_meters["ce_loss"].avg,
-                    "mask_bce_loss": loss_meters["mask_bce_loss"].avg,
-                    "mask_dice_loss": loss_meters["mask_dice_loss"].avg,
-                    "mask_loss": loss_meters["mask_loss"].avg,
-                    "mask_3d_bce_loss": loss_meters["mask_3d_bce_loss"].avg,
-                    "mask_3d_dice_loss": loss_meters["mask_3d_dice_loss"].avg,
-                    "mask_3d_loss": loss_meters["mask_3d_loss"].avg,
-                }
-                log_metrics_to_tensorboard(writer, metrics_dict, global_step, prefix="train")
-                
-                writer.add_scalar(
-                    "metrics/total_secs_per_batch", batch_time.avg, global_step
-                )
-                writer.add_scalar(
-                    "metrics/data_secs_per_batch", data_time.avg, global_step
-                )
+                # 使用 TensorBoardLogger 记录所有损失到 TensorBoard
+                if tb_logger is not None:
+                    tb_logger.log_loss_metrics(metrics_tracker, global_step, prefix="train")
+                    writer.add_scalar("metrics/total_secs_per_batch", batch_time.avg, global_step)
+                    writer.add_scalar("metrics/data_secs_per_batch", data_time.avg, global_step)
 
             batch_time.reset()
             data_time.reset()
-            loss_metrics.reset()
+            metrics_tracker.reset()
 
         if local_step != 0:
             curr_lr = scheduler.get_last_lr()
-            if config.local_rank == 0:
-                writer.add_scalar("train/lr", curr_lr[0], global_step)
+            if config.local_rank == 0 and writer is not None:
+                # 记录学习率
+                if isinstance(params_to_train, list) and len(params_to_train) > 0 and isinstance(params_to_train[0], dict):
+                    # 分层学习率模式：记录每个参数组的学习率
+                    for idx, (lr, param_group) in enumerate(zip(curr_lr, params_to_train)):
+                        group_name = param_group.get('name', f'group_{idx}')
+                        writer.add_scalar(f"train/lr/{group_name}", lr, global_step)
+                    # 同时记录平均学习率
+                    writer.add_scalar("train/lr/average", sum(curr_lr) / len(curr_lr), global_step)
+                else:
+                    # 单一学习率模式
+                    writer.add_scalar("train/lr", curr_lr[0], global_step)
 
     return train_iter
 
 
 def validate(val_loader, model_engine, epoch, writer, config):
-    """验证函数"""
-    # 使用 SegmentationMetrics 类管理所有评估指标
-    metrics = SegmentationMetrics()
+    """
+    验证函数（支持批处理）
+    
+    Args:
+        val_loader: 验证数据加载器
+        model_engine: DeepSpeed 模型引擎
+        epoch: 当前 epoch
+        writer: TensorBoard writer
+        config: 训练配置
+        
+    Returns:
+        giou: 2D Global IoU
+        ciou: 2D Class IoU
+    """
+    # 使用 MetricsTracker 管理所有评估指标
+    metrics_tracker = MetricsTracker()
+    tb_logger = TensorBoardLogger(writer) if writer is not None else None
     
     model_engine.eval()
 
@@ -613,33 +632,42 @@ def validate(val_loader, model_engine, epoch, writer, config):
         with torch.no_grad():
             output_dict = model_engine(**input_dict, inference=True)
 
-        # 使用统一的评估函数
+        # 使用统一的评估函数（支持批处理）
         evaluate_segmentation_batch(
             output_dict,
-            metrics,
+            metrics_tracker,
             mask_threshold_2d=config.mask_threshold_2d,
             mask_threshold_3d=config.mask_threshold_3d
         )
 
+    # 分布式训练时汇总所有进程的指标
+    if config.distributed:
+        metrics_tracker.all_reduce()
+
     # 计算最终结果
-    giou, ciou = metrics.compute_2d_results()
-    giou_3d, ciou_3d = metrics.compute_3d_results()
+    giou, ciou = metrics_tracker.compute_2d_seg_results()
+    mae_3d, auc_3d, aiou_3d, sim_3d = metrics_tracker.compute_3d_seg_results()
 
     if config.local_rank == 0:
         # 计算当前的全局步数（用于与训练指标对齐）
         global_step = (epoch + 1) * config.steps_per_epoch
         
         # 打印验证摘要
-        print_validation_summary(epoch, metrics, giou, ciou, giou_3d, ciou_3d)
+        print_validation_summary(
+            epoch, 
+            metrics_tracker, 
+            giou, 
+            ciou, 
+            mae_3d, 
+            auc_3d, 
+            aiou_3d, 
+            sim_3d
+        )
         
-        # 记录指标到 TensorBoard
-        val_metrics_dict = {
-            "giou": giou,
-            "ciou": ciou,
-            "giou_3d": giou_3d,
-            "ciou_3d": ciou_3d,
-        }
-        log_metrics_to_tensorboard(writer, val_metrics_dict, global_step, prefix="val")
+        # 使用 TensorBoardLogger 记录指标到 TensorBoard
+        if tb_logger is not None:
+            tb_logger.log_seg_2d_metrics(giou, ciou, global_step, prefix="val")
+            tb_logger.log_seg_3d_metrics(mae_3d, auc_3d, aiou_3d, sim_3d, global_step, prefix="val")
 
     return giou, ciou
 

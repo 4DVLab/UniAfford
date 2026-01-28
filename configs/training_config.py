@@ -49,7 +49,7 @@ class TrainingConfig:
         weight_decay=0.0,
         
         # 分层学习率（可选）
-        use_layerwise_lr=False,
+        use_layerwise_lr=True,
         llm_lr=None,        # 默认为 lr * 0.1
         vision_2d_lr=None,  # 默认为 lr
         vision_3d_lr=None,  # 默认为 lr
