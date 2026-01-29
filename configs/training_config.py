@@ -40,7 +40,7 @@ class TrainingConfig:
         steps_per_epoch=None,
         batch_size=1,
         grad_accumulation_steps=1,
-        val_batch_size=1,
+        val_batch_size=10,
         workers=4,
         print_freq=1,
         name_of_params_to_train="visual_model,vision_tower,mm_projector,text_hidden_fcs,point_cloud_segmentor",
