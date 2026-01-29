@@ -201,11 +201,6 @@ def main():
     for p in model.parameters():
         p.requires_grad = False
 
-    # 开启非 LoRA 的关键模块 (Projector, Mask Decoder 等)
-    for n, p in model.named_parameters():
-        if any(t in n for t in config.name_of_params_to_train):
-            p.requires_grad = True
-
     # LoRA 配置（可选）
     if config.lora_r > 0:
         def find_linear_layers(model, lora_target_modules):
@@ -226,6 +221,12 @@ def main():
         model = get_peft_model(model, lora_config)
         model.print_trainable_parameters()
 
+    # ✅ 在应用 LoRA 之后，重新开启非 LoRA 的关键模块
+    # 这样可以确保 LoRA 层和其他模块都是可训练的
+    for n, p in model.named_parameters():
+        if any(t in n for t in config.name_of_params_to_train):
+            p.requires_grad = True
+            print(f"[Enabled] {n}")
     
     params_to_train = create_param_groups(model, config)
     
