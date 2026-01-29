@@ -352,7 +352,7 @@ def evaluate_segmentation_batch(
     # 2D分割评估
     if "pred_masks" in output_dict and output_dict["pred_masks"] is not None:
         pred_masks = output_dict["pred_masks"]  # List[Tensor] 或 Tensor
-        gt_masks = input_dict["gt_masks"]
+        gt_masks = input_dict["img_gt_tensor"]
         
         # 如果是列表，逐个处理（向后兼容）
         if isinstance(pred_masks, list):
@@ -369,7 +369,7 @@ def evaluate_segmentation_batch(
     # 3D分割评估
     if "pred_3d_masks" in output_dict and output_dict["pred_3d_masks"] is not None:
         pred_3d_masks = output_dict["pred_3d_masks"]  # List[Tensor] 或 Tensor
-        gt_3d_masks = input_dict["gt_3d_masks"]
+        gt_3d_masks = input_dict["pc_gt_tensor"]
         
         # 如果是列表，逐个处理（向后兼容）
         if isinstance(pred_3d_masks, list):
