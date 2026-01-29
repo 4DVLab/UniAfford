@@ -490,7 +490,7 @@ def train(
                 # 2. 计算 2D 掩码损失
                 mask_bce_loss, mask_dice_loss, mask_loss = calc.img_loss(
                     pred_masks=output_dict["pred_masks"],
-                    gt_masks=input_dict["gt_masks"],
+                    gt_masks=input_dict["img_gt_tensor"],
                     bce_loss_weight=model_engine.module.bce_loss_weight,
                     dice_loss_weight=model_engine.module.dice_loss_weight,
                 ) if output_dict.get("has_valid_image") and output_dict.get("pred_masks") is not None else (
@@ -502,7 +502,7 @@ def train(
                 # 3. 计算 3D 点云掩码损失
                 mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss = calc.pc_loss(
                     pred_3d_masks=output_dict["pred_3d_masks"],
-                    gt_3d_masks=input_dict["gt_3d_masks"],
+                    gt_3d_masks=input_dict["pc_gt_tensor"],
                     bce_loss_weight=model_engine.module.bce_loss_weight,
                     dice_loss_weight=model_engine.module.dice_loss_weight,
                 ) if output_dict.get("has_valid_point_cloud") and output_dict.get("pred_3d_masks") is not None else (

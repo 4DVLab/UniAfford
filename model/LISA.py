@@ -455,12 +455,12 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         labels: torch.LongTensor = None,
         attention_masks: torch.LongTensor = None,
         offset: torch.LongTensor = None,
-        img_masks_tensor: torch.Tensor = None,
+        # img_masks_tensor: torch.Tensor = None,
         original_size_list: List[List] = None,
         resize_list: List[List] = None,
         inference: bool = False,
         point_clouds: torch.FloatTensor = None,  # 3D点云输入 [B, 3, N] 或 [B, N, 3]
-        pc_masks_tensor: torch.FloatTensor = None,  # 3D点云真实掩码列表
+        # pc_masks_tensor: torch.FloatTensor = None,  # 3D点云真实掩码列表
         batch_size: int = None,  # 从外部传入的 batch_size（可选）
         img_valid_mask: torch.BoolTensor = None,  # 图像有效性标记 [B]
         pc_valid_mask: torch.BoolTensor = None,  # 点云有效性标记 [B]
@@ -477,12 +477,10 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             labels: 文本标签（用于计算语言模型损失）
             attention_masks: 注意力掩码
             offset: 批次偏移量，用于处理不同长度的序列
-            img_masks_tensor: 真实分割掩码列表（Ground Truth）
             original_size_list: 原始图像尺寸列表 [(H, W), ...]
             resize_list: 调整后的图像尺寸列表 [(H, W), ...]
             inference: 是否为推理模式（不计算损失）
             point_clouds: 3D点云输入
-            pc_masks_tensor: 3D点云真实掩码列表
             batch_size: 从外部传入的 batch_size（可选，如果未提供则自动计算）
             img_valid_mask: 图像有效性标记 [B]，True 表示该样本有真实图像
             pc_valid_mask: 点云有效性标记 [B]，True 表示该样本有真实点云

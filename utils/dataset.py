@@ -182,7 +182,7 @@ class BaseDataset(Dataset):
                 mask_tensor = torch.from_numpy(mask).to(dtype=self.precision).contiguous()
                 if mask_tensor.max() > 1:
                     mask_tensor.div_(255.0)
-                result['masks'] = mask_tensor
+                result['img_gt'] = mask_tensor
         
         """ --------------------- 处理点云数据 ---------------------"""
         if data['pc'] is not None:
@@ -211,7 +211,7 @@ class BaseDataset(Dataset):
                 if pm.max() > 1:
                     pm = pm / 255.0
                 pm_tensor = torch.from_numpy(pm).to(dtype=self.precision).contiguous()
-                result['pc_masks'] = pm_tensor
+                result['pc_gt'] = pm_tensor
         
         # 写入缓存（已经是目标精度，conversation 已构建）
         self._sample_cache[sample_id] = result
@@ -348,9 +348,9 @@ def collate_fn(
     
     # 收集各模态数据（优化：减少重复操作）
     images_list = []
-    masks_list = []
+    img_gt_masks = []
     point_clouds_list = []
-    pc_masks_list = []
+    pc_gt_masks = []
     
     has_image_flags = []
     has_pc_flags = []
@@ -366,10 +366,10 @@ def collate_fn(
         labels_list.append(sample['labels'])
         
         images_list.append(sample.get('images'))
-        masks_list.append(sample.get('masks'))
+        img_gt_masks.append(sample.get('img_gt'))
         
         point_clouds_list.append(sample.get('point_clouds'))
-        pc_masks_list.append(sample.get('pc_masks'))
+        pc_gt_masks.append(sample.get('pc_gt'))
         
             
     """ ------------------------------------- 处理文本数据 ------------------------------------- """
@@ -403,7 +403,7 @@ def collate_fn(
         dummy_h, dummy_w = output_image_size  # 默认尺寸
         result['images'] = torch.zeros(batch_size, 3, dummy_h, dummy_w, dtype=precision)
         result['images_clip'] = result['images']
-        result['img_masks_tensor'] = torch.zeros(batch_size, dummy_h, dummy_w, dtype=precision)
+        result['img_gt_tensor'] = torch.zeros(batch_size, dummy_h, dummy_w, dtype=precision)
         result['resize_list'] = [(dummy_h, dummy_w)] * batch_size
         result['original_size_list'] = [(dummy_h, dummy_w)] * batch_size
     else:
@@ -444,7 +444,7 @@ def collate_fn(
                 padded_images.append(padded_img)
 
             # Padding掩码
-            mask = masks_list[i] if i < len(masks_list) else None
+            mask = img_gt_masks[i] if i < len(img_gt_masks) else None
             if mask is None:
                 padded_masks.append(torch.zeros(max_h, max_w, dtype=precision))
                 original_size_list.append((max_h, max_w))
@@ -467,7 +467,7 @@ def collate_fn(
         stacked_images = torch.stack(padded_images)  # [Batch, 3, MaxH, MaxW]
         result['images'] = stacked_images
         result['images_clip'] = stacked_images  # 直接引用，不复制
-        result['img_masks_tensor'] = torch.stack(padded_masks)
+        result['img_gt_tensor'] = torch.stack(padded_masks)
         result['resize_list'] = resize_list
         result['original_size_list'] = original_size_list
 
@@ -482,7 +482,7 @@ def collate_fn(
     if len(valid_pcs) == 0:
         # 全为 None，使用全0张量填充
         result['point_clouds'] = torch.zeros(batch_size, output_point_nums, 3, dtype=precision)
-        result['pc_masks_tensor'] = torch.zeros(batch_size, output_point_nums, dtype=precision)
+        result['pc_gt_tensor'] = torch.zeros(batch_size, output_point_nums, dtype=precision)
         result['pc_valid_lengths'] = torch.zeros(batch_size, dtype=torch.long)
     else:
         point_nums = []
@@ -510,7 +510,7 @@ def collate_fn(
                 padded_pcs.append(padded_pc)
 
             # Padding掩码
-            pc_mask = pc_masks_list[i] if i < len(pc_masks_list) else None
+            pc_mask = pc_gt_masks[i] if i < len(pc_gt_masks) else None
             if pc_mask is None:
                 padded_pc_masks.append(torch.zeros(output_point_nums, dtype=precision))
             else:
@@ -526,7 +526,7 @@ def collate_fn(
                 padded_pc_masks.append(padded_mask)
 
         result['point_clouds'] = torch.stack(padded_pcs)  # [Batch, MaxPoints, 3]
-        result['pc_masks_tensor'] = torch.stack(padded_pc_masks)
+        result['pc_gt_tensor'] = torch.stack(padded_pc_masks)
         result['pc_lengths'] = torch.tensor(point_nums, dtype=torch.long)
 
     # 添加有效性标记
