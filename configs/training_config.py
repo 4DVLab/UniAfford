@@ -201,27 +201,9 @@ class TrainingConfig:
         Returns:
             dict: DeepSpeed 配置
         """
-        return {
+        ds_config = {
             "train_micro_batch_size_per_gpu": self.batch_size,
             "gradient_accumulation_steps": self.grad_accumulation_steps,
-            "optimizer": {
-                "type": "AdamW",
-                "params": {
-                    "lr": self.lr,
-                    "weight_decay": self.weight_decay,
-                    "betas": (self.beta1, self.beta2),
-                },
-            },
-            "scheduler": {
-                "type": "WarmupDecayLR",
-                "params": {
-                    "total_num_steps": self.epochs * self.steps_per_epoch,
-                    "warmup_min_lr": self.warmup_min_lr,
-                    "warmup_max_lr": self.lr,
-                    "warmup_num_steps": self.warmup_num_steps,
-                    "warmup_type": self.warmup_type,
-                },
-            },
             "fp16": {
                 "enabled": self.precision == "fp16",
             },
@@ -238,6 +220,31 @@ class TrainingConfig:
                 "allgather_bucket_size": int(self.allgather_bucket_size),
             },
         }
+        
+        # 如果不使用分层学习率，添加优化器和调度器配置
+        if not self.use_layerwise_lr:
+            ds_config["optimizer"] = {
+                "type": "AdamW",
+                "params": {
+                    "lr": self.lr,
+                    "weight_decay": self.weight_decay,
+                    "betas": (self.beta1, self.beta2),
+                },
+            }
+            ds_config["scheduler"] = {
+                "type": "WarmupDecayLR",
+                "params": {
+                    "total_num_steps": self.epochs * self.steps_per_epoch,
+                    "warmup_min_lr": self.warmup_min_lr,
+                    "warmup_max_lr": self.lr,
+                    "warmup_num_steps": self.warmup_num_steps,
+                    "warmup_type": self.warmup_type,
+                },
+            }
+        # 如果使用分层学习率，不在配置中指定优化器和调度器
+        # DeepSpeed 会使用我们传入的参数组和手动创建的优化器/调度器
+        
+        return ds_config
     
     def get_lora_config(self):
         """

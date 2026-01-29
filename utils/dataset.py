@@ -171,14 +171,14 @@ class BaseDataset(Dataset):
         
         """ --------------------- 处理图像数据（优化：直接转换为目标精度）---------------------"""
         if data['img'] is not None:
-            img = cv2.resize(data['img'], (self.image_size, self.image_size)) if data['img'].shape[:2] != (self.image_size, self.image_size) else data['img']
+            img = cv2.resize(data['img'], (self.image_size[0], self.image_size[1])) if data['img'].shape[:2] != (self.image_size[0], self.image_size[1]) else data['img']
             # 优化：一次性完成转换、归一化和精度转换
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             img_tensor = torch.from_numpy(img_rgb).permute(2, 0, 1).to(dtype=self.precision).div_(255.0).contiguous()
             result['images'] = img_tensor
             
             if data['img_gt'] is not None:
-                mask = cv2.resize(data['img_gt'], (self.image_size, self.image_size), interpolation=cv2.INTER_NEAREST) if data['img_gt'].shape[:2] != (self.image_size, self.image_size) else data['img_gt']
+                mask = cv2.resize(data['img_gt'], (self.image_size[0], self.image_size[1]), interpolation=cv2.INTER_NEAREST) if data['img_gt'].shape[:2] != (self.image_size[0], self.image_size[1]) else data['img_gt']
                 mask_tensor = torch.from_numpy(mask).to(dtype=self.precision).contiguous()
                 if mask_tensor.max() > 1:
                     mask_tensor.div_(255.0)
@@ -225,15 +225,16 @@ class DatasetManager:
     确保 JointDataset 只被创建一次。
     """
     
-    def __init__(self, dataset_dir: str, tokenizer=None, vision_tower: str = None, precision: str = "bf16",
-                 image_size: int = 1024, num_classes_per_sample: int = 3,
-                 exclude_val: bool = False, dataset: str = None,
-                 sample_rate: List[float] = None, sem_seg_data: str = None,
-                 refer_seg_data: str = None, vqa_data: str = None,
-                 reason_seg_data: str = None, explanatory: float = 0.1,
+    def __init__(self, dataset_dir: str, 
+                 tokenizer=None, 
+                 vision_tower: str = None,
+                 precision: str = "bf16",
+                 image_size: int = (1024,1024),
                  num_points: int = 2048,
-                 train_ratio: float = 0.7, val_ratio: float = 0.15,
-                 test_ratio: float = 0.15, random_seed: int = 42,
+                 train_ratio: float = 0.7,
+                 val_ratio: float = 0.15,
+                 test_ratio: float = 0.15, 
+                 random_seed: int = 42,
                  use_mm_start_end: bool = False,
                  conv_type: str = None):
         """
@@ -243,7 +244,6 @@ class DatasetManager:
             dataset_dir: 数据集根目录
             tokenizer: 分词器
             vision_tower: 视觉塔配置
-            samples_per_epoch: 每个 epoch 的样本数
             precision: 精度设置
             image_size: 图像大小
             num_points: 点云点数
@@ -320,7 +320,7 @@ class DatasetManager:
         return self.get_train_dataset(), self.get_val_dataset(), self.get_test_dataset()
 
 
-def collate_fn(batch: List[Dict], tokenizer=None, output_image_size=(1024,1024), output_point_nums=2048) -> Dict[str, Any]:
+def collate_fn(batch: List[Dict], tokenizer=None) -> Dict[str, Any]:
     """
     批量数据整理函数（优化版：conversation 已在预处理阶段构建）
     
@@ -331,8 +331,7 @@ def collate_fn(batch: List[Dict], tokenizer=None, output_image_size=(1024,1024),
     Args:
         batch: 样本列表，每个样本是一个字典
         tokenizer: 分词器
-        output_image_size: 输出的图片大小 (h,w)
-        output_point_nums: 输出的点云点数
+        
     Returns:
         包含模型输入的字典
     """
@@ -394,7 +393,7 @@ def collate_fn(batch: List[Dict], tokenizer=None, output_image_size=(1024,1024),
     
     if len(valid_images) == 0:
         # 全为 None，使用全0张量填充
-        dummy_h, dummy_w = output_image_size  # 默认尺寸
+        dummy_h, dummy_w = 224, 224  # 默认尺寸
         result['images'] = torch.zeros(batch_size, 3, dummy_h, dummy_w)
         result['images_clip'] = result['images']
         result['masks_list'] = torch.zeros(batch_size, dummy_h, dummy_w)
@@ -402,15 +401,15 @@ def collate_fn(batch: List[Dict], tokenizer=None, output_image_size=(1024,1024),
         result['original_size_list'] = [(dummy_h, dummy_w)] * batch_size
     else:
         # 获取第一个有效图像的形状
-        # first_shape = valid_images[0].shape
-        # all_same_shape = all(img.shape == first_shape for img in valid_images)
-        # if not all_same_shape:
-        #     # # 尺寸不一致，需要padding到最大尺寸
-        #     max_h = max(*(img.shape[1] for img in valid_images), output_image_size[0])
-        #     max_w = max(*(img.shape[2] for img in valid_images), output_image_size[1])
-        # else:
-        #     max_h, max_w = first_shape[1], first_shape[2]
-        max_h, max_w = output_image_size  # HACK: 固定输出大小适配 clip、sam
+        first_shape = valid_images[0].shape
+        all_same_shape = all(img.shape == first_shape for img in valid_images)
+        
+        if not all_same_shape:
+            # 尺寸不一致，需要padding到最大尺寸
+            max_h = max(img.shape[1] for img in valid_images)
+            max_w = max(img.shape[2] for img in valid_images)
+        else:
+            max_h, max_w = first_shape[1], first_shape[2]
         
         padded_images = []
         padded_masks = []
@@ -471,10 +470,21 @@ def collate_fn(batch: List[Dict], tokenizer=None, output_image_size=(1024,1024),
     
     if len(valid_pcs) == 0:
         # 全为 None，使用全0张量填充
-        result['point_clouds'] = torch.zeros(batch_size, output_point_nums, 3)
-        result['point_masks_list'] = torch.zeros(batch_size, output_point_nums)
+        dummy_num_points = 1024  # 默认点数
+        result['point_clouds'] = torch.zeros(batch_size, dummy_num_points, 3)
+        result['point_masks_list'] = torch.zeros(batch_size, dummy_num_points)
         result['point_valid_lengths'] = torch.zeros(batch_size, dtype=torch.long)
     else:
+        # 获取第一个有效点云的点数
+        first_num_points = valid_pcs[0].shape[0]
+        all_same_points = all(pc.shape[0] == first_num_points for pc in valid_pcs)
+        
+        if not all_same_points:
+            # 点数不一致，需要padding
+            max_points = max(pc.shape[0] for pc in valid_pcs)
+        else:
+            max_points = first_num_points
+        
         point_nums = []
         padded_pcs = []
         padded_pc_masks = []
@@ -482,17 +492,15 @@ def collate_fn(batch: List[Dict], tokenizer=None, output_image_size=(1024,1024),
         for i, pc in enumerate(point_clouds_list):
             if pc is None:
                 # 使用全0张量填充
-                padded_pcs.append(torch.zeros(output_point_nums, 3))
+                padded_pcs.append(torch.zeros(max_points, 3))
                 point_nums.append(0)
             else:
-                # 对pc进行截取
-                num_points = min(pc.shape[0], output_point_nums)
-                pc = pc[:num_points]  # 截取前num_points个
+                num_points = pc.shape[0]
                 point_nums.append(num_points)
                 
                 # Padding点云（只在需要时）
-                if num_points < output_point_nums:
-                    padding = torch.zeros(output_point_nums - num_points, 3, dtype=pc.dtype)
+                if num_points < max_points:
+                    padding = torch.zeros(max_points - num_points, 3, dtype=pc.dtype)
                     padded_pc = torch.cat([pc, padding], dim=0)
                 else:
                     padded_pc = pc
@@ -502,11 +510,11 @@ def collate_fn(batch: List[Dict], tokenizer=None, output_image_size=(1024,1024),
             pc_mask = pc_masks_list[i] if i < len(pc_masks_list) else None
             if pc_mask is None:
                 # 使用全0张量填充
-                padded_pc_masks.append(torch.zeros(output_point_nums))
+                padded_pc_masks.append(torch.zeros(max_points))
             else:
                 num_points = pc_mask.shape[0]
-                if num_points < output_point_nums:
-                    mask_padding = torch.zeros(output_point_nums - num_points, dtype=pc_mask.dtype)
+                if num_points < max_points:
+                    mask_padding = torch.zeros(max_points - num_points, dtype=pc_mask.dtype)
                     padded_mask = torch.cat([pc_mask, mask_padding], dim=0)
                 else:
                     padded_mask = pc_mask

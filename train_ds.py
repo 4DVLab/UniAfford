@@ -253,15 +253,9 @@ def main():
         dataset_dir=config.dataset_dir,
         tokenizer=tokenizer,
         vision_tower=config.vision_tower,
-        samples_per_epoch=config.batch_size
-        * config.grad_accumulation_steps
-        * config.steps_per_epoch
-        * world_size,
         precision=config.precision,
         image_size=config.image_size,
         num_points=config.num_points,
-        num_classes_per_sample=config.num_classes_per_sample,
-        exclude_val=config.exclude_val,
         train_ratio=config.train_ratio,
         val_ratio=config.val_ratio,
         test_ratio=config.test_ratio,
@@ -281,18 +275,55 @@ def main():
         print(f"Training with {len(train_dataset)} examples.")
 
     # DeepSpeed 配置
-    model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
-        model=model,
-        model_parameters=params_to_train,
-        training_data=train_dataset,
-        collate_fn=partial(
-            collate_fn,
-            tokenizer=tokenizer,
-            output_image_size=config.image_size,
-            output_point_nums=config.num_points,
-        ),
-        config=config.get_deepspeed_config(),
-    )
+    # 如果使用分层学习率，需要手动创建优化器和调度器
+    if config.use_layerwise_lr:
+        # 手动创建优化器（支持参数组）
+        optimizer = torch.optim.AdamW(
+            params_to_train,  # 参数组列表，每组有自己的 lr
+            weight_decay=config.weight_decay,
+            betas=(config.beta1, config.beta2),
+        )
+        
+        # 手动创建学习率调度器
+        from transformers import get_cosine_schedule_with_warmup
+        total_steps = config.epochs * config.steps_per_epoch
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=config.warmup_num_steps,
+            num_training_steps=total_steps,
+        )
+        
+        # 初始化 DeepSpeed（不使用内置优化器和调度器）
+        model_engine, _, train_loader, _ = deepspeed.initialize(
+            model=model,
+            model_parameters=params_to_train,
+            training_data=train_dataset,
+            optimizer=optimizer,
+            lr_scheduler=scheduler,
+            collate_fn=partial(
+                collate_fn,
+                tokenizer=tokenizer,
+                conv_type=config.conv_type,
+                use_mm_start_end=config.use_mm_start_end,
+                local_rank=config.local_rank,
+            ),
+            config=config.get_deepspeed_config(),
+        )
+    else:
+        # 使用 DeepSpeed 内置优化器和调度器
+        model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
+            model=model,
+            model_parameters=params_to_train,
+            training_data=train_dataset,
+            collate_fn=partial(
+                collate_fn,
+                tokenizer=tokenizer,
+                conv_type=config.conv_type,
+                use_mm_start_end=config.use_mm_start_end,
+                local_rank=config.local_rank,
+            ),
+            config=config.get_deepspeed_config(),
+        )
 
     # resume deepspeed checkpoint
     if config.auto_resume and len(config.resume) == 0:
@@ -328,9 +359,7 @@ def main():
             sampler=val_sampler,
             collate_fn=partial(
                 collate_fn,
-                tokenizer=tokenizer,
-                output_image_size=config.image_size,
-                output_point_nums=config.num_points,
+                tokenizer=tokenizer
             ),
         )
 
