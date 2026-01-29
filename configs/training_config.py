@@ -14,7 +14,7 @@ class TrainingConfig:
         # 基础配置
         local_rank=0,
         version="../pretrained/llava-llama-2-13b-chat-lightning-preview",
-        precision="bp16",  # fp32, bf16; fp16会导致nan
+        precision="bf16",  # fp32, bf16; 使用fp16会导致nan
         
         # 模型配置
         image_size=(1024, 1024), # h,w
