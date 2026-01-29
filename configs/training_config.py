@@ -17,7 +17,7 @@ class TrainingConfig:
         precision="fp16",  # fp32, bf16, fp16
         
         # 模型配置
-        image_size=1024,
+        image_size=(1024, 1024), # h,w
         model_max_length=512,
         vision_tower="../pretrained/clip-vit-large-patch14",
         vision_pretrained="../pretrained/sam_vit_h_4b8939.pth",

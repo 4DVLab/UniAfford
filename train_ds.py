@@ -287,7 +287,9 @@ def main():
         training_data=train_dataset,
         collate_fn=partial(
             collate_fn,
-            tokenizer=tokenizer
+            tokenizer=tokenizer,
+            output_image_size=config.image_size,
+            output_point_nums=config.num_points,
         ),
         config=config.get_deepspeed_config(),
     )
@@ -326,7 +328,9 @@ def main():
             sampler=val_sampler,
             collate_fn=partial(
                 collate_fn,
-                tokenizer=tokenizer
+                tokenizer=tokenizer,
+                output_image_size=config.image_size,
+                output_point_nums=config.num_points,
             ),
         )
 
