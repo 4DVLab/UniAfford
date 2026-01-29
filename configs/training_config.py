@@ -14,7 +14,7 @@ class TrainingConfig:
         # 基础配置
         local_rank=0,
         version="../pretrained/llava-llama-2-13b-chat-lightning-preview",
-        precision="fp16",  # fp32, bf16, fp16
+        precision="bp16",  # fp32, bf16; fp16会导致nan
         
         # 模型配置
         image_size=(1024, 1024), # h,w
@@ -99,11 +99,8 @@ class TrainingConfig:
         self.version = version
         
         self.precision = torch.float32
-        match precision:
-            case 'fp16':
-                self.precision = torch.half
-            case "bf16":
-                self.precision = torch.bfloat16
+        if precision == "bf16":
+            self.precision = torch.bfloat16
 
         self.vis_save_path = vis_save_path
         
