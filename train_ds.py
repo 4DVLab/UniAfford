@@ -300,6 +300,7 @@ def main():
                 tokenizer=tokenizer,
                 output_image_size=config.image_size,
                 output_point_nums=config.num_points,
+                precision=config.precision,
             ),
             config=config.get_deepspeed_config(),
         )
@@ -314,6 +315,7 @@ def main():
                 tokenizer=tokenizer,
                 output_image_size=config.image_size,
                 output_point_nums=config.num_points,
+                precision=config.precision,
             ),
             config=config.get_deepspeed_config(),
         )
@@ -355,6 +357,7 @@ def main():
                 tokenizer=tokenizer,
                 output_image_size=config.image_size,
                 output_point_nums=config.num_points,
+                precision=config.precision,
             ),
         )
 
