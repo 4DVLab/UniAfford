@@ -483,17 +483,17 @@ def train(
             output_dict = model_engine(**input_dict)
 
             # ========== 在训练脚本中计算损失 ==========
-            if not output_dict.get("inference", False):
+            if not input_dict.get("inference", False):
                 # 1. 计算语言模型损失（交叉熵）
                 ce_loss = output_dict["output"].loss * model_engine.module.ce_loss_weight
                 
                 # 2. 计算 2D 掩码损失
                 mask_bce_loss, mask_dice_loss, mask_loss = calc.img_loss(
-                    pred_masks=output_dict["pred_masks"] if output_dict["has_image"] else torch.empty(0),
-                    gt_masks=output_dict["gt_masks"] if output_dict["has_image"] else torch.empty(0),
+                    pred_masks=output_dict["pred_masks"],
+                    gt_masks=input_dict["gt_masks"],
                     bce_loss_weight=model_engine.module.bce_loss_weight,
                     dice_loss_weight=model_engine.module.dice_loss_weight,
-                ) if output_dict.get("has_image") and output_dict.get("pred_masks") is not None else (
+                ) if output_dict.get("has_valid_image") and output_dict.get("pred_masks") is not None else (
                     torch.tensor(0.0, device=ce_loss.device),
                     torch.tensor(0.0, device=ce_loss.device),
                     torch.tensor(0.0, device=ce_loss.device)
@@ -501,11 +501,11 @@ def train(
                 
                 # 3. 计算 3D 点云掩码损失
                 mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss = calc.pc_loss(
-                    pred_3d_masks=output_dict["pred_3d_masks"] if output_dict["has_point_cloud"] else torch.empty(0),
-                    gt_3d_masks=output_dict["gt_3d_masks"] if output_dict["has_point_cloud"] else torch.empty(0),
+                    pred_3d_masks=output_dict["pred_3d_masks"],
+                    gt_3d_masks=input_dict["gt_3d_masks"],
                     bce_loss_weight=model_engine.module.bce_loss_weight,
                     dice_loss_weight=model_engine.module.dice_loss_weight,
-                ) if output_dict.get("has_point_cloud") and output_dict.get("pred_3d_masks") is not None else (
+                ) if output_dict.get("has_valid_point_cloud") and output_dict.get("pred_3d_masks") is not None else (
                     torch.tensor(0.0, device=ce_loss.device),
                     torch.tensor(0.0, device=ce_loss.device),
                     torch.tensor(0.0, device=ce_loss.device)

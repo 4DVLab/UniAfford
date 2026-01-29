@@ -36,7 +36,7 @@ class TrainingConfig:
         epochs=250,
         steps_per_epoch=100,
         batch_size=1,
-        grad_accumulation_steps=10,
+        grad_accumulation_steps=1,
         val_batch_size=1,
         workers=4,
         print_freq=1,

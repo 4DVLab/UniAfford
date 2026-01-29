@@ -164,27 +164,20 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
 
     def get_visual_embs(self, pixel_values: torch.FloatTensor):
         """
-        获取图像的视觉嵌入（使用 SAM 的图像编码器）
+        获取图像的视觉嵌入（使用 SAM 的图像编码器）- 批量推理版本
         
         Args:
-            pixel_values: 输入图像张量，形状为 [batch_size, C, H, W]
+            pixel_values: 输入图像张量，形状为 [batch_size, C, H, W]，已满足SAM图像编码器的输入要求
             
         Returns:
             image_embeddings: 图像嵌入，形状为 [batch_size, embed_dim, H', W']
         """
-        with torch.no_grad():  # SAM 图像编码器不需要梯度
-            image_embeddings_list = []
-            # 逐个处理图像（避免内存溢出）
-            for i in range(pixel_values.shape[0]):
-                torch.cuda.empty_cache()
-                # 使用 SAM 的图像编码器提取特征
-                image_embeddings = self.model.visual_model.image_encoder(
-                    pixel_values[i].unsqueeze(0)
-                )
-                image_embeddings_list.append(image_embeddings)
-            torch.cuda.empty_cache()
-            # 拼接所有图像的嵌入
-            image_embeddings = torch.cat(image_embeddings_list, 0)
+        # 无梯度推理，SAM图像编码器无需训练梯度
+        with torch.no_grad():
+            # 可选：推理前清理无用到的CUDA缓存（轻量操作，不影响批量推理）
+            # torch.cuda.empty_cache()
+            image_embeddings = self.model.visual_model.image_encoder(pixel_values)
+        
         return image_embeddings
     
     def get_point_cloud_embs(self, point_clouds: torch.FloatTensor):
@@ -203,7 +196,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
     
     def preprocess_clip_images(self, images_clip: torch.FloatTensor):
         """
-        预处理 CLIP 图像
+        预处理 CLIP 图像 TODO: 优化掉clip，统一使用gpu计算
         
         Args:
             images_clip: 输入图像张量，形状为 [B, C, H, W]，值范围 [0, 1] 或 [0, 255]
@@ -462,17 +455,20 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         labels: torch.LongTensor = None,
         attention_masks: torch.LongTensor = None,
         offset: torch.LongTensor = None,
-        masks_list: List[torch.FloatTensor] = None,
-        original_size_list: List[torch.Tensor] = None,
-        resize_list: List[tuple] = None,
+        img_masks_tensor: torch.Tensor = None,
+        original_size_list: List[List] = None,
+        resize_list: List[List] = None,
         inference: bool = False,
         point_clouds: torch.FloatTensor = None,  # 3D点云输入 [B, 3, N] 或 [B, N, 3]
-        point_masks_list: List[torch.FloatTensor] = None,  # 3D点云真实掩码列表
+        pc_masks_tensor: torch.FloatTensor = None,  # 3D点云真实掩码列表
         batch_size: int = None,  # 从外部传入的 batch_size（可选）
+        img_valid_mask: torch.BoolTensor = None,  # 图像有效性标记 [B]
+        pc_valid_mask: torch.BoolTensor = None,  # 点云有效性标记 [B]
+        pc_valid_lengths: torch.LongTensor = None,  # 点云有效长度 [B]
         **kwargs,
     ):
         """
-        模型前向传播主函数（支持动态模态输入）
+        模型前向传播主函数（支持动态模态输入和有效性屏蔽）
         
         Args:
             images: SAM 输入图像，形状 [batch_size, C, H, W]，可选
@@ -481,45 +477,43 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             labels: 文本标签（用于计算语言模型损失）
             attention_masks: 注意力掩码
             offset: 批次偏移量，用于处理不同长度的序列
-            masks_list: 真实分割掩码列表（Ground Truth）
+            img_masks_tensor: 真实分割掩码列表（Ground Truth）
             original_size_list: 原始图像尺寸列表 [(H, W), ...]
             resize_list: 调整后的图像尺寸列表 [(H, W), ...]
             inference: 是否为推理模式（不计算损失）
             point_clouds: 3D点云输入
-            point_masks_list: 3D点云真实掩码列表
+            pc_masks_tensor: 3D点云真实掩码列表
             batch_size: 从外部传入的 batch_size（可选，如果未提供则自动计算）
+            img_valid_mask: 图像有效性标记 [B]，True 表示该样本有真实图像
+            pc_valid_mask: 点云有效性标记 [B]，True 表示该样本有真实点云
+            pc_valid_lengths: 点云有效长度 [B]，表示每个样本的真实点数
             
         Returns:
             包含损失和预测结果的字典
         """
-        # 判断输入模态
-        has_image = images is not None and images_clip is not None
-        has_point_cloud = point_clouds is not None
-        
-        # 至少需要一种模态
-        if not has_image and not has_point_cloud:
-            raise ValueError("至少需要提供图像或点云输入")
-        
         # 获取 batch_size（优先使用传入的值，否则自动计算）
         if batch_size is None:
-            if has_image:
-                batch_size = images.shape[0]
-                if offset is not None:
-                    assert batch_size == len(offset) - 1
-            else:
-                batch_size = point_clouds.shape[0] if has_point_cloud else 1
+            batch_size = input_ids.shape[0]
         
-        # 获取 SAM 图像嵌入（仅在有图像输入时）
+        # debug: 必须有valid输入
+        if img_valid_mask is None or pc_valid_mask is None or pc_valid_lengths is None:
+            raise ValueError
+
+        # 当所有样本都无效时（全0填充），has_valid_image/has_valid_point_cloud 应该为 False
+        has_valid_image = img_valid_mask.any()
+        has_valid_point_cloud = pc_valid_mask.any()
+        
+        # 获取 SAM 图像嵌入（仅在有有效图像输入时）
         image_embeddings = None
-        if has_image:
+        if has_valid_image:
             image_embeddings = self.get_visual_embs(images)
 
-        # 找到所有 [SEG] token 和 [AFF] token 的位置
-        # 根据输入模态决定要查找的 token
-        # if has_image and has_point_cloud:
+        # # 找到所有 [SEG] token 和 [AFF] token 的位置
+        # # 根据输入模态决定要查找的 token
+        # if has_valid_image and has_valid_point_cloud:
         #     # 两种模态都有，查找 [SEG] 和 [AFF]
         #     seg_token_mask = (input_ids[:, 1:] == self.seg_token_idx) | (input_ids[:, 1:] == self.aff_token_idx)
-        # elif has_image:
+        # elif has_valid_image:
         #     # 只有图像，只查找 [SEG]
         #     seg_token_mask = (input_ids[:, 1:] == self.seg_token_idx)
         # else:
@@ -527,19 +521,19 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         #     seg_token_mask = (input_ids[:, 1:] == self.aff_token_idx)
         
         # 使用 [SEG] 同时作为点云和图片的token
-        if has_image or has_point_cloud:
+        if has_valid_image or has_valid_point_cloud:
             seg_token_mask = input_ids[:, 1:] == self.seg_token_idx
+        else:
+            # 纯文本批次，没有任何有效模态
+            seg_token_mask = torch.zeros_like(input_ids[:, 1:], dtype=torch.bool)
         
-        seg_token_mask = torch.cat(
-            [
+        seg_token_mask = torch.cat([
                 seg_token_mask,
                 torch.zeros((seg_token_mask.shape[0], 1), dtype=torch.bool, device=seg_token_mask.device),
-            ],
-                dim=1,
-            )
+            ], dim=1)
 
-        # 统一处理图像预处理和扩展
-        if has_image:
+        # 统一处理图像预处理和扩展（仅在有有效图像时）
+        if has_valid_image:
             if inference:
                 # 推理模式：扩展单张图像以匹配序列长度
                 assert images_clip.shape[0] == 1
@@ -566,7 +560,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         # 统一调用父类前向传播（LLaVA）
         # 推理和训练的唯一区别是是否传入labels
         output = super().forward(
-            images=images_clip if has_image else None,
+            images=images_clip if has_valid_image else None,
             attention_mask=attention_masks,
             input_ids=input_ids,
             labels=labels if not inference else None,
@@ -578,7 +572,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         assert len(self.model.text_hidden_fcs) == 1
         last_hidden_state = self.model.text_hidden_fcs[0](output_hidden_states[-1])
         
-        # HACK: 确保 last_hidden_state 始终是 3D 张量 [B, L', C]
+        # 确保 last_hidden_state 始终是 3D 张量 [B, L', C]
         if last_hidden_state.dim() == 2:
             last_hidden_state = last_hidden_state.unsqueeze(0)  # [1, L', C]
         
@@ -597,7 +591,8 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
                 dim=1,
             )
         elif actual_seq_len < current_mask_len:
-            # 理论上不应该发生，但为了安全起见进行截断
+            # 理论上不应该发生
+            raise ValueError
             seg_token_mask = seg_token_mask[:, :actual_seq_len]
         
         # 提取 [SEG]/[AFF] token 位置的嵌入作为分割提示
@@ -621,40 +616,23 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             pred_embeddings_.append(pred_embeddings[start_i:end_i])
         pred_embeddings = pred_embeddings_
 
-        # ========== 2D 分割：使用 SAM 生成分割掩码（仅在有图像输入时）==========
+        # ========== 2D 分割：使用 SAM 生成分割掩码（仅在有有效图像输入时）==========
         pred_masks = None
-        gt_masks_tensor = None
-        if has_image:
+        if has_valid_image:
             pred_masks = self._generate_2d_masks(pred_embeddings, image_embeddings, resize_list, original_size_list)
+            pred_masks = pred_masks * img_valid_mask[:, None, None]
             
-            # 将 GT 掩码列表转换为批量张量 [B, H, W]
-            if masks_list is not None and len(masks_list) > 0:
-                # 假设所有掩码形状相同
-                gt_masks_tensor = torch.stack([
-                    mask.squeeze(-1) if mask.dim() == 3 else mask
-                    for mask in masks_list
-                ], dim=0)  # [B, H, W]
-
-        # ========== 3D 分割：使用 PointNet++ 处理点云（仅在有点云输入时）==========
+        # ========== 3D 分割：使用 PointNet++ 处理点云（仅在有有效点云输入时）==========
         pred_3d_masks = None
-        gt_3d_masks_tensor = None
-        if has_point_cloud:
+        if has_valid_point_cloud:
             pred_3d_masks = self._generate_3d_masks(pred_embeddings, point_clouds)
-            
-            # 将 GT 掩码列表转换为批量张量 [B, N]
-            if point_masks_list is not None and len(point_masks_list) > 0:
-                gt_3d_masks_tensor = torch.stack([
-                    mask.squeeze(-1) if mask.dim() == 2 else mask
-                    for mask in point_masks_list
-                ], dim=0)  # [B, N]
+            pred_3d_masks = pred_3d_masks * pc_valid_mask[:, None]
 
         # 返回预测结果和中间数据
         return {
             "output": output,  # 语言模型输出
             "pred_masks": pred_masks,  # [B, H, W] 或 None
-            "gt_masks": gt_masks_tensor,  # [B, H, W] 或 None
             "pred_3d_masks": pred_3d_masks,  # [B, N] 或 None
-            "gt_3d_masks": gt_3d_masks_tensor,  # [B, N] 或 None
-            "has_image": has_image,
-            "has_point_cloud": has_point_cloud,
+            'has_valid_image': has_valid_image, 
+            'has_valid_point_cloud': has_valid_point_cloud,
         }
