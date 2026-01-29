@@ -606,8 +606,7 @@ def validate(val_loader, model_engine, epoch, writer, config):
         evaluate_segmentation_batch(
             output_dict,
             metrics_tracker,
-            mask_threshold_2d=config.mask_threshold_2d,
-            mask_threshold_3d=config.mask_threshold_3d
+            mask_threshold_2d=config.mask_threshold_2d
         )
 
     # 分布式训练时汇总所有进程的指标
