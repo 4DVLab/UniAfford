@@ -2,6 +2,7 @@
 NOTE: 所有的相对目录都是基于项目（仓库）根目录而言
 """
 import os
+from re import S
 import torch
 
 class TrainingConfig:
@@ -31,10 +32,12 @@ class TrainingConfig:
         train_ratio=0.7,
         val_ratio=0.15,
         test_ratio=0.15,
+        use_sample_cache=False,  # 是否启用样本缓存以提高数据加载速度，适用于小批量数据且显存充裕的情况
         
         # 训练配置
         epochs=250,
-        steps_per_epoch=100,
+        samples_per_epoch=None,  # 数据大时设置为训练数据集的 70% 以上，比较小时设置为 90%以上。默认全量训练数据集
+        steps_per_epoch=None,
         batch_size=1,
         grad_accumulation_steps=1,
         val_batch_size=1,
@@ -119,10 +122,15 @@ class TrainingConfig:
         self.train_ratio = train_ratio
         self.val_ratio = val_ratio
         self.test_ratio = test_ratio
+        self.use_sample_cache = use_sample_cache
         
         # 训练配置
         self.epochs = epochs
-        self.steps_per_epoch = steps_per_epoch
+        self.steps_per_epoch = steps_per_epoch 
+        if samples_per_epoch is not None:
+            self.steps_per_epoch = samples_per_epoch // batch_size
+        self.samples_per_epoch = samples_per_epoch
+        
         self.batch_size = batch_size
         self.grad_accumulation_steps = grad_accumulation_steps
         self.val_batch_size = val_batch_size

@@ -256,9 +256,12 @@ def main():
         val_ratio=config.val_ratio,
         test_ratio=config.test_ratio,
         use_mm_start_end=config.use_mm_start_end,
-        conv_type = config.conv_type,
+        samples_per_epoch=config.samples_per_epoch,
+        conv_type=config.conv_type,
+        use_sample_cache=config.use_sample_cache
     )
-    
+    config.samples_per_epoch = dataset_manager.samples_per_epoch
+
     train_dataset = dataset_manager.get_train_dataset()
 
     if config.no_eval == False:
@@ -368,7 +371,13 @@ def main():
         giou, ciou = validate(val_loader, model_engine, 0, writer, config)
         exit()
 
+    if config.steps_per_epoch is None:
+        config.steps_per_epoch = config.samples_per_epoch // config.batch_size
+
     for epoch in range(config.start_epoch, config.epochs):
+        # 在每个 epoch 开始时重新生成随机采样索引
+        train_dataset.set_epoch(epoch)
+        
         # train for one epoch
         train_iter = train(
             train_loader,

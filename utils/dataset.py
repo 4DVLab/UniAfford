@@ -27,22 +27,15 @@ class BaseDataset(Dataset):
     """数据集基类，提供通用的数据处理方法"""
     
     def __init__(self, samples: List[JointDataSample], tokenizer, image_size: int = 1024, num_points: int = 2048, 
-                 precision: str = "fp32", conv_type: str = None, use_mm_start_end: bool = False):
+                 precision = torch.float32, conv_type: str = None, use_mm_start_end: bool = False, use_sample_cache: bool = False):
         self.samples = samples
         self.image_size = image_size
         self.num_points = num_points
         self.conv_type = conv_type
         self.use_mm_start_end = use_mm_start_end
         self.tokenizer = tokenizer
-        
-        if precision == "fp16":
-            target_dtype = torch.float16
-        elif precision == "bf16":
-            target_dtype = torch.bfloat16
-        else:
-            target_dtype = torch.float32
-
-        self.precision = target_dtype  # 添加精度属性
+        self.use_sample_cache = use_sample_cache  # 缓存开关
+        self.precision = precision  # 添加精度属性
     
     def __len__(self): 
         return len(self.samples)
@@ -60,13 +53,14 @@ class BaseDataset(Dataset):
         3. 使用连续内存布局提高传输效率
         4. 缓存处理后的张量以避免重复计算
         """
-        # 用于存储缓存的成员变量
-        if not hasattr(self, '_sample_cache'):
-            self._sample_cache = {}
+        # 用于存储缓存的成员变量（仅在启用缓存时使用）
+        if self.use_sample_cache:
+            if not hasattr(self, '_sample_cache'):
+                self._sample_cache = {}
 
-        sample_id = id(sample)
-        if sample_id in self._sample_cache:
-            return self._sample_cache[sample_id]
+            sample_id = id(sample)
+            if sample_id in self._sample_cache:
+                return self._sample_cache[sample_id]
 
         data = sample.get_data()
         
@@ -214,10 +208,54 @@ class BaseDataset(Dataset):
                 result['pc_gt'] = pm_tensor
         
         # 写入缓存（已经是目标精度，conversation 已构建）
-        self._sample_cache[sample_id] = result
+        if self.use_sample_cache:
+            self._sample_cache[sample_id] = result
 
         return result
 
+class TrainDataset(BaseDataset):
+    """训练数据集，支持样本重复和打乱"""
+    
+    def __init__(self, samples: List[JointDataSample], tokenizer, image_size: int = 1024, num_points: int = 2048, 
+                 precision = torch.float32, conv_type: str = None, use_mm_start_end: bool = False, 
+                 samples_per_epoch: int = 10000, use_sample_cache: bool = True,
+                 ):
+        super().__init__(samples, tokenizer, image_size, num_points, precision, conv_type, use_mm_start_end, use_sample_cache)
+        self.samples_per_epoch = samples_per_epoch
+        self.num_samples = len(self.samples)
+        self.current_epoch = 0
+        
+        # 为当前 epoch 生成随机采样索引
+        self._generate_epoch_indices()
+    
+    def _generate_epoch_indices(self):
+        """为当前 epoch 生成随机采样索引"""
+        # 如果 samples_per_epoch 大于实际样本数，则进行重复采样
+        if self.samples_per_epoch <= self.num_samples:
+            # 不重复采样：从所有样本中随机选择 samples_per_epoch 个
+            self.epoch_indices = random.sample(range(self.num_samples), self.samples_per_epoch)
+        else:
+            # 需要重复采样：使用 random.choices 允许重复
+            self.epoch_indices = random.choices(range(self.num_samples), k=self.samples_per_epoch)
+    
+    def set_epoch(self, epoch: int):
+        """
+        设置当前 epoch，用于在每个 epoch 开始时重新生成随机索引
+        
+        Args:
+            epoch: 当前 epoch 编号
+        """
+        self.current_epoch = epoch
+        self._generate_epoch_indices()
+    
+    def __len__(self): 
+        return self.samples_per_epoch
+    
+    def __getitem__(self, index: int) -> Dict[str, Any]:
+        # 直接使用预生成的索引
+        actual_index = self.epoch_indices[index]
+        sample = self.samples[actual_index]
+        return self._process_sample(sample)
 
 class DatasetManager:
     """
@@ -228,7 +266,7 @@ class DatasetManager:
     def __init__(self, dataset_dir: str, 
                  tokenizer=None, 
                  vision_tower: str = None,
-                 precision: str = "bf16",
+                 precision = torch.float32,
                  image_size: int = (1024,1024),
                  num_points: int = 2048,
                  train_ratio: float = 0.7,
@@ -236,7 +274,9 @@ class DatasetManager:
                  test_ratio: float = 0.15, 
                  random_seed: int = 42,
                  use_mm_start_end: bool = False,
-                 conv_type: str = None):
+                 samples_per_epoch: int = None,
+                 conv_type: str = None,
+                 use_sample_cache: bool = True):
         """
         初始化数据集管理器
         
@@ -252,6 +292,9 @@ class DatasetManager:
             test_ratio: 测试集比例
             random_seed: 随机种子
             use_mm_start_end: 是否使用多模态开始/结束标记
+            samples_per_epoch: 每一个epoch使用的数据量
+            conv_type: 对话类型
+            use_sample_cache: 是否启用样本缓存
         """
         self.dataset_dir = dataset_dir
         self.tokenizer = tokenizer
@@ -265,7 +308,8 @@ class DatasetManager:
         self.random_seed = random_seed
         self.conv_type = conv_type
         self.use_mm_start_end = use_mm_start_end
-        
+        self.use_sample_cache = use_sample_cache
+
         # 只创建一次 JointDataset
         self.joint_dataset = JointDataset(
             dataset_root=dataset_dir,
@@ -274,9 +318,10 @@ class DatasetManager:
             test_ratio=test_ratio,
             random_seed=random_seed,
         )
+        # 默认使用全量数据
+        self.samples_per_epoch = samples_per_epoch if samples_per_epoch is not None else self.joint_dataset.count
         
-        # 缓存已创建的数据集
-        self._train_dataset = BaseDataset(
+        self._train_dataset = TrainDataset(
                 samples=self.joint_dataset.train_samples,
                 image_size=self.image_size,
                 num_points=self.num_points,
@@ -284,6 +329,8 @@ class DatasetManager:
                 precision=self.precision,
                 conv_type = self.conv_type,
                 use_mm_start_end=self.use_mm_start_end,
+                use_sample_cache=self.use_sample_cache,
+                samples_per_epoch=self.samples_per_epoch
             )
         self._val_dataset = BaseDataset(
                 samples=self.joint_dataset.val_samples,
