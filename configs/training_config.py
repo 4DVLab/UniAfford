@@ -195,9 +195,6 @@ class TrainingConfig:
     
     def _validate(self):
         """验证配置参数"""
-        if self.precision not in ["fp32", "bf16", "fp16"]:
-            raise ValueError(f"precision must be one of ['fp32', 'bf16', 'fp16'], got {self.precision}")
-        
         if self.conv_type not in ["llava_v1", "llava_llama_2"]:
             raise ValueError(f"conv_type must be one of ['llava_v1', 'llava_llama_2'], got {self.conv_type}")
     
@@ -212,10 +209,10 @@ class TrainingConfig:
             "train_micro_batch_size_per_gpu": self.batch_size,
             "gradient_accumulation_steps": self.grad_accumulation_steps,
             "fp16": {
-                "enabled": self.precision == "fp16",
+                "enabled": self.precision == torch.half,
             },
             "bf16": {
-                "enabled": self.precision == "bf16",
+                "enabled": self.precision == torch.bfloat16,
             },
             "gradient_clipping": self.gradient_clipping,
             "zero_optimization": {
