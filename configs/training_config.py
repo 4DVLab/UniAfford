@@ -2,7 +2,7 @@
 NOTE: 所有的相对目录都是基于项目（仓库）根目录而言
 """
 import os
-
+import torch
 
 class TrainingConfig:
     """
@@ -25,8 +25,8 @@ class TrainingConfig:
         
         # 数据配置
         dataset_dir="../datasets/merged1-2-3/",
-        log_base_dir="./runs",
-        exp_name="lisa",
+        log_base_dir="../runs",
+        exp_name="joint-aff-exp",
         num_points=2048,
         train_ratio=0.7,
         val_ratio=0.15,
@@ -97,6 +97,14 @@ class TrainingConfig:
         # 基础配置
         self.local_rank = local_rank
         self.version = version
+        
+        self.precision = torch.float32
+        match precision:
+            case 'fp16':
+                self.precision = torch.half
+            case "bf16":
+                self.precision = torch.bfloat16
+
         self.precision = precision
         self.vis_save_path = vis_save_path
         

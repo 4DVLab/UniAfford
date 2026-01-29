@@ -9,6 +9,7 @@ from tqdm import tqdm
 import transformers
 from peft import LoraConfig, get_peft_model
 from torch.utils.tensorboard import SummaryWriter
+from transformers import get_cosine_schedule_with_warmup
 
 from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
@@ -158,15 +159,9 @@ def main():
         "use_mm_start_end": config.use_mm_start_end,
     }
     
-    torch_dtype = torch.float32
-    if config.precision == "bf16":
-        torch_dtype = torch.bfloat16
-    elif config.precision == "fp16":
-        torch_dtype = torch.half
-    
     # 初始化魔改后的 LISA 模型
     model = LISAForCausalLM.from_pretrained(
-        config.version, dtype=torch_dtype, low_cpu_mem_usage=True, **model_args
+        config.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
     )
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
@@ -178,7 +173,7 @@ def main():
     # 初始化视觉模块
     model.get_model().initialize_vision_modules(model.get_model().config)
     vision_tower = model.get_model().get_vision_tower()
-    vision_tower.to(dtype=torch_dtype, device=config.local_rank)
+    vision_tower.to(dtype=config.precision, device=config.local_rank)
     
     conversation_lib.default_conversation = conversation_lib.conv_templates[
         config.conv_type
@@ -286,7 +281,6 @@ def main():
         )
         
         # 手动创建学习率调度器
-        from transformers import get_cosine_schedule_with_warmup
         total_steps = config.epochs * config.steps_per_epoch
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
