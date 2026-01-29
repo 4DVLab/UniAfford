@@ -604,6 +604,7 @@ def validate(val_loader, model_engine, epoch, writer, config):
 
         # 使用统一的评估函数（支持批处理）
         evaluate_segmentation_batch(
+            input_dict,
             output_dict,
             metrics_tracker,
             mask_threshold_2d=config.mask_threshold_2d

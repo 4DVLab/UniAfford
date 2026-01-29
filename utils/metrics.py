@@ -335,6 +335,7 @@ class TensorBoardLogger:
 
 # ===================== 辅助函数 =====================
 def evaluate_segmentation_batch(
+    input_dict,
     output_dict: Dict[str, any],
     metrics_tracker: MetricsTracker,
     mask_threshold_2d: float = 0.0,
@@ -351,7 +352,7 @@ def evaluate_segmentation_batch(
     # 2D分割评估
     if "pred_masks" in output_dict and output_dict["pred_masks"] is not None:
         pred_masks = output_dict["pred_masks"]  # List[Tensor] 或 Tensor
-        gt_masks = output_dict["gt_masks"]
+        gt_masks = input_dict["gt_masks"]
         
         # 如果是列表，逐个处理（向后兼容）
         if isinstance(pred_masks, list):
@@ -368,7 +369,7 @@ def evaluate_segmentation_batch(
     # 3D分割评估
     if "pred_3d_masks" in output_dict and output_dict["pred_3d_masks"] is not None:
         pred_3d_masks = output_dict["pred_3d_masks"]  # List[Tensor] 或 Tensor
-        gt_3d_masks = output_dict["gt_3d_masks"]
+        gt_3d_masks = input_dict["gt_3d_masks"]
         
         # 如果是列表，逐个处理（向后兼容）
         if isinstance(pred_3d_masks, list):
