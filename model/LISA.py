@@ -494,7 +494,7 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
             batch_size = input_ids.shape[0]
         
         # debug: 必须有valid输入
-        if img_valid_mask is None or pc_valid_mask is None or pc_valid_lengths is None:
+        if img_valid_mask is None or pc_valid_mask is None or img_valid_mask is None:
             raise ValueError
 
         # 当所有样本都无效时（全0填充），has_valid_image/has_valid_point_cloud 应该为 False
