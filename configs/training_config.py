@@ -105,7 +105,6 @@ class TrainingConfig:
             case "bf16":
                 self.precision = torch.bfloat16
 
-        self.precision = precision
         self.vis_save_path = vis_save_path
         
         # 模型配置
