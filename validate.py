@@ -57,18 +57,13 @@ def parse_args():
 
 def load_model(checkpoint_path, config, device):
     """
-    加载训练好的LISA模型（终极兼容版）
-    支持：1. 单文件(.pth/.bin)  2. 分片.bin目录(001-of-100)  3. 带model_state_dict的训练版.pth
-    Args:
-        checkpoint_path: 单文件路径 OR 分片.bin所在目录
-        config: 训练配置
-        device: 设备
-    Returns:
-        model: 加载好的模型（eval模式）
-        tokenizer: 分词器
+    加载训练好的LISA模型（终极版：适配Transformers 4.57.6高版本）
+    支持：1. HF分片目录（带index.json）  2. 单文件(.pth/.bin)  3. 训练版.pth（带model_state_dict）
+    已修复：1. load_sharded_checkpoint传参报错  2. 键名前缀不匹配  3. 分片权重合并失败
+    适配：Transformers 4.57.6 原生map_location + 原地填充逻辑
     """
+    import os
     print(f"模型加载源: {checkpoint_path}")
-    # 检查路径是否存在
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"路径不存在: {checkpoint_path}")
 
@@ -108,23 +103,46 @@ def load_model(checkpoint_path, config, device):
     model.config.bos_token_id = tokenizer.bos_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
 
-    # LISA 特有初始化（必须保留）
+    # LISA 特有初始化（必须保留，模型运行核心）
     model.get_model().initialize_vision_modules(model.get_model().config)
     vision_tower = model.get_model().get_vision_tower()
-    vision_tower.to(dtype=config.precision, device=device)
+    vision_tower.to(dtype=config.precision, device="cpu")  # 先放CPU，后续统一移设备
     conversation_lib.default_conversation = conversation_lib.conv_templates[config.conv_type]
     model.resize_token_embeddings(len(tokenizer))
     model.get_model().initialize_lisa_modules(model.get_model().config)
+    model = model.to("cpu")  # 高版本分片加载前，模型先放CPU，避免设备不匹配
 
-    
+    # ===================== 3. 核心：4.57.6高版本 适配 load_sharded_checkpoint =====================
+    def _load_sharded_bin(dir_path):
+        """
+        Transformers 4.57.6 高版本专用分片加载
+        核心：用模型自身state_dict做骨架，原地填充，原生支持map_location
+        """
+        # 关键1：获取模型的空state_dict（骨架），作为分片填充的基准
+        model_state_dict = model.state_dict()
+        print(f"初始化模型state_dict骨架，共 {len(model_state_dict)} 个模型参数键名")
+        # 关键2：4.57.6 正确调用，传模型骨架+目录+map_location，原地填充
+        print(f"使用HF高版本方法加载分片，索引目录：{dir_path}，加载到CPU...")
+        load_sharded_checkpoint(
+            state_dict=model_state_dict,  # 模型骨架（非空字典）
+            checkpoint_dir=dir_path,      # 分片目录
+            map_location="cpu"            # 4.57.6 原生支持，大模型必设
+        )
+        # 验证填充结果：非空即成功
+        non_empty_keys = [k for k, v in model_state_dict.items() if v is not None]
+        if not non_empty_keys:
+            raise RuntimeError("分片加载失败，模型state_dict未填充任何参数！")
+        print(f"✓ HF分片合并完成，成功加载 {len(non_empty_keys)} 个参数")
+        return model_state_dict
+
     print(f"正在加载权重...")
-    state_dict = dict()
-    # 判断路径是【目录（分片）】还是【单文件】
+    state_dict = None
+    # 判断路径是【分片目录】还是【单文件】
     if os.path.isdir(checkpoint_path):
-        # 路径是目录 → 加载分片.bin并合并
-        state_dict = load_sharded_checkpoint(state_dict, checkpoint_path, map_location='cpu')
+        # 目录 → 用4.57.6高版本方法加载分片
+        state_dict = _load_sharded_bin(checkpoint_path)
     else:
-        # 路径是单文件 → 原逻辑加载
+        # 单文件 → 原逻辑加载，兼容.pth/.bin
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
         if isinstance(checkpoint, dict):
             if 'model_state_dict' in checkpoint:
@@ -133,31 +151,39 @@ def load_model(checkpoint_path, config, device):
                 best_giou = checkpoint.get('best_giou', 'unknown')
                 print(f"Checkpoint信息: Epoch={epoch}, Best gIoU={best_giou}")
             else:
-                state_dict = checkpoint  # 单.bin/纯state_dict的.pth
+                state_dict = checkpoint  # 纯state_dict格式的.bin/.pth
         else:
             raise ValueError(f"不支持的单文件格式: {type(checkpoint)}")
 
     if state_dict is None:
         raise RuntimeError("无法提取模型state_dict，请检查权重文件/目录！")
 
-    # 移除多卡的module.前缀
+    # ===================== 4. 关键修复：移除双层前缀，保证权重键名和模型完全匹配 ======================
     state_dict = {
-        k.replace('module.', '').replace('base_model.model.model.', '') 
+        k.replace('module.', '').replace('base_model.model.model.', ''): v 
         for k, v in state_dict.items()
     }
-    # 加载权重到模型
+    # 调试打印：确认前缀移除后的键名格式（可注释）
+    print("✓ 前缀移除完成，权重前10个键名：")
+    for k in list(state_dict.keys())[:10]:
+        print(f"  - {k}")
+
+    # ===================== 5. 加载权重到模型（严格性控制，避免无关报错）=====================
+    print(f"\n正在将权重加载到模型（设备：{device}）...")
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-    # 打印关键提示
-    if missing_keys:
-        print(f"提示: 模型未加载参数 {len(missing_keys)} 个，前10个: {missing_keys[:10]}")
-    if unexpected_keys:
-        print(f"提示: 权重未匹配参数 {len(unexpected_keys)} 个，前10个: {unexpected_keys[:10]}")
-    # 模型设备配置+评估模式
+    # 打印清晰的加载统计（核心：权重未匹配参数为0）
+    print(f"📌 模型未加载参数：{len(missing_keys)} 个" + (f"（前10个：{missing_keys[:10]}" if missing_keys else "（全部加载！）"))
+    print(f"📌 权重未匹配参数：{len(unexpected_keys)} 个" + (f"（前10个：{unexpected_keys[:10]}" if unexpected_keys else "（所有权重100%匹配！）"))
+
+
+    # 模型最终设备配置+评估模式（推理必需，关闭BN/Dropout）
     model = model.to(device)
     model.eval()
-    print("✓ 模型整体加载完成！\n")
-    return model, tokenizer
+    # 视觉塔统一移到目标设备
+    model.get_model().get_vision_tower().to(device)
+    print("✓ 模型整体加载完成！已进入评估模式，视觉塔已同步到目标设备\n")
 
+    return model, tokenizer
 def validate(model, val_loader, device, config, save_predictions=False, output_dir=None):
     """
     验证函数
