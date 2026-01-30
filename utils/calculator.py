@@ -248,7 +248,7 @@ def pc_AUC(
 def pc_aIOU(
     pred_mask: torch.Tensor,
     gt_mask: torch.Tensor,
-    num_thresholds: int = 100
+    num_thresholds: int = 20
 ) -> torch.Tensor:
     """
     批量计算点云的多阈值平均IoU（aIoU）
