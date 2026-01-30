@@ -67,7 +67,8 @@ def load_model(checkpoint_path, config, device):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"路径不存在: {checkpoint_path}")
 
-    # ===================== 1. 初始化Tokenizer（LISA特有，无修改）=====================
+    # ===================== 1. 初始化Tokenizer（与train_ds.py保持一致）=====================
+    # Create model - 使用魔改后的 LISAForCausalLM 模型（已支持点云）
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.version,
         cache_dir=None,
@@ -76,13 +77,20 @@ def load_model(checkpoint_path, config, device):
         use_fast=False,
     )
     tokenizer.pad_token = tokenizer.unk_token
-    tokenizer.add_tokens(["[SEG]", "[AFF]"])
+    
+    # 添加特殊标记
+    tokenizer.add_tokens("[SEG]")  # 2D分割标记
+    tokenizer.add_tokens("[AFF]")  # 3D affordance标记
     config.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
     config.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
-    if config.use_mm_start_end:
-        tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
 
-    # ===================== 2. 初始化LISA模型（特有步骤，无修改）=====================
+    if config.use_mm_start_end:
+        tokenizer.add_tokens(
+            [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
+        )
+
+    # ===================== 2. 初始化LISA模型（与train_ds.py保持一致）=====================
+    # 模型参数配置
     model_args = {
         "train_mask_decoder": config.train_mask_decoder,
         "out_dim": config.out_dim,
@@ -90,12 +98,14 @@ def load_model(checkpoint_path, config, device):
         "dice_loss_weight": config.dice_loss_weight,
         "bce_loss_weight": config.bce_loss_weight,
         "seg_token_idx": config.seg_token_idx,
-        "aff_token_idx": config.aff_token_idx,
+        "aff_token_idx": config.aff_token_idx,  # 3D affordance token
         "vision_pretrained": config.vision_pretrained,
         "vision_tower": config.vision_tower,
         "use_mm_start_end": config.use_mm_start_end,
     }
-    print("正在初始化LISA模型...")
+    
+    # 初始化魔改后的 LISA 模型
+    print("正在初始化模型...")
     model = LISAForCausalLM.from_pretrained(
         config.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
     )
@@ -103,44 +113,26 @@ def load_model(checkpoint_path, config, device):
     model.config.bos_token_id = tokenizer.bos_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
 
-    # LISA 特有初始化（必须保留，模型运行核心）
+    # 初始化视觉模块
     model.get_model().initialize_vision_modules(model.get_model().config)
     vision_tower = model.get_model().get_vision_tower()
-    vision_tower.to(dtype=config.precision, device="cpu")  # 先放CPU，后续统一移设备
-    conversation_lib.default_conversation = conversation_lib.conv_templates[config.conv_type]
+    vision_tower.to(dtype=config.precision, device=config.local_rank)
+    
+    conversation_lib.default_conversation = conversation_lib.conv_templates[
+        config.conv_type
+    ]
+
     model.resize_token_embeddings(len(tokenizer))
+    
+    # 初始化 LISA 模块（包括 SAM 和 3D 点云分割器）
     model.get_model().initialize_lisa_modules(model.get_model().config)
-    model = model.to("cpu")  # 高版本分片加载前，模型先放CPU，避免设备不匹配
 
-    # ===================== 3. 核心：4.57.6高版本 适配 load_sharded_checkpoint =====================
-    def _load_sharded_bin(dir_path):
-        """
-        Transformers 4.57.6 高版本专用分片加载
-        核心：用模型自身state_dict做骨架，原地填充，原生支持map_location
-        """
-        # 关键1：获取模型的空state_dict（骨架），作为分片填充的基准
-        model_state_dict = model.state_dict()
-        print(f"初始化模型state_dict骨架，共 {len(model_state_dict)} 个模型参数键名")
-        # 关键2：4.57.6 正确调用，传模型骨架+目录+map_location，原地填充
-        print(f"使用HF高版本方法加载分片，索引目录：{dir_path}，加载到CPU...")
-        load_sharded_checkpoint(
-            state_dict=model_state_dict,  # 模型骨架（非空字典）
-            checkpoint_dir=dir_path,      # 分片目录
-            map_location="cpu"            # 4.57.6 原生支持，大模型必设
-        )
-        # 验证填充结果：非空即成功
-        non_empty_keys = [k for k, v in model_state_dict.items() if v is not None]
-        if not non_empty_keys:
-            raise RuntimeError("分片加载失败，模型state_dict未填充任何参数！")
-        print(f"✓ HF分片合并完成，成功加载 {len(non_empty_keys)} 个参数")
-        return model_state_dict
-
+    
     print(f"正在加载权重...")
     state_dict = None
     # 判断路径是【分片目录】还是【单文件】
     if os.path.isdir(checkpoint_path):
-        # 目录 → 用4.57.6高版本方法加载分片
-        state_dict = _load_sharded_bin(checkpoint_path)
+        state_dict = load_sharded_checkpoint(model, checkpoint_path)
     else:
         # 单文件 → 原逻辑加载，兼容.pth/.bin
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -184,6 +176,8 @@ def load_model(checkpoint_path, config, device):
     print("✓ 模型整体加载完成！已进入评估模式，视觉塔已同步到目标设备\n")
 
     return model, tokenizer
+
+
 def validate(model, val_loader, device, config, save_predictions=False, output_dir=None):
     """
     验证函数
