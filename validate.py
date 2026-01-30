@@ -26,7 +26,7 @@ from utils.metrics import (
     print_validation_summary,
 )
 from configs import TrainingConfig
-
+from transformers.modeling_utils import load_sharded_checkpoint
 
 def parse_args():
     """解析命令行参数"""
@@ -116,50 +116,13 @@ def load_model(checkpoint_path, config, device):
     model.resize_token_embeddings(len(tokenizer))
     model.get_model().initialize_lisa_modules(model.get_model().config)
 
-    # ===================== 3. 核心修改：支持单文件/分片.bin目录，加载并合并state_dict =====================
-    def _load_sharded_bin(dir_path):
-        """内部函数：加载分片.bin文件并合并为完整state_dict"""
-        import re
-        # 匹配分片命名规范：xxx-001-of-100.bin（提取数字部分用于排序）
-        shard_pattern = re.compile(r'^.+?-(\d+)-of-(\d+)\.bin$')
-        shard_files = []
-        total_shards = 0
-
-        # 遍历目录，筛选符合规范的分片文件
-        for file in os.listdir(dir_path):
-            file_path = os.path.join(dir_path, file)
-            if os.path.isfile(file_path) and file.endswith('.bin'):
-                match = shard_pattern.match(file)
-                if match:
-                    shard_idx = int(match.group(1))
-                    total_shards = int(match.group(2))
-                    shard_files.append((shard_idx, file_path))
-
-        # 校验分片文件
-        if not shard_files:
-            raise FileNotFoundError(f"目录 {dir_path} 中未找到符合规范的分片.bin文件（如xxx-001-of-100.bin）")
-        # 按分片索引升序排序（关键：加载顺序错误会导致权重混乱）
-        shard_files.sort(key=lambda x: x[0])
-        # 校验分片数量是否完整
-        if len(shard_files) != total_shards:
-            print(f"警告：检测到 {len(shard_files)} 个分片，预期 {total_shards} 个，可能缺失分片！")
-
-        # 逐个加载并合并state_dict
-        full_state_dict = {}
-        print(f"开始加载 {len(shard_files)} 个分片.bin文件...")
-        for idx, file_path in tqdm(shard_files, desc='加载分片'):
-            shard_ckpt = torch.load(file_path, map_location='cpu')
-            # 分片内的ckpt直接是state_dict，更新到总字典
-            full_state_dict.update(shard_ckpt)
-        print(f"✓ 分片合并完成，总参数数：{len(full_state_dict)}")
-        return full_state_dict
-
+    
     print(f"正在加载权重...")
-    state_dict = None
+    state_dict = dict()
     # 判断路径是【目录（分片）】还是【单文件】
     if os.path.isdir(checkpoint_path):
         # 路径是目录 → 加载分片.bin并合并
-        state_dict = _load_sharded_bin(checkpoint_path)
+        state_dict = load_sharded_checkpoint(state_dict, checkpoint_path, map_location='cpu')
     else:
         # 路径是单文件 → 原逻辑加载
         checkpoint = torch.load(checkpoint_path, map_location='cpu')
@@ -177,9 +140,11 @@ def load_model(checkpoint_path, config, device):
     if state_dict is None:
         raise RuntimeError("无法提取模型state_dict，请检查权重文件/目录！")
 
-    # ===================== 4. 原有处理逻辑（无修改）=====================
     # 移除多卡的module.前缀
-    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+    state_dict = {
+        k.replace('module.', '').replace('base_model.model.model.', '') 
+        for k, v in state_dict.items()
+    }
     # 加载权重到模型
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
     # 打印关键提示
