@@ -11,6 +11,7 @@ from functools import partial
 import torch
 from tqdm import tqdm
 import transformers
+from peft import PeftModel
 
 from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
@@ -67,8 +68,6 @@ def load_model(checkpoint_path, config, device):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"路径不存在: {checkpoint_path}")
 
-    # ===================== 1. 初始化Tokenizer（与train_ds.py保持一致）=====================
-    # Create model - 使用魔改后的 LISAForCausalLM 模型（已支持点云）
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.version,
         cache_dir=None,
@@ -77,20 +76,14 @@ def load_model(checkpoint_path, config, device):
         use_fast=False,
     )
     tokenizer.pad_token = tokenizer.unk_token
-    
-    # 添加特殊标记
-    tokenizer.add_tokens("[SEG]")  # 2D分割标记
-    tokenizer.add_tokens("[AFF]")  # 3D affordance标记
+    # 添加LISA特殊token
+    tokenizer.add_tokens(["[SEG]", "[AFF]"])
     config.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
     config.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
-
     if config.use_mm_start_end:
-        tokenizer.add_tokens(
-            [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
-        )
+        tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
 
-    # ===================== 2. 初始化LISA模型（与train_ds.py保持一致）=====================
-    # 模型参数配置
+    # ===================== 2. 初始化LISA基础模型（CPU加载，避免显存溢出）=====================
     model_args = {
         "train_mask_decoder": config.train_mask_decoder,
         "out_dim": config.out_dim,
@@ -98,82 +91,83 @@ def load_model(checkpoint_path, config, device):
         "dice_loss_weight": config.dice_loss_weight,
         "bce_loss_weight": config.bce_loss_weight,
         "seg_token_idx": config.seg_token_idx,
-        "aff_token_idx": config.aff_token_idx,  # 3D affordance token
+        "aff_token_idx": config.aff_token_idx,
         "vision_pretrained": config.vision_pretrained,
         "vision_tower": config.vision_tower,
         "use_mm_start_end": config.use_mm_start_end,
     }
-    
-    # 初始化魔改后的 LISA 模型
-    print("正在初始化模型...")
+    print("初始化LISA基础模型...")
     model = LISAForCausalLM.from_pretrained(
-        config.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
+        config.version,
+        dtype=config.precision,
+        low_cpu_mem_usage=True,
+        **model_args
     )
+    # LISA模型特有初始化（必须保留，模型运行核心）
+    model.get_model().initialize_vision_modules(model.get_model().config)
+    model.get_model().initialize_lisa_modules(model.get_model().config)
+    # 适配新增的特殊token
+    model.resize_token_embeddings(len(tokenizer))
+    # 配置token相关ID
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
-
-    # 初始化视觉模块
-    model.get_model().initialize_vision_modules(model.get_model().config)
+    # 先放CPU，4.57.6 load_sharded_checkpoint会自动对齐设备
+    model = model.to(torch.device("cpu"))
+    # 视觉塔初始化并放CPU
     vision_tower = model.get_model().get_vision_tower()
-    vision_tower.to(dtype=config.precision, device=config.local_rank)
-    
-    conversation_lib.default_conversation = conversation_lib.conv_templates[
-        config.conv_type
-    ]
+    vision_tower.to(dtype=config.precision, device=torch.device("cpu"))
+    # 配置对话模板
+    conversation_lib.default_conversation = conversation_lib.conv_templates[config.conv_type]
 
-    model.resize_token_embeddings(len(tokenizer))
-    
-    # 初始化 LISA 模块（包括 SAM 和 3D 点云分割器）
-    model.get_model().initialize_lisa_modules(model.get_model().config)
+    # ===================== 3. 核心：4.57.6 加载权重（分片目录/单文件，统一逻辑）=====================
+    def _remove_prefix(state_dict):
+        """内部函数：统一处理前缀（module. / base_model.model.model.）"""
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            # 先删多卡前缀，再删嵌套封装前缀，顺序不影响
+            new_k = k.replace('module.', '').replace('base_model.model.model.', '')
+            new_state_dict[new_k] = v
+        return new_state_dict
 
-    
-    print(f"正在加载权重...")
-    state_dict = None
-    # 判断路径是【分片目录】还是【单文件】
+    print("开始加载权重...")
     if os.path.isdir(checkpoint_path):
-        state_dict = load_sharded_checkpoint(model, checkpoint_path)
+        load_sharded_checkpoint(model=model, checkpoint_dir=checkpoint_path)  # 无返回值，原地加载
+        print(f"✓ 分片权重加载完成（目录：{checkpoint_path}）")
+        # 提取加载后的state_dict，用于处理前缀
+        raw_state_dict = model.state_dict()
     else:
-        # 单文件 → 原逻辑加载，兼容.pth/.bin
-        checkpoint = torch.load(checkpoint_path, map_location='cpu')
-        if isinstance(checkpoint, dict):
-            if 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-                epoch = checkpoint.get('epoch', 'unknown')
-                best_giou = checkpoint.get('best_giou', 'unknown')
-                print(f"Checkpoint信息: Epoch={epoch}, Best gIoU={best_giou}")
-            else:
-                state_dict = checkpoint  # 纯state_dict格式的.bin/.pth
-        else:
-            raise ValueError(f"不支持的单文件格式: {type(checkpoint)}")
+        # 3.2 单文件（.pth/.bin）：传统加载方式
+        checkpoint = torch.load(checkpoint_path, map_location=torch.device("cpu"))
+        raw_state_dict = checkpoint.get('model_state_dict', checkpoint)  # 兼容训练保存格式
+        print(f"✓ 单文件权重加载完成（文件：{checkpoint_path}）")
 
-    if state_dict is None:
-        raise RuntimeError("无法提取模型state_dict，请检查权重文件/目录！")
+    # 3.3 处理前缀：修复键名不匹配问题（核心，必须做）
+    clean_state_dict = _remove_prefix(raw_state_dict)
+    # 将处理后的干净权重重新加载到模型（严格=False，忽略无关缓冲区）
+    model.load_state_dict(clean_state_dict, strict=False)
 
-    # ===================== 4. 关键修复：移除双层前缀，保证权重键名和模型完全匹配 ======================
-    state_dict = {
-        k.replace('module.', '').replace('base_model.model.model.', ''): v 
-        for k, v in state_dict.items()
-    }
-    # 调试打印：确认前缀移除后的键名格式（可注释）
-    print("✓ 前缀移除完成，权重前10个键名：")
-    for k in list(state_dict.keys())[:10]:
-        print(f"  - {k}")
+    # 基于当前模型（含LoRA层）构建PeftModel，自动识别LoRA参数（lora_A/lora_B）
+    model = PeftModel.from_pretrained(
+        model,
+        model_id=None,  # 本地加载，无需远程仓库
+        state_dict=clean_state_dict,
+        config=config.lora_config  # 关键：传入训练时的LoRA配置（必须和训练一致！）
+    )
+    # 可选：内存中临时融合LoRA，提升推理速度（不生成新文件，可注释）
+    model = model.merge_and_unload()
+    print("✓ LoRA权重挂载/融合完成！")
 
-    # ===================== 5. 加载权重到模型（严格性控制，避免无关报错）=====================
-    print(f"\n正在将权重加载到模型（设备：{device}）...")
-    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-    # 打印清晰的加载统计（核心：权重未匹配参数为0）
-    print(f"📌 模型未加载参数：{len(missing_keys)} 个" + (f"（前10个：{missing_keys[:10]}" if missing_keys else "（全部加载！）"))
-    print(f"📌 权重未匹配参数：{len(unexpected_keys)} 个" + (f"（前10个：{unexpected_keys[:10]}" if unexpected_keys else "（所有权重100%匹配！）"))
-
-
-    # 模型最终设备配置+评估模式（推理必需，关闭BN/Dropout）
+    # ===================== 5. 模型最终配置（移到目标设备+评估模式）=====================
+    # 移到目标设备（cuda/cpu）
     model = model.to(device)
+    vision_tower.to(device)  # 视觉塔同步到目标设备
+    # 推理模式：关闭BN/Dropout，固定参数
     model.eval()
-    # 视觉塔统一移到目标设备
-    model.get_model().get_vision_tower().to(device)
-    print("✓ 模型整体加载完成！已进入评估模式，视觉塔已同步到目标设备\n")
+    print(f"\n=== 模型加载完成 ===")
+    print(f"✅ 模型已移到 {device}")
+    print(f"✅ 模型已进入EVAL推理模式")
+    print(f"✅ LoRA权重已挂载，可直接推理\n")
 
     return model, tokenizer
 
