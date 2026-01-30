@@ -55,23 +55,24 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_model(checkpoint_path, config, device='cuda'):
+def load_model(checkpoint_path, config, device):
     """
-    加载训练好的LISA模型（支持 .pth 和 .bin 文件）
-    修复：精简权重加载逻辑，删除冗余参数匹配，保留核心功能
+    加载训练好的LISA模型（终极兼容版）
+    支持：1. 单文件(.pth/.bin)  2. 分片.bin目录(001-of-100)  3. 带model_state_dict的训练版.pth
     Args:
-        checkpoint_path: checkpoint文件路径（.pth 或 .bin）
+        checkpoint_path: 单文件路径 OR 分片.bin所在目录
         config: 训练配置
+        device: 设备
     Returns:
         model: 加载好的模型（eval模式）
         tokenizer: 分词器
     """
-    print(f"正在加载模型从: {checkpoint_path}")
-    # 检查文件是否存在
+    print(f"模型加载源: {checkpoint_path}")
+    # 检查路径是否存在
     if not os.path.exists(checkpoint_path):
-        raise FileNotFoundError(f"Checkpoint 文件不存在: {checkpoint_path}")
-    
-    # 1. 创建并配置tokenizer（LISA特有特殊token）
+        raise FileNotFoundError(f"路径不存在: {checkpoint_path}")
+
+    # ===================== 1. 初始化Tokenizer（LISA特有，无修改）=====================
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.version,
         cache_dir=None,
@@ -80,15 +81,13 @@ def load_model(checkpoint_path, config, device='cuda'):
         use_fast=False,
     )
     tokenizer.pad_token = tokenizer.unk_token
-    # 添加分割/交互特殊token
     tokenizer.add_tokens(["[SEG]", "[AFF]"])
     config.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
     config.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
-    # 添加图片起止token
     if config.use_mm_start_end:
         tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
 
-    # 2. 配置LISA模型参数，初始化模型
+    # ===================== 2. 初始化LISA模型（特有步骤，无修改）=====================
     model_args = {
         "train_mask_decoder": config.train_mask_decoder,
         "out_dim": config.out_dim,
@@ -105,55 +104,94 @@ def load_model(checkpoint_path, config, device='cuda'):
     model = LISAForCausalLM.from_pretrained(
         config.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
     )
-    # 配置token相关id
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
 
-    # 3. LISA特有：初始化视觉模块+视觉塔设备配置
+    # LISA 特有初始化（必须保留）
     model.get_model().initialize_vision_modules(model.get_model().config)
     vision_tower = model.get_model().get_vision_tower()
     vision_tower.to(dtype=config.precision, device=device)
-    # 配置对话模板
     conversation_lib.default_conversation = conversation_lib.conv_templates[config.conv_type]
-    # 适配新增的特殊token（必须在添加token后执行）
     model.resize_token_embeddings(len(tokenizer))
-    # 4. LISA特有：初始化SAM和3D点云分割器
     model.get_model().initialize_lisa_modules(model.get_model().config)
 
-    # 5. 加载checkpoint并提取state_dict（支持.pth/.bin，兼容带model_state_dict和直接state_dict格式）
-    print(f"正在加载checkpoint权重...")
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')  # 先加载到CPU，避免显存溢出
-    # 提取模型权重state_dict
-    if isinstance(checkpoint, dict):
-        if 'model_state_dict' in checkpoint:
-            state_dict = checkpoint['model_state_dict']
-            # 打印checkpoint附加信息（如果有）
-            epoch = checkpoint.get('epoch', 'unknown')
-            best_giou = checkpoint.get('best_giou', 'unknown')
-            print(f"Checkpoint信息: Epoch={epoch}, Best gIoU={best_giou}")
-        else:
-            state_dict = checkpoint  # .bin或直接保存的state_dict
+    # ===================== 3. 核心修改：支持单文件/分片.bin目录，加载并合并state_dict =====================
+    def _load_sharded_bin(dir_path):
+        """内部函数：加载分片.bin文件并合并为完整state_dict"""
+        import re
+        # 匹配分片命名规范：xxx-001-of-100.bin（提取数字部分用于排序）
+        shard_pattern = re.compile(r'^.+?-(\d+)-of-(\d+)\.bin$')
+        shard_files = []
+        total_shards = 0
+
+        # 遍历目录，筛选符合规范的分片文件
+        for file in os.listdir(dir_path):
+            file_path = os.path.join(dir_path, file)
+            if os.path.isfile(file_path) and file.endswith('.bin'):
+                match = shard_pattern.match(file)
+                if match:
+                    shard_idx = int(match.group(1))
+                    total_shards = int(match.group(2))
+                    shard_files.append((shard_idx, file_path))
+
+        # 校验分片文件
+        if not shard_files:
+            raise FileNotFoundError(f"目录 {dir_path} 中未找到符合规范的分片.bin文件（如xxx-001-of-100.bin）")
+        # 按分片索引升序排序（关键：加载顺序错误会导致权重混乱）
+        shard_files.sort(key=lambda x: x[0])
+        # 校验分片数量是否完整
+        if len(shard_files) != total_shards:
+            print(f"警告：检测到 {len(shard_files)} 个分片，预期 {total_shards} 个，可能缺失分片！")
+
+        # 逐个加载并合并state_dict
+        full_state_dict = {}
+        print(f"开始加载 {len(shard_files)} 个分片.bin文件...")
+        for idx, file_path in tqdm(shard_files, desc='加载分片'):
+            shard_ckpt = torch.load(file_path, map_location='cpu')
+            # 分片内的ckpt直接是state_dict，更新到总字典
+            full_state_dict.update(shard_ckpt)
+        print(f"✓ 分片合并完成，总参数数：{len(full_state_dict)}")
+        return full_state_dict
+
+    print(f"正在加载权重...")
+    state_dict = None
+    # 判断路径是【目录（分片）】还是【单文件】
+    if os.path.isdir(checkpoint_path):
+        # 路径是目录 → 加载分片.bin并合并
+        state_dict = _load_sharded_bin(checkpoint_path)
     else:
-        raise ValueError(f"不支持的checkpoint格式: {type(checkpoint)}")
+        # 路径是单文件 → 原逻辑加载
+        checkpoint = torch.load(checkpoint_path, map_location='cpu')
+        if isinstance(checkpoint, dict):
+            if 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+                epoch = checkpoint.get('epoch', 'unknown')
+                best_giou = checkpoint.get('best_giou', 'unknown')
+                print(f"Checkpoint信息: Epoch={epoch}, Best gIoU={best_giou}")
+            else:
+                state_dict = checkpoint  # 单.bin/纯state_dict的.pth
+        else:
+            raise ValueError(f"不支持的单文件格式: {type(checkpoint)}")
 
-    # 6. 处理多卡训练的module.前缀（如果有）
+    if state_dict is None:
+        raise RuntimeError("无法提取模型state_dict，请检查权重文件/目录！")
+
+    # ===================== 4. 原有处理逻辑（无修改）=====================
+    # 移除多卡的module.前缀
     state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-
-    # 7. 加载权重到模型（strict=False：支持部分加载，忽略无关参数）
+    # 加载权重到模型
     missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
-    # 打印关键的加载信息（精简版）
+    # 打印关键提示
     if missing_keys:
-        print(f"提示: 模型中有{len(missing_keys)}个参数未从checkpoint加载（使用初始化值），前10个: {missing_keys[:10]}")
+        print(f"提示: 模型未加载参数 {len(missing_keys)} 个，前10个: {missing_keys[:10]}")
     if unexpected_keys:
-        print(f"提示: Checkpoint中有{len(unexpected_keys)}个参数未匹配到模型，前10个: {unexpected_keys[:10]}")
-
-    # 8. 模型设备配置+评估模式（推理必需）
+        print(f"提示: 权重未匹配参数 {len(unexpected_keys)} 个，前10个: {unexpected_keys[:10]}")
+    # 模型设备配置+评估模式
     model = model.to(device)
     model.eval()
-    print("✓ 模型加载完成！\n")
+    print("✓ 模型整体加载完成！\n")
     return model, tokenizer
-
 
 def validate(model, val_loader, device, config, save_predictions=False, output_dir=None):
     """
