@@ -11,7 +11,6 @@ from functools import partial
 import torch
 from tqdm import tqdm
 import transformers
-from peft import LoraConfig, get_peft_model
 
 from model.LISA import LISAForCausalLM
 from model.llava import conversation as conversation_lib
@@ -40,12 +39,12 @@ def parse_args():
     # 可选参数
     parser.add_argument('--dataset_dir', type=str, default=None,
                         help='数据集目录（默认使用config中的设置）')
-    parser.add_argument('--batch_size', type=int, default=1,
-                        help='验证批次大小（默认：1）')
+    parser.add_argument('--batch_size', type=int, default=10,
+                        help='验证批次大小')
     parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'],
                         help='要评估的数据集分割（默认：test）')
-    parser.add_argument('--device', type=str, default='cuda:0',
-                        help='使用的设备（默认：cuda:0）')
+    parser.add_argument('--device', type=str, default='cuda',
+                        help='使用的设备（默认：cuda）')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='数据加载的worker数量（默认：4）')
     parser.add_argument('--save_predictions', action='store_true',
@@ -56,22 +55,23 @@ def parse_args():
     return parser.parse_args()
 
 
-def load_model(checkpoint_path, config, device):
+def load_model(checkpoint_path, config, device='cuda'):
     """
-    加载训练好的模型
-    
+    加载训练好的LISA模型（支持 .pth 和 .bin 文件）
+    修复：精简权重加载逻辑，删除冗余参数匹配，保留核心功能
     Args:
-        checkpoint_path: checkpoint文件路径
+        checkpoint_path: checkpoint文件路径（.pth 或 .bin）
         config: 训练配置
-        device: 设备
-        
     Returns:
-        model: 加载好的模型
+        model: 加载好的模型（eval模式）
         tokenizer: 分词器
     """
     print(f"正在加载模型从: {checkpoint_path}")
+    # 检查文件是否存在
+    if not os.path.exists(checkpoint_path):
+        raise FileNotFoundError(f"Checkpoint 文件不存在: {checkpoint_path}")
     
-    # 创建tokenizer
+    # 1. 创建并配置tokenizer（LISA特有特殊token）
     tokenizer = transformers.AutoTokenizer.from_pretrained(
         config.version,
         cache_dir=None,
@@ -80,19 +80,15 @@ def load_model(checkpoint_path, config, device):
         use_fast=False,
     )
     tokenizer.pad_token = tokenizer.unk_token
-    
-    # 添加特殊标记
-    tokenizer.add_tokens("[SEG]")  # 2D分割标记
-    tokenizer.add_tokens("[AFF]")  # 3D affordance标记
+    # 添加分割/交互特殊token
+    tokenizer.add_tokens(["[SEG]", "[AFF]"])
     config.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
     config.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
-
+    # 添加图片起止token
     if config.use_mm_start_end:
-        tokenizer.add_tokens(
-            [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
-        )
+        tokenizer.add_tokens([DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True)
 
-    # 模型参数配置
+    # 2. 配置LISA模型参数，初始化模型
     model_args = {
         "train_mask_decoder": config.train_mask_decoder,
         "out_dim": config.out_dim,
@@ -105,96 +101,57 @@ def load_model(checkpoint_path, config, device):
         "vision_tower": config.vision_tower,
         "use_mm_start_end": config.use_mm_start_end,
     }
-    
-    # 初始化模型
-    print("正在初始化模型...")
+    print("正在初始化LISA模型...")
     model = LISAForCausalLM.from_pretrained(
         config.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
     )
+    # 配置token相关id
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
 
-    # 初始化视觉模块
+    # 3. LISA特有：初始化视觉模块+视觉塔设备配置
     model.get_model().initialize_vision_modules(model.get_model().config)
     vision_tower = model.get_model().get_vision_tower()
     vision_tower.to(dtype=config.precision, device=device)
-    
-    conversation_lib.default_conversation = conversation_lib.conv_templates[
-        config.conv_type
-    ]
-
+    # 配置对话模板
+    conversation_lib.default_conversation = conversation_lib.conv_templates[config.conv_type]
+    # 适配新增的特殊token（必须在添加token后执行）
     model.resize_token_embeddings(len(tokenizer))
-    
-    # 初始化 LISA 模块（包括 SAM 和 3D 点云分割器）
+    # 4. LISA特有：初始化SAM和3D点云分割器
     model.get_model().initialize_lisa_modules(model.get_model().config)
 
-    # 先把所有参数冻结
-    for p in model.parameters():
-        p.requires_grad = False
-
-    # LoRA 配置（如果使用）
-    if config.lora_r > 0:
-        def find_linear_layers(model, lora_target_modules):
-            cls = torch.nn.Linear
-            lora_module_names = set()
-            for name, module in model.named_modules():
-                if (
-                    isinstance(module, cls)
-                    and all([x not in name for x in config.name_of_params_to_train])
-                    and any([x in name for x in lora_target_modules])
-                ):
-                    lora_module_names.add(name)
-            return sorted(list(lora_module_names))
-
-        lora_target_modules = find_linear_layers(model, config.lora_target_modules)
-        lora_config = config.get_lora_config()
-        lora_config.target_modules = lora_target_modules
-        model = get_peft_model(model, lora_config)
-        print("已应用 LoRA 配置")
-
-    # 加载checkpoint
+    # 5. 加载checkpoint并提取state_dict（支持.pth/.bin，兼容带model_state_dict和直接state_dict格式）
     print(f"正在加载checkpoint权重...")
-    checkpoint = torch.load(checkpoint_path, map_location='cpu')
-    
-    # 处理不同格式的checkpoint
-    if 'model_state_dict' in checkpoint:
-        state_dict = checkpoint['model_state_dict']
-        epoch = checkpoint.get('epoch', 'unknown')
-        best_giou = checkpoint.get('best_giou', 'unknown')
-        best_ciou = checkpoint.get('best_ciou', 'unknown')
-        print(f"Checkpoint信息: Epoch={epoch}, Best gIoU={best_giou}, Best cIoU={best_ciou}")
-    else:
-        state_dict = checkpoint
-    
-    # 加载权重（只加载存在的参数）
-    model_dict = model.state_dict()
-    pretrained_dict = {}
-    
-    for k, v in state_dict.items():
-        if k in model_dict:
-            pretrained_dict[k] = v
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')  # 先加载到CPU，避免显存溢出
+    # 提取模型权重state_dict
+    if isinstance(checkpoint, dict):
+        if 'model_state_dict' in checkpoint:
+            state_dict = checkpoint['model_state_dict']
+            # 打印checkpoint附加信息（如果有）
+            epoch = checkpoint.get('epoch', 'unknown')
+            best_giou = checkpoint.get('best_giou', 'unknown')
+            print(f"Checkpoint信息: Epoch={epoch}, Best gIoU={best_giou}")
         else:
-            print(f"警告: checkpoint中的参数 {k} 在模型中不存在，跳过")
-    
-    # 检查是否有模型参数未被加载
-    missing_keys = set(model_dict.keys()) - set(pretrained_dict.keys())
+            state_dict = checkpoint  # .bin或直接保存的state_dict
+    else:
+        raise ValueError(f"不支持的checkpoint格式: {type(checkpoint)}")
+
+    # 6. 处理多卡训练的module.前缀（如果有）
+    state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+
+    # 7. 加载权重到模型（strict=False：支持部分加载，忽略无关参数）
+    missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+    # 打印关键的加载信息（精简版）
     if missing_keys:
-        print(f"\n警告: 以下模型参数未从checkpoint加载（将使用初始化值）:")
-        for key in sorted(missing_keys):
-            print(f"  - {key}")
-    
-    model_dict.update(pretrained_dict)
-    model.load_state_dict(model_dict, strict=False)
-    
-    print(f"成功加载 {len(pretrained_dict)}/{len(model_dict)} 个参数")
-    
-    # 移动模型到指定设备
+        print(f"提示: 模型中有{len(missing_keys)}个参数未从checkpoint加载（使用初始化值），前10个: {missing_keys[:10]}")
+    if unexpected_keys:
+        print(f"提示: Checkpoint中有{len(unexpected_keys)}个参数未匹配到模型，前10个: {unexpected_keys[:10]}")
+
+    # 8. 模型设备配置+评估模式（推理必需）
     model = model.to(device)
     model.eval()
-    
-    print("模型加载完成！\n")
-    
+    print("✓ 模型加载完成！\n")
     return model, tokenizer
 
 
