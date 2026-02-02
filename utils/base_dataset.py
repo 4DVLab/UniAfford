@@ -404,17 +404,21 @@ class PointCloud(Modality):
                 if len(self.mask) <= idx: raise ValueError(f'Error in {self.obj_type}-{self.id}: mask的列数{self.mask.shape}和label的维度 {label} 不同')
 
                 mask_col = self.mask[idx]
-                colors = np.ones((self.points.shape[0], 3), dtype=np.float32)
+                # 未标注区域用浅灰，避免与背景白色混在一起
+                base_gray = 0.9
+                colors = np.full((self.points.shape[0], 3), base_gray, dtype=np.float32)
                 mask_mask = mask_col > 0
                 if mask_mask.any():
+                    # 归一化 + 轻微对比度增强，让红色渐变更清晰
                     mask_vals = mask_col[mask_mask].astype(np.float32, copy=False)
                     max_val = float(mask_vals.max())
                     if max_val > 1.0:
                         mask_vals = mask_vals / max_val
                     mask_vals = np.clip(mask_vals, 0.0, 1.0)
                     mask_vals = np.sqrt(mask_vals)
-                    mask_vals = 0.15 + 0.85 * mask_vals
-                    gb = 1.0 - mask_vals
+                    red = base_gray + (1.0 - base_gray) * mask_vals
+                    gb = base_gray * (1.0 - mask_vals)
+                    colors[mask_mask, 0] = red
                     colors[mask_mask, 1] = gb
                     colors[mask_mask, 2] = gb
                 pcd = o3d.geometry.PointCloud()
