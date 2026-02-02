@@ -1,4 +1,5 @@
 """
+HACK: 只允许使用batch_size=1推理
 验证脚本：加载训练好的模型并进行推理评估
 
 使用方法：
@@ -10,6 +11,8 @@ from functools import partial
 
 import torch
 import deepspeed
+import cv2
+import numpy as np
 from tqdm import tqdm
 import transformers
 from peft import PeftModel, LoraConfig, get_peft_model
@@ -41,7 +44,7 @@ def parse_args():
     # 可选参数
     parser.add_argument('--dataset_dir', type=str, default=None,
                         help='数据集目录（默认使用config中的设置）')
-    parser.add_argument('--batch_size', type=int, default=10,
+    parser.add_argument('--batch_size', type=int, default=1,
                         help='验证批次大小')
     parser.add_argument('--split', type=str, default='test', choices=['train', 'val', 'test'],
                         help='要评估的数据集分割（默认：test）')
@@ -280,7 +283,9 @@ def validate(model, val_loader, device, config, save_predictions=False, output_d
                     input_dict, 
                     output_dict, 
                     batch_idx, 
-                    output_dir
+                    output_dir,
+                    dataset=getattr(val_loader, "dataset", None),
+                    batch_start=batch_idx * (getattr(val_loader, "batch_size", None) or input_dict["input_ids"].shape[0])
                 )
 
     # 计算最终结果
@@ -305,40 +310,131 @@ def validate(model, val_loader, device, config, save_predictions=False, output_d
 
     return giou, ciou, mae_3d, auc_3d, aiou_3d, sim_3d
 
+def save_batch_predictions(input_dict, output_dict, batch_idx, output_dir, dataset=None, batch_start: int = None):
+    """
+    Save batch predictions in a dataset-compatible layout.
 
-def save_batch_predictions(input_dict, output_dict, batch_idx, output_dir):
-    """
-    保存批次预测结果
-    
     Args:
-        input_dict: 输入字典
-        output_dict: 输出字典
-        batch_idx: 批次索引
-        output_dir: 输出目录
+        input_dict: input dict
+        output_dict: output dict
+        batch_idx: batch index
+        output_dir: output dir
     """
-    batch_size = len(input_dict.get('obj_type', []))
-    
+    def _get_batch_size():
+        for key in ("input_ids", "images", "point_clouds", "img_gt_tensor", "pc_gt_tensor"):
+            value = input_dict.get(key)
+            if isinstance(value, torch.Tensor):
+                return int(value.shape[0])
+        pred_masks = output_dict.get("pred_masks")
+        if isinstance(pred_masks, list):
+            return len(pred_masks)
+        if isinstance(pred_masks, torch.Tensor):
+            return int(pred_masks.shape[0]) if pred_masks.dim() > 2 else 1
+        return 0
+
+    def _extract_pred_mask(key, index):
+        masks = output_dict.get(key)
+        if masks is None:
+            return None
+        if isinstance(masks, list):
+            return masks[index] if index < len(masks) else None
+        if isinstance(masks, torch.Tensor):
+            if masks.dim() == 2:
+                return masks
+            return masks[index] if masks.shape[0] > index else None
+        return None
+
+    def _normalize_mask(mask_tensor):
+        mask = mask_tensor.detach().float()
+        if mask.dim() > 2:
+            mask = mask.squeeze()
+        if mask.max() > 1.0 or mask.min() < 0.0:
+            mask = mask.sigmoid()
+        return mask.clamp(0.0, 1.0)
+
+    def _to_uint8_mask(mask_tensor):
+        mask = _normalize_mask(mask_tensor)
+        return mask.mul(255.0).round().to(torch.uint8).cpu().numpy()
+
+    def _to_float_mask(mask_tensor):
+        return _normalize_mask(mask_tensor).cpu().numpy()
+
+    def _save_pointcloud_csv(file_path, points, mask, label):
+        header = ["x", "y", "z", label]
+        data = np.concatenate([points, mask[:, None]], axis=1)
+        with open(file_path, "w") as f:
+            np.savetxt(f, data, delimiter=",", header=",".join(header))
+
+    batch_size = _get_batch_size()
+    if batch_size <= 0:
+        return
+
+    if batch_start is None:
+        batch_start = batch_idx * batch_size
+
+    samples = getattr(dataset, "samples", None) if dataset is not None else None
+
     for i in range(batch_size):
-        sample_id = batch_idx * batch_size + i
-        sample_dir = os.path.join(output_dir, f"sample_{sample_id:05d}")
-        os.makedirs(sample_dir, exist_ok=True)
-        
-        # 保存2D预测掩码
-        if output_dict.get('pred_masks') is not None and i < len(output_dict['pred_masks']):
-            pred_mask_2d = output_dict['pred_masks'][i].cpu().numpy()
-            torch.save(pred_mask_2d, os.path.join(sample_dir, 'pred_mask_2d.pt'))
-        
-        # 保存3D预测掩码
-        if output_dict.get('pred_masks_3d') is not None and i < len(output_dict['pred_masks_3d']):
-            pred_mask_3d = output_dict['pred_masks_3d'][i].cpu().numpy()
-            torch.save(pred_mask_3d, os.path.join(sample_dir, 'pred_mask_3d.pt'))
-        
-        # 保存元信息
-        meta_info = {
-            'obj_type': input_dict['obj_type'][i] if 'obj_type' in input_dict else None,
-            'aff_type': input_dict['aff_type'][i] if 'aff_type' in input_dict else None,
-        }
-        torch.save(meta_info, os.path.join(sample_dir, 'meta_info.pt'))
+        sample = None
+        if samples is not None:
+            sample_index = batch_start + i
+            if 0 <= sample_index < len(samples):
+                sample = samples[sample_index]
+
+        if sample is None:
+            continue
+
+        obj_type = sample.obj_type
+        aff_type = sample.aff_type
+        sample_id = sample.id
+
+        pred_mask_2d = _extract_pred_mask("pred_masks", i)
+        if pred_mask_2d is not None and sample.img is not None and sample.img.img is not None:
+            mask_2d = _to_uint8_mask(pred_mask_2d)
+            img_dir = os.path.join(output_dir, obj_type, "Image")
+            rgb_dir = os.path.join(img_dir, "rgb")
+            mask_dir = os.path.join(img_dir, "mask", aff_type)
+            os.makedirs(rgb_dir, exist_ok=True)
+            os.makedirs(mask_dir, exist_ok=True)
+            img_path = os.path.join(rgb_dir, f"{obj_type}_{sample_id}.png")
+            if not os.path.exists(img_path):
+                cv2.imwrite(img_path, sample.img.img)
+            mask_path = os.path.join(mask_dir, f"{obj_type}_{sample_id}_{aff_type}.png")
+            cv2.imwrite(mask_path, mask_2d)
+
+        pred_mask_3d = _extract_pred_mask("pred_3d_masks", i)
+        if pred_mask_3d is not None and sample.pc is not None:
+            points = None
+            pc_tensor = input_dict.get("point_clouds")
+            if isinstance(pc_tensor, torch.Tensor) and pc_tensor.shape[0] > i:
+                points = pc_tensor[i].detach().cpu().numpy()
+            if points is None and sample.pc is not None:
+                points = sample.pc.points
+            if points is None:
+                continue
+
+            if points.ndim == 3 and points.shape[0] == 3:
+                points = np.transpose(points, (1, 0))
+
+            mask_3d = _to_float_mask(pred_mask_3d).reshape(-1)
+            pc_lengths = input_dict.get("pc_lengths")
+            if isinstance(pc_lengths, torch.Tensor) and pc_lengths.shape[0] > i:
+                num_points = int(pc_lengths[i].item())
+            else:
+                num_points = min(points.shape[0], mask_3d.shape[0])
+
+            num_points = max(0, min(num_points, points.shape[0], mask_3d.shape[0]))
+            if num_points == 0:
+                continue
+
+            points = points[:num_points]
+            mask_3d = mask_3d[:num_points]
+
+            pc_dir = os.path.join(output_dir, obj_type, "PointCloud")
+            os.makedirs(pc_dir, exist_ok=True)
+            pc_path = os.path.join(pc_dir, f"{obj_type}_{sample_id}.csv")
+            _save_pointcloud_csv(pc_path, points, mask_3d, aff_type)
+
 
 
 def main():
