@@ -391,7 +391,7 @@ class PointCloud(Modality):
 
         return self._hash
 
-
+    # TODO: 修改颜色条的显示，使得物体和背景（白色），以及标注区域（红色）之间的渐变清晰明了不会混杂
     def show(self, selected_labels:list=None):
         """
         Args:
