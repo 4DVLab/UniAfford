@@ -185,13 +185,6 @@ def main():
     if not config.eval_only:
         model.get_model().initialize_lisa_modules(model.get_model().config)
 
-    # # 冻结视觉编码器和投影层
-    # for p in vision_tower.parameters():
-    #     p.requires_grad = False
-    # for p in model.get_model().mm_projector.parameters():
-    #     p.requires_grad = False
-
-
     # 先把所有参数冻结 (作为基底)
     for p in model.parameters():
         p.requires_grad = False
@@ -478,12 +471,17 @@ def train(
     for local_step in range(config.steps_per_epoch):
         # 计算全局步数
         global_step = epoch * config.steps_per_epoch + local_step
+        total_loss = 0.0  # 累积总损失，用于归一化
+        # 梯度累积内层循环：仅累积梯度，不更新参数
         for i in range(config.grad_accumulation_steps):
+            accum_step += 1
             try:
                 input_dict = next(train_iter)
-            except:
+            except StopIteration:
                 train_iter = iter(train_loader)
                 input_dict = next(train_iter)
+                # 重新计时，避免迭代器重置导致data_time失真
+                end = time.time()
 
             input_dict = dict_to_cuda(input_dict)
             data_time.update(time.time() - end)
@@ -526,23 +524,42 @@ def train(
                 # 5. 总损失
                 loss = ce_loss + mask_loss + mask_3d_loss + dummy_loss
                 
+
+                loss = loss / config.grad_accumulation_steps
+
                 # 构建损失字典
-                output_dict["loss"] = loss
-                output_dict["ce_loss"] = ce_loss
-                output_dict["mask_bce_loss"] = mask_bce_loss
-                output_dict["mask_dice_loss"] = mask_dice_loss
-                output_dict["mask_loss"] = mask_loss
-                output_dict["mask_3d_bce_loss"] = mask_3d_bce_loss
-                output_dict["mask_3d_dice_loss"] = mask_3d_dice_loss
-                output_dict["mask_3d_loss"] = mask_3d_loss
+                output_dict.update({
+                    "loss": loss, "ce_loss": ce_loss,
+                    "mask_bce_loss": mask_bce_loss, "mask_dice_loss": mask_dice_loss, "mask_loss": mask_loss,
+                    "mask_3d_bce_loss": mask_3d_bce_loss, "mask_3d_dice_loss": mask_3d_dice_loss, "mask_3d_loss": mask_3d_loss
+                })
+            else:
+                # 推理模式，损失置0
+                output_dict["loss"] = torch.tensor(0.0, device=next(model_engine.parameters()).device, requires_grad=False)
 
-            # 使用 MetricsTracker 更新所有损失
-            metrics_tracker.update_loss_metrics(output_dict, config.batch_size)
-            
+            # 分布式先同步损失，再更新指标
+            if config.distributed:
+                # 所有损失张量all_reduce，保证多卡损失一致
+                for k in ["loss", "ce_loss", "mask_loss", "mask_3d_loss"]:
+                    if k in output_dict:
+                        torch.distributed.all_reduce(output_dict[k], op=torch.distributed.ReduceOp.SUM)
+                        output_dict[k] = output_dict[k] / config.world_size  # 求平均
+
+            # 计算全局batch_size（分布式：单卡batch_size * 卡数）
+            global_bs = config.batch_size * (config.world_size if config.distributed else 1)
+            # 更新指标（传入全局batch_size，保证指标计算准确）
+            metrics_tracker.update_loss_metrics(output_dict, global_bs)
+
+            # 仅累积梯度，不执行step
             model_engine.backward(output_dict["loss"])
-            model_engine.step()
+            # 重置时间，为下一个batch做准备
+            end = time.time()
 
-        # measure elapsed time
+        # 梯度累积结束，统一更新参数 + 清空梯度（核心）
+        model_engine.step()  # 更新参数
+        model_engine.zero_grad()  # 清空梯度，避免污染下一轮
+
+        # 测量整个累积批次的耗时
         batch_time.update(time.time() - end)
         end = time.time()
 
@@ -558,28 +575,31 @@ def train(
                 # 使用 TensorBoardLogger 记录所有损失到 TensorBoard
                 if tb_logger is not None:
                     tb_logger.log_loss_metrics(metrics_tracker, global_step, prefix="train")
-                    writer.add_scalar("metrics/total_secs_per_batch", batch_time.avg, global_step)
-                    writer.add_scalar("metrics/data_secs_per_batch", data_time.avg, global_step)
+                    writer.add_scalar("metrics/total_secs_per_accum_batch", batch_time.avg, global_step)
+                    writer.add_scalar("metrics/data_secs_per_single_batch", data_time.avg / config.grad_accumulation_steps, global_step)
 
+            # 重置统计量
             batch_time.reset()
             data_time.reset()
             metrics_tracker.reset()
 
-        if local_step != 0:
-            curr_lr = scheduler.get_last_lr()
-            if config.local_rank == 0 and writer is not None:
-                # 记录学习率
-                if isinstance(params_to_train, list) and len(params_to_train) > 0 and isinstance(params_to_train[0], dict):
-                    # 分层学习率模式：记录每个参数组的学习率
-                    for idx, (lr, param_group) in enumerate(zip(curr_lr, params_to_train)):
-                        group_name = param_group.get('name', f'group_{idx}')
-                        writer.add_scalar(f"train/lr/{group_name}", lr, global_step)
-                    # 同时记录平均学习率
-                    writer.add_scalar("train/lr/average", sum(curr_lr) / len(curr_lr), global_step)
-                else:
-                    # 单一学习率模式
-                    writer.add_scalar("train/lr", curr_lr[0], global_step)
+        curr_lr = scheduler.get_last_lr()
+        if config.local_rank == 0 and writer is not None:
+            # 记录学习率
+            if isinstance(params_to_train, list) and len(params_to_train) > 0 and isinstance(params_to_train[0], dict):
+                # 分层学习率
+                for idx, (lr, param_group) in enumerate(zip(curr_lr, params_to_train)):
+                    group_name = param_group.get('name', f'group_{idx}')
+                    writer.add_scalar(f"train/lr/{group_name}", lr, global_step)
+                writer.add_scalar("train/lr/average", sum(curr_lr) / len(curr_lr), global_step)
+            else:
+                # 单一学习率
+                writer.add_scalar("train/lr", curr_lr[0] if curr_lr else 0.0, global_step)
 
+        # ========== 重要补充：学习率调度按有效更新次数step ==========
+        scheduler.step()
+
+    # 返回迭代器，用于续训
     return train_iter
 
 
