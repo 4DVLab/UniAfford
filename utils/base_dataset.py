@@ -402,9 +402,9 @@ class PointCloud(Modality):
         if self.mask is not None and self.labels is not None and len(self.labels) > 0:
             for idx, label in enumerate(self.labels):
                 if selected_labels is not None and label not in selected_labels: continue
-                if self.mask.shape[1] <= idx: raise ValueError(f'Error in {self.obj_type}-{self.id}: mask的列数{self.mask.shape}和label的维度 {label} 不同')
+                if len(self.mask) <= idx: raise ValueError(f'Error in {self.obj_type}-{self.id}: mask的列数{self.mask.shape}和label的维度 {label} 不同')
 
-                mask_col = self.mask[:, idx]
+                mask_col = self.mask[idx]
                
                 # 白色背景
                 colors = np.full((self.points.shape[0], 3), [0.8, 0.8, 0.8])
