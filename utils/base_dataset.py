@@ -391,7 +391,6 @@ class PointCloud(Modality):
 
         return self._hash
 
-    # TODO: 修改颜色条的显示，使得物体和背景（白色），以及标注区域（红色）之间的渐变清晰明了不会混杂
     def show(self, selected_labels:list=None):
         """
         Args:
@@ -405,18 +404,19 @@ class PointCloud(Modality):
                 if len(self.mask) <= idx: raise ValueError(f'Error in {self.obj_type}-{self.id}: mask的列数{self.mask.shape}和label的维度 {label} 不同')
 
                 mask_col = self.mask[idx]
-               
-                # 白色背景
-                colors = np.full((self.points.shape[0], 3), [0.8, 0.8, 0.8])
-               
-                # 有mask值的点：红色渐变，mask值越大颜色越浓（越亮）
-                mask_mask = mask_col > 0  # 找到所有非零mask的点
+                colors = np.ones((self.points.shape[0], 3), dtype=np.float32)
+                mask_mask = mask_col > 0
                 if mask_mask.any():
-                    # 红色通道：从深红(0.3)到亮红(1.0)，根据归一化的mask值
-                    colors[mask_mask, 0] = 0.3 + 0.7 * mask_col[mask_mask]  # 红色通道
-                    colors[mask_mask, 1] = 0.0  # 绿色通道保持为0
-                    colors[mask_mask, 2] = 0.0  # 蓝色通道保持为0
-
+                    mask_vals = mask_col[mask_mask].astype(np.float32, copy=False)
+                    max_val = float(mask_vals.max())
+                    if max_val > 1.0:
+                        mask_vals = mask_vals / max_val
+                    mask_vals = np.clip(mask_vals, 0.0, 1.0)
+                    mask_vals = np.sqrt(mask_vals)
+                    mask_vals = 0.15 + 0.85 * mask_vals
+                    gb = 1.0 - mask_vals
+                    colors[mask_mask, 1] = gb
+                    colors[mask_mask, 2] = gb
                 pcd = o3d.geometry.PointCloud()
                 pcd.points = o3d.utility.Vector3dVector(self.points)
                 pcd.colors = o3d.utility.Vector3dVector(colors)
