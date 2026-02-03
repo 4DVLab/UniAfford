@@ -618,8 +618,9 @@ class LISAForCausalLM(LlavaLlamaForCausalLM):
         pred_masks = None
         if has_valid_image:
             pred_masks = self._generate_2d_masks(pred_embeddings, image_embeddings, resize_list, original_size_list)
+            pred_masks = pred_masks.sigmoid_() # 转换成概率分布
             pred_masks = pred_masks * img_valid_mask[:, None, None]
-            
+        
         # ========== 3D 分割：使用 PointNet++ 处理点云（仅在有有效点云输入时）==========
         pred_3d_masks = None
         if has_valid_point_cloud:
