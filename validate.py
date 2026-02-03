@@ -30,7 +30,7 @@ from utils.metrics import (
     evaluate_segmentation_batch,
     print_validation_summary,
 )
-from configs import TrainingConfig
+from configs import TrainingConfig, InferenceConfig
 from transformers.modeling_utils import load_sharded_checkpoint
 
 def parse_args():
@@ -81,11 +81,14 @@ def load_model(checkpoint_path, config, device):
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"路径不存在: {checkpoint_path}")
 
+    model_config = config.model_config
+    mllm = model_config.mllm
+
     # Create model - 使用魔改后的 LISAForCausalLM 模型（已支持点云）
     tokenizer = transformers.AutoTokenizer.from_pretrained(
-        config.version,
+        mllm.version,
         cache_dir=None,
-        model_max_length=config.model_max_length,
+        model_max_length=mllm.model_max_length,
         padding_side="right",
         use_fast=False,
     )
@@ -94,31 +97,31 @@ def load_model(checkpoint_path, config, device):
     # 添加特殊标记
     tokenizer.add_tokens("[SEG]")  # 2D分割标记
     tokenizer.add_tokens("[AFF]")  # 3D affordance标记
-    config.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
-    config.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
+    mllm.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
+    mllm.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
 
-    if config.use_mm_start_end:
+    if mllm.use_mm_start_end:
         tokenizer.add_tokens(
             [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
         )
 
     # 模型参数配置
     model_args = {
-        "train_mask_decoder": config.train_mask_decoder,
-        "out_dim": config.out_dim,
-        "ce_loss_weight": config.ce_loss_weight,
-        "dice_loss_weight": config.dice_loss_weight,
-        "bce_loss_weight": config.bce_loss_weight,
-        "seg_token_idx": config.seg_token_idx,
-        "aff_token_idx": config.aff_token_idx,  # 3D affordance token
-        "vision_pretrained": config.vision_pretrained,
-        "vision_tower": config.vision_tower,
-        "use_mm_start_end": config.use_mm_start_end,
+        "train_mask_decoder": mllm.train_mask_decoder,
+        "out_dim": mllm.out_dim,
+        "ce_loss_weight": mllm.ce_loss_weight,
+        "dice_loss_weight": mllm.dice_loss_weight,
+        "bce_loss_weight": mllm.bce_loss_weight,
+        "seg_token_idx": mllm.seg_token_idx,
+        "aff_token_idx": mllm.aff_token_idx,  # 3D affordance token
+        "vision_pretrained": mllm.vision_pretrained,
+        "vision_tower": mllm.vision_tower,
+        "use_mm_start_end": mllm.use_mm_start_end,
     }
     
     # 初始化魔改后的 LISA 模型
     model = LISAForCausalLM.from_pretrained(
-        config.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
+        mllm.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
     )
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
@@ -135,7 +138,7 @@ def load_model(checkpoint_path, config, device):
     vision_tower.to(dtype=config.precision)
     
     conversation_lib.default_conversation = conversation_lib.conv_templates[
-        config.conv_type
+        mllm.conv_type
     ]
 
     model.resize_token_embeddings(len(tokenizer))
@@ -180,16 +183,16 @@ def load_model(checkpoint_path, config, device):
     dataset_manager = DatasetManager(
         dataset_dir=config.dataset_dir,
         tokenizer=tokenizer,
-        vision_tower=config.vision_tower,
+        vision_tower=mllm.vision_tower,
         precision=config.precision,
         image_size=config.image_size,
         num_points=config.num_points,
         train_ratio=config.train_ratio,
         val_ratio=config.val_ratio,
         test_ratio=config.test_ratio,
-        use_mm_start_end=config.use_mm_start_end,
+        use_mm_start_end=mllm.use_mm_start_end,
         samples_per_epoch=config.samples_per_epoch,
-        conv_type=config.conv_type,
+        conv_type=mllm.conv_type,
         use_sample_cache=config.use_sample_cache
     )
     config.samples_per_epoch = dataset_manager.samples_per_epoch
@@ -442,18 +445,26 @@ def main():
     
     # 加载配置
     config = TrainingConfig()
+    infer_config = InferenceConfig(
+        device=args.device,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        split=args.split,
+        save_predictions=args.save_predictions,
+        output_dir=args.output_dir,
+    )
     
     # 覆盖配置（如果提供了命令行参数）
     if args.dataset_dir:
         config.dataset_dir = args.dataset_dir
     
-    config.val_batch_size = args.batch_size
-    config.workers = args.num_workers
+    config.val_batch_size = infer_config.batch_size
+    config.workers = infer_config.num_workers
     config.distributed = False  # 验证时不使用分布式
     config.local_rank = 0
     
     # 设置设备
-    device = torch.device(args.device if torch.cuda.is_available() else 'cpu')
+    device = torch.device(infer_config.device if torch.cuda.is_available() else 'cpu')
     print(f"使用设备: {device}\n")
     
     # 加载模型
@@ -465,14 +476,14 @@ def main():
         val_loader=test_loader,
         device=device,
         config=config,
-        save_predictions=args.save_predictions,
-        output_dir=args.output_dir
+        save_predictions=infer_config.save_predictions,
+        output_dir=infer_config.output_dir
     )
     
     # 保存评估结果到文件
     results = {
         'checkpoint_path': args.checkpoint_path,
-        'dataset_split': args.split,
+        'dataset_split': infer_config.split,
         'num_samples': len(test_loader),
         '2d_metrics': {
             'giou': float(giou),
@@ -486,7 +497,10 @@ def main():
         }
     }
     
-    results_file = os.path.join(args.output_dir if args.save_predictions else '.', 'validation_results.pt')
+    results_file = os.path.join(
+        infer_config.output_dir if infer_config.save_predictions else '.',
+        'validation_results.pt'
+    )
     torch.save(results, results_file)
     print(f"\n评估结果已保存到: {results_file}")
 

@@ -1,214 +1,212 @@
-"""代码架构未完成，不使用"""
+﻿"""
+联合可供性模型骨架。
+
+本文件定义一个高层模型管理基座，包含三个主要模块：
+- VLM 主干（分词器 + 视觉语言主干；当前为占位实现）
+- 图像隐藏状态解码器（用文本隐藏状态查询图像特征）
+- 点云隐藏状态解码器（用文本隐藏状态查询点云特征）
+
+实现刻意轻量，仅聚焦结构。
+"""
+from __future__ import annotations
+
+from typing import Optional, Dict, Any
+
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from en_decoder import TextEncoder, ImageEncoder, PointEncoder, ImageHeatDecoder, PointHeatDecoder
+from configs import JointAffordanceConfig
 
 
-class JointAff(nn.Module):
-    """
-    文本-图像-点云联合affordance预测模型。
+class SimpleImageEncoder(nn.Module):
+    """轻量级图像编码器占位实现（可替换为 SAM-ViT 等）。"""
 
-    - 文本（Instruction）经 TextEncoder 得到对象/动作语义嵌入 T_o
-    - 图像经 ImageEncoder 得到多尺度特征，用于生成图像token I_h
-    - 点云经 PointEncoder（PointNet++ 层级结构）得到分层特征 encoder_p
-    - PointHeatDecoder 参考 PointNet++，利用 T_o、I_h 和 encoder_p 生成每点 3D affordance 预测
-    - 预留 ImageHeatDecoder 接口用于 2D heatmap 预测
-    """
-
-    def __init__(self,
-                 pretrained_weight: dict | None = None,
-                 use_image: bool = True,
-                 use_pointcloud: bool = True):
+    def __init__(self, in_channels: int = 3, hidden_size: int = 768):
         super().__init__()
+        self.proj = nn.Conv2d(in_channels, hidden_size, kernel_size=1)
 
-        self.use_image = use_image
-        self.use_pointcloud = use_pointcloud
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        x = self.proj(images)
+        b, c, h, w = x.shape
+        return x.flatten(2).transpose(1, 2).contiguous()  # 形状: (B, HW, C)
 
-        # 文本编码器：将指令/文本编码为对象语义向量 T_o
-        # 具体结构在 TextEncoder 内部实现
-        self.text_encoder = TextEncoder(
-            pretrained_weight=None if pretrained_weight is None else pretrained_weight.get("text_encoder")
+
+class SimplePointEncoder(nn.Module):
+    """轻量级点云编码器占位实现（可替换为 PointNet2/Sonata/FTv3）。"""
+
+    def __init__(self, input_dim: int = 3, hidden_size: int = 768):
+        super().__init__()
+        self.proj = nn.Linear(input_dim, hidden_size)
+
+    def forward(self, points: torch.Tensor) -> torch.Tensor:
+        if points.dim() != 3:
+            raise ValueError("points 必须是 3D 张量")
+        if points.shape[1] == 3:  # 形状变换: (B, 3, N) -> (B, N, 3)
+            points = points.transpose(1, 2).contiguous()
+        return self.proj(points)
+
+
+class VLMBackbone(nn.Module):
+    """VLM 主干占位实现（参考 LLaVA 的最小流程）。"""
+
+    def __init__(self, config: JointAffordanceConfig):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.vocab_size = config.vocab_size
+        self.tokenizer = config.tokenizer
+        self.text_embed = nn.Embedding(self.vocab_size, self.hidden_size)
+        self.text_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+        self.text_norm = nn.LayerNorm(self.hidden_size)
+        self.image_encoder = SimpleImageEncoder(in_channels=3, hidden_size=self.hidden_size)
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        **_: Any,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        hidden_states = None
+        if input_ids is not None:
+            hidden_states = self.text_norm(self.text_proj(self.text_embed(input_ids)))
+        image_features = None
+        if images is not None:
+            image_features = self.image_encoder(images)
+        return {"hidden_states": hidden_states, "image_features": image_features}
+
+
+class ImageHiddenStateDecoder(nn.Module):
+    """使用文本隐藏状态查询图像特征的解码器。"""
+
+    def __init__(self, hidden_size: int = 768, num_heads: int = 8, out_dim: int = 1):
+        super().__init__()
+        self.image_encoder = SimpleImageEncoder(in_channels=3, hidden_size=hidden_size)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_size, num_heads=num_heads, batch_first=True
+        )
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4),
+            nn.GELU(),
+            nn.Linear(hidden_size * 4, hidden_size),
+        )
+        self.out_proj = nn.Linear(hidden_size, out_dim)
+
+    def forward(
+        self,
+        hidden_states: Optional[torch.Tensor],
+        images: Optional[torch.Tensor] = None,
+        image_features: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        if hidden_states is None:
+            return None
+        if image_features is None:
+            if images is None:
+                return None
+            image_features = self.image_encoder(images)
+        attn_out, _ = self.cross_attn(hidden_states, image_features, image_features)
+        x = self.ffn(attn_out)
+        return self.out_proj(x)
+
+
+class PointCloudHiddenStateDecoder(nn.Module):
+    """使用文本隐藏状态查询点云特征的解码器。"""
+
+    def __init__(self, hidden_size: int = 768, num_heads: int = 8, out_dim: int = 1):
+        super().__init__()
+        self.point_encoder = SimplePointEncoder(input_dim=3, hidden_size=hidden_size)
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_size, num_heads=num_heads, batch_first=True
+        )
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size * 4),
+            nn.GELU(),
+            nn.Linear(hidden_size * 4, hidden_size),
+        )
+        self.out_proj = nn.Linear(hidden_size, out_dim)
+
+    def forward(
+        self,
+        hidden_states: Optional[torch.Tensor],
+        point_clouds: Optional[torch.Tensor] = None,
+        point_features: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        if hidden_states is None:
+            return None
+        if point_features is None:
+            if point_clouds is None:
+                return None
+            point_features = self.point_encoder(point_clouds)
+        attn_out, _ = self.cross_attn(hidden_states, point_features, point_features)
+        x = self.ffn(attn_out)
+        return self.out_proj(x)
+
+
+class JointAffordanceModel(nn.Module):
+    """模型管理基座，负责加载配置并组织各模块。"""
+
+    def __init__(self, config: Optional[JointAffordanceConfig] = None):
+        super().__init__()
+        self.config = config or JointAffordanceConfig()
+        self.vision_pretrained = self.config.vision_pretrained
+        self.ce_loss_weight = self.config.ce_loss_weight
+        self.dice_loss_weight = self.config.dice_loss_weight
+        self.bce_loss_weight = self.config.bce_loss_weight
+        self.seg_token_idx = self.config.seg_token_idx
+        self.aff_token_idx = self.config.aff_token_idx
+
+        self.vlm = VLMBackbone(self.config)
+        self.image_decoder = ImageHiddenStateDecoder(
+            hidden_size=self.config.hidden_size,
+            num_heads=self.config.num_heads,
+            out_dim=self.config.image_out_dim,
+        )
+        self.point_decoder = PointCloudHiddenStateDecoder(
+            hidden_size=self.config.hidden_size,
+            num_heads=self.config.num_heads,
+            out_dim=self.config.point_out_dim,
         )
 
-        # 图像编码器：ResNet backbone，输出多尺度特征
-        if self.use_image:
-            self.img_encoder = ImageEncoder(
-                pretrained_weight=None if pretrained_weight is None else pretrained_weight.get("image_encoder")
-            )
-            # 2D heatmap decoder（当前在 en_decoder 中尚未实现具体结构，这里仅占位）
-            self.img_decoder = ImageHeatDecoder(
-                pretrained_weight=None if pretrained_weight is None else pretrained_weight.get("image_decoder")
-            )
+    @property
+    def tokenizer(self):
+        return self.vlm.tokenizer
 
-        # 点云编码器：PointNet++ 多尺度集合采样 + 特征传播
-        if self.use_pointcloud:
-            self.point_encoder = PointEncoder(
-                pretrained_weight=None if pretrained_weight is None else pretrained_weight.get("point_encoder")
-            )
-            # 3D heat decoder，已在 en_decoder 中实现基于 PointNet++ 的上采样与融合
-            self.point_decoder = PointHeatDecoder(
-                pretrained_weight=None if pretrained_weight is None else pretrained_weight.get("point_decoder")
-            )
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+        point_clouds: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        image_features: Optional[torch.Tensor] = None,
+        point_features: Optional[torch.Tensor] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        vlm_out = self.vlm(
+            input_ids=input_ids,
+            images=images,
+            attention_mask=attention_mask,
+            **kwargs,
+        )
+        hidden_states = vlm_out["hidden_states"]
+        image_logits = self.image_decoder(
+            hidden_states, images=images, image_features=image_features
+        )
+        point_logits = self.point_decoder(
+            hidden_states, point_clouds=point_clouds, point_features=point_features
+        )
+        return {
+            "hidden_states": hidden_states,
+            "image_logits": image_logits,
+            "point_logits": point_logits,
+            "vlm_image_features": vlm_out.get("image_features"),
+        }
 
-    def encode_text(self, text_tokens: torch.Tensor) -> torch.Tensor:
-        """
-        编码文本指令。
 
-        Args:
-            text_tokens: 文本输入，形状和类型由 TextEncoder 自行约定（例如 [B, L] 或 [B, L, D]）
-
-        Returns:
-            T_o: 文本/对象语义嵌入，形状 [B, C_t]
-        """
-        return self.text_encoder(text_tokens)
-
-    def encode_image(self, img: torch.Tensor):
-        """
-        图像编码。
-
-        Args:
-            img: [B, 3, H, W]
-
-        Returns:
-            down_0, down_1, down_2, down_3: 多尺度特征
-        """
-        assert self.use_image, "use_image=False 时不应调用 encode_image"
-        return self.img_encoder(img)
-
-    def image_to_tokens(self, down_3: torch.Tensor) -> torch.Tensor:
-        """
-        将图像最高层特征 map 展开为 token 序列，供 PointHeatDecoder / ImageHeatDecoder 使用。
-
-        Args:
-            down_3: [B, C, H, W]，来自 ImageEncoder 的最高层特征
-
-        Returns:
-            I_h: [B, N_i, C] 的图像token序列
-        """
-        B, C, H, W = down_3.shape
-        I_h = down_3.view(B, C, H * W).permute(0, 2, 1).contiguous()  # [B, N_i, C]
-        return I_h
-
-    def encode_pointcloud(self, points: torch.Tensor):
-        """
-        点云编码（PointNet++ 层级表示）。
-
-        Args:
-            points: [B, C, N]，通常 C>=3，前3维为 xyz
-
-        Returns:
-            encoder_p: 层级特征列表 [[l0_xyz, l0_points], ..., [l3_xyz, l3_points]]
-        """
-        assert self.use_pointcloud, "use_pointcloud=False 时不应调用 encode_pointcloud"
-        return self.point_encoder(points)
-
-    def forward(self,
-                text: torch.Tensor,
-                img: torch.Tensor | None = None,
-                points: torch.Tensor | None = None,
-                gt_aff2d: torch.Tensor | None = None,
-                gt_aff3d: torch.Tensor | None = None,
-                img_mask: torch.Tensor | None = None,
-                pc_mask: torch.Tensor | None = None,
-                return_loss: bool = False):
-        """
-        联合前向过程。
-
-        Args:
-            text: 文本输入（Instruction），传给 TextEncoder
-            img: 图像张量 [B, 3, H, W]，可选
-            points: 点云张量 [B, C, N]，可选
-            gt_aff2d: 2D GT 热力图 / mask，形状与输出一致，可选
-            gt_aff3d: 3D GT 每点 affordance，形状 [B, N, 1] 或 [B, N]，可选
-            img_mask: 图像区域 mask，可选（例如仅在物体区域监督）
-            pc_mask: 点云 mask，可选（例如仅在可见点上监督）
-            return_loss: 若为 True，则同时返回 loss 字典
-
-        Returns:
-            outputs: dict，可能包含：
-                - 'aff2d': [B, 1, H', W'] 或 [B, N_i, 1]（视 ImageHeatDecoder 实现而定）
-                - 'aff3d': [B, N_p, 1]
-                - 'loss': 标量 loss（若 return_loss=True 且提供 GT）
-                - 'loss_2d': 2D 分支 loss
-                - 'loss_3d': 3D 分支 loss
-        """
-        outputs: dict[str, torch.Tensor] = {}
-
-        # 1. 文本编码
-        T_o = self.encode_text(text)  # 期望形状 [B, C_t]
-
-        # 2. 图像编码（可选）
-        if self.use_image and img is not None:
-            down_0, down_1, down_2, down_3 = self.encode_image(img)
-            I_h = self.image_to_tokens(down_3)  # [B, N_i, C]
-        else:
-            down_0 = down_1 = down_2 = down_3 = None
-            I_h = None
-
-        # 3. 点云编码（可选）
-        if self.use_pointcloud and points is not None:
-            encoder_p = self.encode_pointcloud(points)
-        else:
-            encoder_p = None
-
-        # 4. 3D affordance 预测（基于 PointNet++）
-        loss_3d = None
-        if self.use_pointcloud and encoder_p is not None and I_h is not None:
-            # PointHeatDecoder 接口：forward(self, T_o, I_h, encoder_p)
-            aff3d = self.point_decoder(T_o, I_h, encoder_p)  # [B, N_p, 1]，Sigmoid 后的概率
-            outputs["aff3d"] = aff3d
-
-            if gt_aff3d is not None and return_loss:
-                # 对齐形状 [B, N_p, 1]
-                if gt_aff3d.dim() == 2:
-                    gt_aff3d = gt_aff3d.unsqueeze(-1)
-                if pc_mask is not None:
-                    # 仅在有效点上计算 loss
-                    while pc_mask.dim() < gt_aff3d.dim():
-                        pc_mask = pc_mask.unsqueeze(-1)
-                    mask = pc_mask.bool()
-                    pred = aff3d[mask]
-                    target = gt_aff3d[mask]
-                else:
-                    pred = aff3d
-                    target = gt_aff3d
-
-                loss_3d = F.binary_cross_entropy(pred, target)
-                outputs["loss_3d"] = loss_3d
-
-        # 5. 2D affordance 预测（预留，视 ImageHeatDecoder 具体实现）
-        # 当前 ImageHeatDecoder 为空实现，这里只给出接口和 loss 计算示例
-        loss_2d = None
-        if self.use_image and img is not None and hasattr(self, "img_decoder"):
-            # TODO: 根据 ImageHeatDecoder 实现调整接口
-            # 示例：假设 img_decoder 接收 (T_o, encoder_feats) 并输出 [B, 1, H', W']
-            # aff2d = self.img_decoder(T_o, (down_0, down_1, down_2, down_3))
-            # outputs["aff2d"] = aff2d
-            aff2d = None  # 占位
-
-            if aff2d is not None and gt_aff2d is not None and return_loss:
-                pred2d = aff2d
-                target2d = gt_aff2d
-                if img_mask is not None:
-                    while img_mask.dim() < target2d.dim():
-                        img_mask = img_mask.unsqueeze(1)
-                    mask2d = img_mask.bool()
-                    pred2d = pred2d[mask2d]
-                    target2d = target2d[mask2d]
-                loss_2d = F.binary_cross_entropy(pred2d, target2d)
-                outputs["loss_2d"] = loss_2d
-
-        # 6. 汇总 loss
-        if return_loss and (loss_2d is not None or loss_3d is not None):
-            total = 0.0
-            if loss_2d is not None:
-                total = total + loss_2d
-            if loss_3d is not None:
-                total = total + loss_3d
-            outputs["loss"] = total
-
-        return outputs
-
-__all__ = []
+__all__ = [
+    "JointAffordanceModel",
+    "VLMBackbone",
+    "ImageHiddenStateDecoder",
+    "PointCloudHiddenStateDecoder",
+    "SimpleImageEncoder",
+    "SimplePointEncoder",
+]

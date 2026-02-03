@@ -118,6 +118,8 @@ def create_param_groups(model, config):
 def main():
     global params_to_train
     config = TrainingConfig()
+    model_config = config.model_config
+    mllm = model_config.mllm
     if config.local_rank == 0:
         os.makedirs(config.log_dir, exist_ok=True)
         writer = SummaryWriter(config.log_dir)
@@ -126,9 +128,9 @@ def main():
 
     # Create model - 使用魔改后的 LISAForCausalLM 模型（已支持点云）
     tokenizer = transformers.AutoTokenizer.from_pretrained(
-        config.version,
+        mllm.version,
         cache_dir=None,
-        model_max_length=config.model_max_length,
+        model_max_length=mllm.model_max_length,
         padding_side="right",
         use_fast=False,
     )
@@ -137,31 +139,31 @@ def main():
     # 添加特殊标记
     tokenizer.add_tokens("[SEG]")  # 2D分割标记
     tokenizer.add_tokens("[AFF]")  # 3D affordance标记
-    config.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
-    config.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
+    mllm.seg_token_idx = tokenizer("[SEG]", add_special_tokens=False).input_ids[0]
+    mllm.aff_token_idx = tokenizer("[AFF]", add_special_tokens=False).input_ids[0]
 
-    if config.use_mm_start_end:
+    if mllm.use_mm_start_end:
         tokenizer.add_tokens(
             [DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN], special_tokens=True
         )
 
     # 模型参数配置
     model_args = {
-        "train_mask_decoder": config.train_mask_decoder,
-        "out_dim": config.out_dim,
-        "ce_loss_weight": config.ce_loss_weight,
-        "dice_loss_weight": config.dice_loss_weight,
-        "bce_loss_weight": config.bce_loss_weight,
-        "seg_token_idx": config.seg_token_idx,
-        "aff_token_idx": config.aff_token_idx,  # 3D affordance token
-        "vision_pretrained": config.vision_pretrained,
-        "vision_tower": config.vision_tower,
-        "use_mm_start_end": config.use_mm_start_end,
+        "train_mask_decoder": mllm.train_mask_decoder,
+        "out_dim": mllm.out_dim,
+        "ce_loss_weight": mllm.ce_loss_weight,
+        "dice_loss_weight": mllm.dice_loss_weight,
+        "bce_loss_weight": mllm.bce_loss_weight,
+        "seg_token_idx": mllm.seg_token_idx,
+        "aff_token_idx": mllm.aff_token_idx,  # 3D affordance token
+        "vision_pretrained": mllm.vision_pretrained,
+        "vision_tower": mllm.vision_tower,
+        "use_mm_start_end": mllm.use_mm_start_end,
     }
     
     # 初始化魔改后的 LISA 模型
     model = LISAForCausalLM.from_pretrained(
-        config.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
+        mllm.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
     )
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
@@ -176,7 +178,7 @@ def main():
     vision_tower.to(dtype=config.precision, device=config.local_rank)
     
     conversation_lib.default_conversation = conversation_lib.conv_templates[
-        config.conv_type
+        mllm.conv_type
     ]
 
     model.resize_token_embeddings(len(tokenizer))
@@ -241,16 +243,16 @@ def main():
     dataset_manager = DatasetManager(
         dataset_dir=config.dataset_dir,
         tokenizer=tokenizer,
-        vision_tower=config.vision_tower,
+        vision_tower=mllm.vision_tower,
         precision=config.precision,
         image_size=config.image_size,
         num_points=config.num_points,
         train_ratio=config.train_ratio,
         val_ratio=config.val_ratio,
         test_ratio=config.test_ratio,
-        use_mm_start_end=config.use_mm_start_end,
+        use_mm_start_end=mllm.use_mm_start_end,
         samples_per_epoch=config.samples_per_epoch,
-        conv_type=config.conv_type,
+        conv_type=mllm.conv_type,
         use_sample_cache=config.use_sample_cache
     )
     config.samples_per_epoch = dataset_manager.samples_per_epoch

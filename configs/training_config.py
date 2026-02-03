@@ -3,7 +3,11 @@ NOTE: 所有的相对目录都是基于项目（仓库）根目录而言
 """
 import os
 from re import S
+from typing import Optional
+
 import torch
+
+from .base_config import JointAffModelConfigs
 
 class TrainingConfig:
     """
@@ -14,15 +18,11 @@ class TrainingConfig:
         self,
         # 基础配置
         local_rank=0,
-        version="../pretrained/llava-llama-2-13b-chat-lightning-preview",
-        precision="fp32",  # fp32, bf16会报错; 使用fp16会导致nan
+        precision="fp32",  # fp32。 bf16会报错，fp16会导致nan
+        model_config: Optional[JointAffModelConfigs] = None,
         
         # 模型配置
         image_size=(1024, 1024), # h,w
-        model_max_length=512,
-        vision_tower="../pretrained/clip-vit-large-patch14",
-        vision_pretrained="../pretrained/sam_vit_h_4b8939.pth",
-        out_dim=256,
         
         # 数据配置
         dataset_dir="../datasets/merged1-2-3/",
@@ -68,11 +68,6 @@ class TrainingConfig:
         reduce_bucket_size=5e8,
         allgather_bucket_size=5e8,
         
-        # 损失权重
-        ce_loss_weight=1.0,
-        dice_loss_weight=0.5,
-        bce_loss_weight=2.0,
-        
         # LoRA 配置
         lora_r=8,
         lora_alpha=16,
@@ -84,9 +79,6 @@ class TrainingConfig:
         mask_threshold_2d=0.0,
         mask_threshold_3d=0.5,
         gradient_checkpointing=True,
-        train_mask_decoder=True,
-        use_mm_start_end=True,
-        conv_type="llava_llama_2",  # llava_v1, llava_llama_2
         
         # 高级配置
         exclude_val=False,
@@ -99,20 +91,16 @@ class TrainingConfig:
     ):
         # 基础配置
         self.local_rank = local_rank
-        self.version = version
         
         self.precision = torch.float32
         if precision == "bf16":
             self.precision = torch.bfloat16
 
+        self.model_config = model_config or JointAffModelConfigs()
         self.vis_save_path = vis_save_path
         
         # 模型配置
         self.image_size = image_size
-        self.model_max_length = model_max_length
-        self.vision_tower = vision_tower
-        self.vision_pretrained = vision_pretrained
-        self.out_dim = out_dim
         
         # 数据配置
         self.dataset_dir = dataset_dir
@@ -161,11 +149,6 @@ class TrainingConfig:
         self.reduce_bucket_size = reduce_bucket_size
         self.allgather_bucket_size = allgather_bucket_size
         
-        # 损失权重
-        self.ce_loss_weight = ce_loss_weight
-        self.dice_loss_weight = dice_loss_weight
-        self.bce_loss_weight = bce_loss_weight
-        
         # LoRA 配置
         self.lora_r = lora_r
         self.lora_alpha = lora_alpha
@@ -177,9 +160,6 @@ class TrainingConfig:
         self.mask_threshold_2d = mask_threshold_2d
         self.mask_threshold_3d = mask_threshold_3d
         self.gradient_checkpointing = gradient_checkpointing
-        self.train_mask_decoder = train_mask_decoder
-        self.use_mm_start_end = use_mm_start_end
-        self.conv_type = conv_type
         
         # 高级配置
         self.exclude_val = exclude_val
@@ -191,8 +171,6 @@ class TrainingConfig:
         
         # 运行时属性
         self.log_dir = os.path.join(self.log_base_dir, self.exp_name)
-        self.seg_token_idx = None
-        self.aff_token_idx = None
         self.distributed = False
         
         # 验证配置
@@ -200,8 +178,11 @@ class TrainingConfig:
     
     def _validate(self):
         """验证配置参数"""
-        if self.conv_type not in ["llava_v1", "llava_llama_2"]:
-            raise ValueError(f"conv_type must be one of ['llava_v1', 'llava_llama_2'], got {self.conv_type}")
+        conv_type = self.model_config.mllm.conv_type
+        if conv_type not in ["llava_v1", "llava_llama_2"]:
+            raise ValueError(
+                f"conv_type must be one of ['llava_v1', 'llava_llama_2'], got {conv_type}"
+            )
     
     def get_deepspeed_config(self):
         """
