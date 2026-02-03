@@ -15,6 +15,18 @@ logger = logging.getLogger(__name__)
 
 """  ----------------------------------------------- utils functions ----------------------------------------------  """
 
+
+def resolve_dtype(dtype_name: str):
+    """解析 dtype 字符串为 torch.dtype"""
+    if dtype_name == "bf16":
+        return torch.bfloat16
+    if dtype_name == "fp16":
+        return torch.float16
+    if dtype_name == "fp32":
+        return torch.float32
+    return None
+
+
 def resolve_path(path_str: str):
     """兼容相对/绝对路径，返回绝对路径。"""
     if path_str is None: return None

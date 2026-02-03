@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 from typing import Optional
+from utils.common import resolve_dtype
 
 class Configs:
     """基础配置类，提供快速属性更新能力。"""
@@ -25,9 +26,12 @@ class MLLMConfigs(Configs):
 
     def __init__(
         self,
-        version: str = "../pretrained/llava-llama-2-13b-chat-lightning-preview",
+        # version: str = "../pretrained/llava-llama-2-13b-chat-lightning-preview",
+        qwen_model_name_or_path: str = "Qwen/Qwen2.5-VL-3B-Instruct",
+        qwen_attn_implementation: str = "flash_attention_2",
+        qwen_dtype: str = "bf16",
         model_max_length: int = 512,
-        conv_type: str = "llava_llama_2",
+        # conv_type: str = "llava_llama_2",
         vocab_size: int = 32000,
         hidden_size: int = 768,
         num_heads: int = 8,
@@ -42,11 +46,20 @@ class MLLMConfigs(Configs):
         bce_loss_weight: float = 2.0,
         seg_token_idx: Optional[int] = None,
         aff_token_idx: Optional[int] = None,
+        # TODO: Lora部分转移到training_config中，完成训练后转换模型的时候合并lora权重
+        lora_enable: bool = False,
+        lora_r: int = 64,
+        lora_alpha: int = 128,
+        lora_dropout: float = 0.05,
+        lora_target_modules: str = "q_proj,k_proj,v_proj,o_proj",
     ):
         super().__init__(
-            version=version,
+            # version=version,
+            qwen_model_name_or_path=qwen_model_name_or_path,
+            qwen_attn_implementation=qwen_attn_implementation,
+            qwen_dtype=resolve_dtype(qwen_dtype),
             model_max_length=model_max_length,
-            conv_type=conv_type,
+            # conv_type=conv_type,
             vocab_size=vocab_size,
             hidden_size=hidden_size,
             num_heads=num_heads,
