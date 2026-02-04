@@ -8,22 +8,16 @@
 
 实现刻意轻量，仅聚焦结构。
 """
-from __future__ import annotations
-
 from typing import Optional, Dict, Any, List
-
 from pathlib import Path
 
 import torch
 import torch.nn as nn
-from transformers import (
-    AutoTokenizer,
-    CLIPImageProcessor,
-)
+from transformers import AutoTokenizer
 
-from configs import JointAffordanceConfig
-from .segment_anything import build_sam_vit_h
-from .pointnet2_utils import PointCloud3DSegmentor
+from configs import JointAffordanceConfig, ImageDecoderConfigs, PointDecoderConfigs, MLLMConfigs
+from model.segment_anything import build_sam_vit_h
+from model.pointnet2_utils import PointCloud3DSegmentor
 
 
 class SimpleImageEncoder(nn.Module):
@@ -57,7 +51,7 @@ class SimplePointEncoder(nn.Module):
 class MLLMBackbone(nn.Module):
     """MLLM 主干实现（Qwen3-VL）。"""
 
-    def __init__(self, config: JointAffordanceConfig):
+    def __init__(self, config: MLLMConfigs):
         super().__init__()
         self.config = config
         self.qwen_model = self._build_qwen_model(config)
@@ -77,10 +71,10 @@ class MLLMBackbone(nn.Module):
         self.tokenizer = self.config.tokenizer
     
 
-    def _build_qwen_model(self, config: JointAffordanceConfig):
+    def _build_qwen_model(self, config: MLLMConfigs):
         model_name = config.qwen_model_name_or_path
         model_name_lower = model_name.lower()
-        dtype = self._resolve_dtype(config.qwen_dtype)
+        dtype = config.qwen_dtype
 
         # choose QwenVL version
         if "qwen3" in model_name_lower and "a" in Path(model_name.rstrip("/")).name.lower():
@@ -135,9 +129,14 @@ class MLLMBackbone(nn.Module):
 
         return model
 
+    @property
+    def model(self):
+        return self.qwen_model
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
         images: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         **kwargs: Any,
@@ -148,6 +147,8 @@ class MLLMBackbone(nn.Module):
             "output_hidden_states": True,
             "return_dict": True,
         }
+        if labels is not None:
+            model_inputs["labels"] = labels
         if images is not None:
             model_inputs["pixel_values"] = images
         model_inputs.update(kwargs)
@@ -161,7 +162,10 @@ class MLLMBackbone(nn.Module):
         else:
             hidden_states = outputs[0]
         
-        return {'hidden_states': hidden_states}
+        # 确保输出为 [B, L, C]
+        if hidden_states.dim() == 2:
+            hidden_states = hidden_states.unsqueeze(0)
+        return {"hidden_states": hidden_states, "output": outputs}
 
 
 class ImageHiddenStateDecoder(nn.Module):
@@ -169,11 +173,11 @@ class ImageHiddenStateDecoder(nn.Module):
 
     def __init__(
         self,
-        config: JointAffordanceConfig,
+        config: ImageDecoderConfigs,
     ):
         super().__init__()
         self.config = config
-        self.image_encoder = SimpleImageEncoder(in_channels=3, hidden_size=hidden_size)
+        self.image_encoder = SimpleImageEncoder(in_channels=3, hidden_size=config.hidden_size)
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=config.hidden_size, num_heads=config.num_heads, batch_first=True
         )
@@ -184,19 +188,19 @@ class ImageHiddenStateDecoder(nn.Module):
         )
         self.out_proj = nn.Linear(config.hidden_size, config.out_dim)
 
-        self.visual_model = build_sam_vit_h(config.vision_pretrained)
+        self.visual_model = build_sam_vit_h(getattr(config, "vision_pretrained", None))
         for param in self.visual_model.parameters():
             param.requires_grad = False
-        # if train_mask_decoder:
-        #     self.visual_model.mask_decoder.train()
-        #     for param in self.visual_model.mask_decoder.parameters():
-        #         param.requires_grad = True
+        if getattr(config, "train_mask_decoder", False):
+            self.visual_model.mask_decoder.train()
+            for param in self.visual_model.mask_decoder.parameters():
+                param.requires_grad = True
 
         # 
         text_fc = nn.Sequential(
             ("fc1", nn.Linear(config.hidden_size, config.hidden_size)),
             ("relu", nn.ReLU(inplace=True)),
-            ("fc2", nn.Linear(config.hidden_size, config.prompt_dim)),
+            ("fc2", nn.Linear(config.hidden_size, config.out_dim)),
             # ("dropout", nn.Dropout(0.0)),
         )
         self.text_hidden_fcs = nn.ModuleList([text_fc])
@@ -290,7 +294,7 @@ class PointCloudHiddenStateDecoder(nn.Module):
 
     def __init__(
         self,
-        config: JointAffordanceConfig,
+        config: PointDecoderConfigs,
     ):
         super().__init__()
         self.config = config
@@ -309,7 +313,7 @@ class PointCloudHiddenStateDecoder(nn.Module):
         text_fc = nn.Sequential(
             nn.Linear(config.hidden_size, config.hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(config.hidden_size, config.prompt_dim),
+            nn.Linear(config.hidden_size, config.out_dim),
             # nn.Dropout(0.0),
         )
         self.text_hidden_fcs = nn.ModuleList([text_fc])
@@ -317,7 +321,7 @@ class PointCloudHiddenStateDecoder(nn.Module):
             param.requires_grad = True
 
         self.point_cloud_segmentor = PointCloud3DSegmentor(
-            embed_dim=config.prompt_dim,
+            embed_dim=config.out_dim,
             num_heads=8,
             num_decoder_layers=3,
             max_text_len=77,
@@ -413,8 +417,8 @@ class JointAffordanceModel(nn.Module):
         self.aff_token_idx = self.config.aff_token_idx
 
         self.mllm = MLLMBackbone(self.config.mllm)
-        self.image_decoder = ImageHiddenStateDecoder(self.config)
-        self.point_decoder = PointCloudHiddenStateDecoder(self.config)
+        self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder)
+        self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder)
 
         # self.clip_image_processor = CLIPImageProcessor.from_pretrained(self.config.mm_vision_tower)
 
@@ -443,39 +447,39 @@ class JointAffordanceModel(nn.Module):
         last_hidden_state: torch.Tensor,
         token_idx: Optional[int],
     ):
+        """
+        从语言模型隐藏状态中提取指定特殊 token（如 [SEG]）位置的嵌入，并按样本分组。
+
+        Args:
+            input_ids: 输入 token IDs，形状 [B, L]。
+            last_hidden_state: 投影后的隐藏状态，形状 [B, L', C]（L' 可能因图像 token 插入而大于 L）。
+            token_idx: 要提取的特殊 token 的词汇表索引（如 [SEG] 的 id）。
+
+        Returns:
+            token_embeddings_list: 长度为 B 的列表，第 i 个元素为第 i 个样本中该 token 的嵌入，形状 [num_tokens_i, C]。
+        """
         if input_ids is None or token_idx is None:
             return [last_hidden_state.new_empty((0, last_hidden_state.shape[-1])) for _ in range(last_hidden_state.shape[0])]
 
-        token_mask = input_ids[:, 1:] == token_idx
-        token_mask = torch.cat(
-            [
-                token_mask,
-                torch.zeros((token_mask.shape[0], 1), dtype=torch.bool, device=token_mask.device),
-            ],
-            dim=1,
-        )
+        # Qwen 输入已包含视觉 token，占位符与 hidden_states 位置一致
+        token_mask = input_ids == token_idx
 
-        actual_seq_len = last_hidden_state.shape[1]
-        current_mask_len = token_mask.shape[1]
-        if actual_seq_len > current_mask_len:
-            padding_len = actual_seq_len - current_mask_len
-            token_mask = torch.cat(
-                [
-                    torch.zeros((token_mask.shape[0], padding_len), dtype=torch.bool, device=token_mask.device),
-                    token_mask,
-                ],
-                dim=1,
-            )
-        elif actual_seq_len < current_mask_len:
-            token_mask = token_mask[:, :actual_seq_len]
+        # 若长度不一致，截断到较短的公共长度，避免手动对齐
+        if last_hidden_state.shape[1] != token_mask.shape[1]:
+            min_len = min(last_hidden_state.shape[1], token_mask.shape[1])
+            token_mask = token_mask[:, :min_len]
+            last_hidden_state = last_hidden_state[:, :min_len, :]
 
+        # 按 mask 取出对应位置的嵌入，得到一维张量 [总 token 数, C]
         token_embeddings = last_hidden_state[token_mask]
+        # 每个样本中该 token 的数量，用于后续按样本切分
         token_counts = token_mask.int().sum(-1)
         token_offset = token_counts.cumsum(-1)
         token_offset = torch.cat(
             [torch.zeros(1, dtype=torch.long, device=token_offset.device), token_offset], dim=0
         )
 
+        # 按样本分组：第 i 个样本的嵌入为 token_embeddings[token_offset[i]:token_offset[i+1]]
         token_embeddings_list = []
         for i in range(len(token_offset) - 1):
             start_i, end_i = token_offset[i], token_offset[i + 1]
@@ -485,6 +489,7 @@ class JointAffordanceModel(nn.Module):
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
         images: Optional[torch.Tensor] = None,
         point_clouds: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
@@ -492,9 +497,13 @@ class JointAffordanceModel(nn.Module):
         point_features: Optional[torch.Tensor] = None,
         **kwargs: Any,
     ) -> Dict[str, Optional[torch.Tensor]]:
+        # 兼容 Qwen 数据处理：pixel_values / image_grid_thw / position_ids 等通过 kwargs 透传
+        pixel_values = kwargs.pop("pixel_values", None)
+        images_for_mllm = pixel_values if pixel_values is not None else images
         mllm_out = self.mllm(
             input_ids=input_ids,
-            images=images,
+            labels=labels,
+            images=images_for_mllm,
             attention_mask=attention_mask,
             **kwargs,
         )
@@ -513,10 +522,11 @@ class JointAffordanceModel(nn.Module):
                 input_ids, point_hidden, self.seg_token_idx
             )
 
-            if images is not None:
-                image_embeddings = self.image_decoder.get_visual_embs(images)
+            images_for_sam = images if images is not None else pixel_values
+            if images_for_sam is not None:
+                image_embeddings = self.image_decoder.get_visual_embs(images_for_sam)
                 original_size_list, resize_list = self._normalize_size_lists(
-                    images,
+                    images_for_sam,
                     kwargs.get("original_size_list"),
                     kwargs.get("resize_list"),
                 )
@@ -545,6 +555,8 @@ class JointAffordanceModel(nn.Module):
             "hidden_states": hidden_states,
             "image_logits": image_logits,
             "point_logits": point_logits,
+            "labels": labels,
+            "output": mllm_out.get("output"),
         }
 
 
@@ -553,6 +565,4 @@ __all__ = [
     "MLLMBackbone",
     "ImageHiddenStateDecoder",
     "PointCloudHiddenStateDecoder",
-    "SimpleImageEncoder",
-    "SimplePointEncoder",
 ]

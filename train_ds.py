@@ -300,7 +300,7 @@ def main():
                 output_point_nums=config.num_points,
                 precision=config.precision,
             ),
-            config=config.get_deepspeed_config(),
+            config=config.deepspeed.to_dict(),
         )
     else:
         # 使用 DeepSpeed 内置优化器和调度器
@@ -315,7 +315,7 @@ def main():
                 output_point_nums=config.num_points,
                 precision=config.precision,
             ),
-            config=config.get_deepspeed_config(),
+            config=config.deepspeed.to_dict(),
         )
 
     # resume deepspeed checkpoint

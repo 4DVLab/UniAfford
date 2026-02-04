@@ -1,8 +1,6 @@
 """
-联合可供性模型配置。
-参考 training_config.py 的组织方式，集中管理模型所需的全部配置项。
+联合可供性模型配置，集中管理模型所需的全部配置项。
 """
-from __future__ import annotations
 
 from typing import Optional
 from utils.common import resolve_dtype
@@ -123,32 +121,30 @@ class PointDecoderConfigs(Configs):
             point_out_dim=point_out_dim,
             **kwargs,
         )
+        
 
-class JointAffModelConfigs(Configs):
+class JointAffordanceConfig(Configs):
     """联合可供性模型的配置类。"""
     def __init__(
         self,
         mllm_config:Optional[MLLMConfigs] = None,
-        visual_decoder: Optional[ImageDecoderConfigs] = None,
+        image_decoder: Optional[ImageDecoderConfigs] = None,
         point_decoder: Optional[PointDecoderConfigs] = None,
         **kwargs,
     ):  
         super().__init__(**kwargs)
         self.mllm = mllm_config or MLLMConfigs()
-        self.visual_decoder = visual_decoder or ImageDecoderConfigs()
+        self.image_decoder = image_decoder or ImageDecoderConfigs()
         self.point_decoder = point_decoder or PointDecoderConfigs()
 
         if self.mllm is not None:
             self.tokenizer = self.mllm.tokenizer
 
     def __getattr__(self, name):
-        for cfg in (self.mllm, self.visual_decoder, self.point_decoder):
+        for cfg in (self.mllm, self.image_decoder, self.point_decoder):
             if cfg is not None and hasattr(cfg, name):
                 return getattr(cfg, name)
         raise AttributeError(f"{type(self).__name__} has no attribute '{name}'")
-
-
-JointAffordanceConfig = JointAffModelConfigs
 
 
 

@@ -6,10 +6,158 @@ from re import S
 from typing import Optional
 
 import torch
+from utils.common import resolve_dtype
 
-from .base_config import JointAffModelConfigs
+from .base_config import Configs, JointAffordanceConfig
 
-class TrainingConfig:
+
+class DeepSpeedConfigs(Configs):
+    """DeepSpeed 相关配置，所有项以属性存储，通过 to_dict() 转为 DeepSpeed 所需字典。"""
+
+    def __init__(
+        self,
+        # 与 DeepSpeed 顶层键对应的属性
+        train_micro_batch_size_per_gpu: int = 1,
+        gradient_accumulation_steps: int = 1,
+        precision: Optional[torch.dtype] = None,
+        gradient_clipping: float = 1.0,
+
+        # zero_optimization 相关
+        zero_stage: int = 2,
+        contiguous_gradients: bool = True,
+        overlap_comm: bool = True,
+        reduce_scatter: bool = True,
+        reduce_bucket_size: float = 5e8,
+        allgather_bucket_size: float = 5e8,
+        # 是否使用分层学习率（为 True 时不写 optimizer/scheduler）
+        use_layerwise_lr: bool = True,
+        # optimizer / scheduler 用到的训练参数
+        lr: float = 0.003,
+        weight_decay: float = 0.0,
+        beta1: float = 0.9,
+        beta2: float = 0.95,
+        epochs: int = 250,
+        steps_per_epoch: Optional[int] = None,
+        warmup_min_lr: float = 0.0,
+        warmup_num_steps: int = 100,
+        warmup_type: str = "linear",
+        **kwargs,
+    ):
+        super().__init__(
+            train_micro_batch_size_per_gpu=train_micro_batch_size_per_gpu,
+            gradient_accumulation_steps=gradient_accumulation_steps,
+            precision=precision,
+            gradient_clipping=gradient_clipping,
+            zero_stage=zero_stage,
+            contiguous_gradients=contiguous_gradients,
+            overlap_comm=overlap_comm,
+            reduce_scatter=reduce_scatter,
+            reduce_bucket_size=reduce_bucket_size,
+            allgather_bucket_size=allgather_bucket_size,
+            use_layerwise_lr=use_layerwise_lr,
+            lr=lr,
+            weight_decay=weight_decay,
+            beta1=beta1,
+            beta2=beta2,
+            epochs=epochs,
+            steps_per_epoch=steps_per_epoch,
+            warmup_min_lr=warmup_min_lr,
+            warmup_num_steps=warmup_num_steps,
+            warmup_type=warmup_type,
+            **kwargs,
+        )
+
+    def to_dict(self) -> dict:
+        """将当前属性转换为 DeepSpeed 配置字典（嵌套结构）。"""
+        precision = self.precision if self.precision is not None else torch.float32
+        ds_config = {
+            "train_micro_batch_size_per_gpu": self.train_micro_batch_size_per_gpu,
+            "gradient_accumulation_steps": self.gradient_accumulation_steps,
+            "fp16": {"enabled": precision == torch.half},
+            "bf16": {"enabled": precision == torch.bfloat16},
+            "gradient_clipping": self.gradient_clipping,
+            "zero_optimization": {
+                "stage": self.zero_stage,
+                "contiguous_gradients": self.contiguous_gradients,
+                "overlap_comm": self.overlap_comm,
+                "reduce_scatter": self.reduce_scatter,
+                "reduce_bucket_size": int(self.reduce_bucket_size),
+                "allgather_bucket_size": int(self.allgather_bucket_size),
+            },
+        }
+        if not self.use_layerwise_lr:
+            total_steps = (self.epochs * self.steps_per_epoch) if self.steps_per_epoch is not None else 0
+            ds_config["optimizer"] = {
+                "type": "AdamW",
+                "params": {
+                    "lr": self.lr,
+                    "weight_decay": self.weight_decay,
+                    "betas": (self.beta1, self.beta2),
+                },
+            }
+            ds_config["scheduler"] = {
+                "type": "WarmupDecayLR",
+                "params": {
+                    "total_num_steps": total_steps,
+                    "warmup_min_lr": self.warmup_min_lr,
+                    "warmup_max_lr": self.lr,
+                    "warmup_num_steps": self.warmup_num_steps,
+                    "warmup_type": self.warmup_type,
+                },
+            }
+        return ds_config
+
+class LoRAConfigs(Configs):
+    """
+    LoRA 相关配置，与 DeepSpeedConfigs 一致：全部以属性存储。
+    - to_dict()：序列化/日志用。
+    - to_peft_config()：返回 peft.LoraConfig，供 get_peft_model 等直接使用。
+    """
+
+    def __init__(
+        self,
+        lora_r: int = 8,
+        lora_alpha: int = 16,
+        lora_dropout: float = 0.05,
+        lora_target_modules: str = "q_proj, k_proj, v_proj, o_proj",
+        bias: str = "none",
+        task_type: str = "CAUSAL_LM",
+        **kwargs,
+    ):
+        super().__init__(
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
+            lora_dropout=lora_dropout,
+            lora_target_modules=[m.strip() for m in lora_target_modules.split(",") if m.strip()],
+            bias=bias,
+            task_type=task_type,
+            **kwargs,
+        )
+
+    def to_dict(self) -> dict:
+        """属性转成普通字典，便于序列化或日志。"""
+        return {
+            "lora_r": self.lora_r,
+            "lora_alpha": self.lora_alpha,
+            "lora_dropout": self.lora_dropout,
+            "lora_target_modules": list(self.lora_target_modules),
+            "bias": self.bias,
+            "task_type": self.task_type,
+        }
+
+    def to_peft_config(self):
+        """返回 peft.LoraConfig，供 get_peft_model(model, config.lora.to_peft_config()) 使用。"""
+        from peft import LoraConfig, TaskType
+        return LoraConfig(
+            r=self.lora_r,
+            lora_alpha=self.lora_alpha,
+            lora_dropout=self.lora_dropout,
+            target_modules=list(self.lora_target_modules),
+            bias=self.bias,
+            task_type=TaskType.CAUSAL_LM,
+        )
+
+class TrainingConfig(Configs):
     """
     训练配置类，用于存储模型训练的所有超参数。详细说明见同目录下README.md
     """
@@ -19,7 +167,7 @@ class TrainingConfig:
         # 基础配置
         local_rank=0,
         precision="fp32",  # fp32。 bf16会报错，fp16会导致nan
-        model_config: Optional[JointAffModelConfigs] = None,
+        model_config: Optional[JointAffordanceConfig] = None,
         
         # 模型配置
         image_size=(1024, 1024), # h,w
@@ -43,7 +191,7 @@ class TrainingConfig:
         val_batch_size=10,
         workers=4,
         print_freq=1,
-        name_of_params_to_train="visual_model,vision_tower,mm_projector,text_hidden_fcs,point_cloud_segmentor",
+        name_of_params_to_train="visual_model, vision_tower, mm_projector, text_hidden_fcs, point_cloud_segmentor",
 
         # 优化器配置
         lr=0.003,
@@ -62,18 +210,6 @@ class TrainingConfig:
         warmup_min_lr=0,
         warmup_type="linear",
         
-        # DeepSpeed 配置
-        gradient_clipping=1.0,
-        zero_stage=2,
-        reduce_bucket_size=5e8,
-        allgather_bucket_size=5e8,
-        
-        # LoRA 配置
-        lora_r=8,
-        lora_alpha=16,
-        lora_dropout=0.05,
-        lora_target_modules="q_proj,v_proj",
-        
         # 其他配置
         num_classes_per_sample=3,
         mask_threshold_2d=0.0,
@@ -88,171 +224,87 @@ class TrainingConfig:
         resume="",
         start_epoch=0,
         vis_save_path="./vis_output",
-    ):
-        # 基础配置
-        self.local_rank = local_rank
-        
-        self.precision = torch.float32
-        if precision == "bf16":
-            self.precision = torch.bfloat16
+        **kwargs,
+    ):  
 
-        self.model_config = model_config or JointAffModelConfigs()
-        self.vis_save_path = vis_save_path
         
-        # 模型配置
-        self.image_size = image_size
-        
-        # 数据配置
-        self.dataset_dir = dataset_dir
-        self.log_base_dir = log_base_dir
-        self.exp_name = exp_name
-        self.num_points = num_points
-        self.train_ratio = train_ratio
-        self.val_ratio = val_ratio
-        self.test_ratio = test_ratio
-        self.use_sample_cache = use_sample_cache
-        
-        # 训练配置
-        self.epochs = epochs
-        self.steps_per_epoch = steps_per_epoch 
         if samples_per_epoch is not None:
-            self.steps_per_epoch = samples_per_epoch // batch_size
-        self.samples_per_epoch = samples_per_epoch
-        
-        self.batch_size = batch_size
-        self.grad_accumulation_steps = grad_accumulation_steps
-        self.val_batch_size = val_batch_size
-        self.workers = workers
-        self.print_freq = print_freq
-        self.name_of_params_to_train = name_of_params_to_train.split(",")
-        
-        # 优化器配置
-        self.lr = lr
-        self.beta1 = beta1
-        self.beta2 = beta2
-        self.weight_decay = weight_decay
-        
-        # 分层学习率
-        self.use_layerwise_lr = use_layerwise_lr
-        self.llm_lr = llm_lr if llm_lr is not None else lr * 0.1
-        self.vision_2d_lr = vision_2d_lr if vision_2d_lr is not None else lr
-        self.vision_3d_lr = vision_3d_lr if vision_3d_lr is not None else lr
-        
-        # 学习率调度器配置
-        self.warmup_num_steps = warmup_num_steps
-        self.warmup_min_lr = warmup_min_lr
-        self.warmup_type = warmup_type
-        
-        # DeepSpeed 配置
-        self.gradient_clipping = gradient_clipping
-        self.zero_stage = zero_stage
-        self.reduce_bucket_size = reduce_bucket_size
-        self.allgather_bucket_size = allgather_bucket_size
-        
-        # LoRA 配置
-        self.lora_r = lora_r
-        self.lora_alpha = lora_alpha
-        self.lora_dropout = lora_dropout
-        self.lora_target_modules = lora_target_modules.split(',')
-        
-        # 其他配置
-        self.num_classes_per_sample = num_classes_per_sample
-        self.mask_threshold_2d = mask_threshold_2d
-        self.mask_threshold_3d = mask_threshold_3d
-        self.gradient_checkpointing = gradient_checkpointing
-        
-        # 高级配置
-        self.exclude_val = exclude_val
-        self.no_eval = no_eval
-        self.eval_only = eval_only
-        self.auto_resume = auto_resume
-        self.resume = resume
-        self.start_epoch = start_epoch
-        
-        # 运行时属性
-        self.log_dir = os.path.join(self.log_base_dir, self.exp_name)
-        self.distributed = False
-        
-        # 验证配置
-        self._validate()
-    
-    def _validate(self):
-        """验证配置参数"""
-        conv_type = self.model_config.mllm.conv_type
-        if conv_type not in ["llava_v1", "llava_llama_2"]:
-            raise ValueError(
-                f"conv_type must be one of ['llava_v1', 'llava_llama_2'], got {conv_type}"
-            )
-    
-    def get_deepspeed_config(self):
-        """
-        生成 DeepSpeed 配置字典
-        
-        Returns:
-            dict: DeepSpeed 配置
-        """
-        ds_config = {
-            "train_micro_batch_size_per_gpu": self.batch_size,
-            "gradient_accumulation_steps": self.grad_accumulation_steps,
-            "fp16": {
-                "enabled": self.precision == torch.half,
-            },
-            "bf16": {
-                "enabled": self.precision == torch.bfloat16,
-            },
-            "gradient_clipping": self.gradient_clipping,
-            "zero_optimization": {
-                "stage": self.zero_stage,
-                "contiguous_gradients": True,
-                "overlap_comm": True,
-                "reduce_scatter": True,
-                "reduce_bucket_size": int(self.reduce_bucket_size),
-                "allgather_bucket_size": int(self.allgather_bucket_size),
-            },
-        }
-        
-        # 如果不使用分层学习率，添加优化器和调度器配置
-        if not self.use_layerwise_lr:
-            ds_config["optimizer"] = {
-                "type": "AdamW",
-                "params": {
-                    "lr": self.lr,
-                    "weight_decay": self.weight_decay,
-                    "betas": (self.beta1, self.beta2),
-                },
-            }
-            ds_config["scheduler"] = {
-                "type": "WarmupDecayLR",
-                "params": {
-                    "total_num_steps": self.epochs * self.steps_per_epoch,
-                    "warmup_min_lr": self.warmup_min_lr,
-                    "warmup_max_lr": self.lr,
-                    "warmup_num_steps": self.warmup_num_steps,
-                    "warmup_type": self.warmup_type,
-                },
-            }
-        # 如果使用分层学习率，不在配置中指定优化器和调度器
-        # DeepSpeed 会使用我们传入的参数组和手动创建的优化器/调度器
-        
-        return ds_config
-    
-    def get_lora_config(self):
-        """
-        生成 LoRA 配置对象
-        
-        Returns:
-            LoraConfig 或 None: 如果 lora_r > 0 返回 LoraConfig，否则返回 None
-        """
-        if self.lora_r <= 0:
-            return None
-        
-        from peft import LoraConfig
-        
-        return LoraConfig(
-            r=self.lora_r,
-            lora_alpha=self.lora_alpha,
-            target_modules=self.lora_target_modules,
-            lora_dropout=self.lora_dropout,
-            bias="none",
-            task_type="CAUSAL_LM",
+            steps_per_epoch = samples_per_epoch // batch_size
+
+        resolved_precision = resolve_dtype(precision)
+
+        super().__init__(
+            # 基础配置
+            local_rank = local_rank,
+            
+            precision = resolved_precision,
+
+            model_config = model_config or JointAffordanceConfig(),
+            vis_save_path = vis_save_path,
+            
+            # 模型配置
+            image_size = image_size,
+            
+            # 数据配置
+            dataset_dir = dataset_dir,
+            log_base_dir = log_base_dir,
+            exp_name = exp_name,
+            num_points = num_points,
+            train_ratio = train_ratio,
+            val_ratio = val_ratio,
+            test_ratio = test_ratio,
+            use_sample_cache = use_sample_cache,
+            
+            # 训练配置
+            epochs = epochs,
+            steps_per_epoch = steps_per_epoch ,
+            samples_per_epoch = samples_per_epoch,
+            
+            batch_size = batch_size,
+            grad_accumulation_steps = grad_accumulation_steps,
+            val_batch_size = val_batch_size,
+            workers = workers,
+            print_freq = print_freq,
+            name_of_params_to_train = [m.strip() for m in name_of_params_to_train.split(",") if m.strip()],
+            
+            # 优化器配置
+            lr = lr,
+            beta1 = beta1,
+            beta2 = beta2,
+            weight_decay = weight_decay,
+            
+            # 分层学习率
+            use_layerwise_lr = use_layerwise_lr,
+            llm_lr = llm_lr if llm_lr is not None else lr * 0.1,
+            vision_2d_lr = vision_2d_lr if vision_2d_lr is not None else lr,
+            vision_3d_lr = vision_3d_lr if vision_3d_lr is not None else lr,
+            
+            # 学习率调度器配置
+            warmup_num_steps = warmup_num_steps,
+            warmup_min_lr = warmup_min_lr,
+            warmup_type = warmup_type,
+
+            # DeepSpeed / LoRA 配置对象
+            deepspeed = DeepSpeedConfigs(),
+            lora = LoRAConfigs(),
+            
+            # 其他配置
+            num_classes_per_sample = num_classes_per_sample,
+            mask_threshold_2d = mask_threshold_2d,
+            mask_threshold_3d = mask_threshold_3d,
+            gradient_checkpointing = gradient_checkpointing,
+            
+            # 高级配置
+            exclude_val = exclude_val,
+            no_eval = no_eval,
+            eval_only = eval_only,
+            auto_resume = auto_resume,
+            resume = resume,
+            start_epoch = start_epoch,
+            
+            # 运行时属性
+            log_dir = os.path.join(log_base_dir, exp_name),
+            distributed = False,
+            **kwargs,
         )
+    

@@ -1,7 +1,6 @@
 """
 推理配置：控制推理/验证阶段的运行方式与输出行为。
 """
-from __future__ import annotations
 from configs import base_config
 
 
