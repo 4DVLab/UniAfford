@@ -194,14 +194,14 @@ class TrainingConfig(Configs):
         name_of_params_to_train="visual_model, vision_tower, mm_projector, text_hidden_fcs, point_cloud_segmentor",
 
         # 优化器配置
-        lr=0.003,
+        lr=1e-5,
         beta1=0.9,
         beta2=0.95,
         weight_decay=0.0,
         
         # 分层学习率（可选）
         use_layerwise_lr=True,
-        llm_lr=None,        # 默认为 lr * 0.1
+        llm_lr=None,        # 默认为 lr * 0.01
         vision_2d_lr=None,  # 默认为 lr
         vision_3d_lr=None,  # 默认为 lr
         llm_param_keywords="lora_, base_layer",
@@ -278,7 +278,7 @@ class TrainingConfig(Configs):
             
             # 分层学习率
             use_layerwise_lr = use_layerwise_lr,
-            llm_lr = llm_lr if llm_lr is not None else lr * 0.1,
+            llm_lr = llm_lr if llm_lr is not None else lr * 0.01,
             vision_2d_lr = vision_2d_lr if vision_2d_lr is not None else lr,
             vision_3d_lr = vision_3d_lr if vision_3d_lr is not None else lr,
             llm_param_keywords = [m.strip() for m in llm_param_keywords.split(",") if m.strip()],
