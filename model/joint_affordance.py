@@ -17,35 +17,7 @@ from transformers import AutoTokenizer
 
 from configs import JointAffordanceConfig, ImageDecoderConfigs, PointDecoderConfigs, MLLMConfigs
 from model.segment_anything import build_sam_vit_h
-from model.pointnet2_utils import PointCloud3DSegmentor
-
-
-class SimpleImageEncoder(nn.Module):
-    """轻量级图像编码器占位实现（可替换为 SAM-ViT 等）。"""
-
-    def __init__(self, in_channels: int = 3, hidden_size: int = 768):
-        super().__init__()
-        self.proj = nn.Conv2d(in_channels, hidden_size, kernel_size=1)
-
-    def forward(self, images: torch.Tensor) -> torch.Tensor:
-        x = self.proj(images)
-        b, c, h, w = x.shape
-        return x.flatten(2).transpose(1, 2).contiguous()  # 形状: (B, HW, C)
-
-
-class SimplePointEncoder(nn.Module):
-    """轻量级点云编码器占位实现（可替换为 PointNet2/Sonata/FTv3）。"""
-
-    def __init__(self, input_dim: int = 3, hidden_size: int = 768):
-        super().__init__()
-        self.proj = nn.Linear(input_dim, hidden_size)
-
-    def forward(self, points: torch.Tensor) -> torch.Tensor:
-        if points.dim() != 3:
-            raise ValueError("points 必须是 3D 张量")
-        if points.shape[1] == 3:  # 形状变换: (B, 3, N) -> (B, N, 3)
-            points = points.transpose(1, 2).contiguous()
-        return self.proj(points)
+from model.pointnet2_utils import PointCloud3DSegmentor, PointCloudEncoder
 
 
 class MLLMBackbone(nn.Module):
@@ -55,12 +27,14 @@ class MLLMBackbone(nn.Module):
         super().__init__()
         self.config = config
         self.model = self._build_qwen_model(config)
-        self.hidden_size = self.model.config.hidden_size
-        self.vocab_size = self.model.config.vocab_size
+        self.hidden_size = self.model.config.text_config.hidden_size
+        self.vocab_size = self.model.config.text_config.vocab_size
+
         if self.config.hidden_size != self.hidden_size:
             self.config.hidden_size = self.hidden_size
         if self.config.vocab_size != self.vocab_size:
             self.config.vocab_size = self.vocab_size
+
         if self.config.tokenizer is None:
             self.config.tokenizer = AutoTokenizer.from_pretrained(
                 self.config.qwen_model_name_or_path,
@@ -154,7 +128,16 @@ class ImageHiddenStateDecoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.image_encoder = SimpleImageEncoder(in_channels=3, hidden_size=config.hidden_size)
+        self.visual_model = build_sam_vit_h(getattr(config, "vision_pretrained", None))
+        for param in self.visual_model.parameters():
+            param.requires_grad = False
+        if getattr(config, "train_mask_decoder", False):
+            self.visual_model.mask_decoder.train()
+            for param in self.visual_model.mask_decoder.parameters():
+                param.requires_grad = True
+
+        # 使用 SAM 的 image_encoder 作为图像特征提取器
+        self.image_encoder = self.visual_model.image_encoder
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=config.hidden_size, num_heads=config.num_heads, batch_first=True
         )
@@ -165,15 +148,7 @@ class ImageHiddenStateDecoder(nn.Module):
         )
         self.out_proj = nn.Linear(config.hidden_size, config.out_dim)
 
-        self.visual_model = build_sam_vit_h(getattr(config, "vision_pretrained", None))
-        for param in self.visual_model.parameters():
-            param.requires_grad = False
-        if getattr(config, "train_mask_decoder", False):
-            self.visual_model.mask_decoder.train()
-            for param in self.visual_model.mask_decoder.parameters():
-                param.requires_grad = True
-
-        # 
+        
         text_fc = nn.Sequential(
             ("fc1", nn.Linear(config.hidden_size, config.hidden_size)),
             ("relu", nn.ReLU(inplace=True)),
@@ -196,7 +171,7 @@ class ImageHiddenStateDecoder(nn.Module):
         if image_features is None:
             if images is None:
                 return None
-            image_features = self.image_encoder(images)
+            image_features = self.get_visual_embs(images)
         attn_out, _ = self.cross_attn(hidden_states, image_features, image_features)
         x = self.ffn(attn_out)
         return self.out_proj(x)
@@ -275,7 +250,8 @@ class PointCloudHiddenStateDecoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        self.point_encoder = SimplePointEncoder(input_dim=3, hidden_size=config.hidden_size)
+        # 使用 PointNet++ 编码器提取点云特征
+        self.point_encoder = PointCloudEncoder(out_dim=config.hidden_size)
         self.cross_attn = nn.MultiheadAttention(
             embed_dim=config.hidden_size, num_heads=config.num_heads, batch_first=True
         )
@@ -317,7 +293,11 @@ class PointCloudHiddenStateDecoder(nn.Module):
         if point_features is None:
             if point_clouds is None:
                 return None
+            if point_clouds.dim() == 3 and point_clouds.shape[1] != 3:
+                point_clouds = point_clouds.permute(0, 2, 1).contiguous()
             point_features = self.point_encoder(point_clouds)
+            if point_features.dim() == 2:
+                point_features = point_features.unsqueeze(1)
         attn_out, _ = self.cross_attn(hidden_states, point_features, point_features)
         x = self.ffn(attn_out)
         return self.out_proj(x)
