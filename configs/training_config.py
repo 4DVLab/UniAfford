@@ -204,6 +204,9 @@ class TrainingConfig(Configs):
         llm_lr=None,        # 默认为 lr * 0.1
         vision_2d_lr=None,  # 默认为 lr
         vision_3d_lr=None,  # 默认为 lr
+        llm_param_keywords="lora_, base_layer",
+        vision_2d_param_keywords="mask_decoder, text_hidden_fcs",
+        vision_3d_param_keywords="point_cloud_segmentor",
         
         # 学习率调度器配置
         warmup_num_steps=100,
@@ -278,6 +281,9 @@ class TrainingConfig(Configs):
             llm_lr = llm_lr if llm_lr is not None else lr * 0.1,
             vision_2d_lr = vision_2d_lr if vision_2d_lr is not None else lr,
             vision_3d_lr = vision_3d_lr if vision_3d_lr is not None else lr,
+            llm_param_keywords = [m.strip() for m in llm_param_keywords.split(",") if m.strip()],
+            vision_2d_param_keywords = [m.strip() for m in vision_2d_param_keywords.split(",") if m.strip()],
+            vision_3d_param_keywords = [m.strip() for m in vision_3d_param_keywords.split(",") if m.strip()],
             
             # 学习率调度器配置
             warmup_num_steps = warmup_num_steps,

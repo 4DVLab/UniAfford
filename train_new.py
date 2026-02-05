@@ -4,7 +4,7 @@ from functools import partial
 import deepspeed
 import torch
 from peft import get_peft_model
-from transformers import AutoProcessor
+from transformers import AutoProcessor, get_cosine_schedule_with_warmup
 
 from configs import TrainingConfig
 from model.joint_affordance import JointAffordanceModel
@@ -29,6 +29,61 @@ def enable_trainable_modules(model, name_filters):
             param.requires_grad = True
 
 
+def create_param_groups(model, config):
+    if not config.use_layerwise_lr:
+        return [p for p in model.parameters() if p.requires_grad]
+
+    def _collect_params(module):
+        if module is None:
+            return []
+        return [p for p in module.parameters() if p.requires_grad]
+
+    llm_params = _collect_params(getattr(model, "mllm", None))
+    vision_2d_params = _collect_params(getattr(model, "image_decoder", None))
+    vision_3d_params = _collect_params(getattr(model, "point_decoder", None))
+
+    used_ids = {id(p) for p in llm_params + vision_2d_params + vision_3d_params}
+    other_params = []
+    for _, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        if id(param) in used_ids:
+            continue
+        other_params.append(param)
+
+    param_groups = []
+    if llm_params:
+        param_groups.append({
+            "params": llm_params,
+            "lr": config.llm_lr,
+            "name": "llm",
+        })
+        print(f"\n✓ LLM 参数组: {len(llm_params)} 个参数, lr={config.llm_lr}")
+    if vision_2d_params:
+        param_groups.append({
+            "params": vision_2d_params,
+            "lr": config.vision_2d_lr,
+            "name": "vision_2d",
+        })
+        print(f"✓ 2D 视觉参数组: {len(vision_2d_params)} 个参数, lr={config.vision_2d_lr}")
+    if vision_3d_params:
+        param_groups.append({
+            "params": vision_3d_params,
+            "lr": config.vision_3d_lr,
+            "name": "vision_3d",
+        })
+        print(f"✓ 3D 视觉参数组: {len(vision_3d_params)} 个参数, lr={config.vision_3d_lr}")
+    if other_params:
+        param_groups.append({
+            "params": other_params,
+            "lr": config.lr,
+            "name": "other",
+        })
+        print(f"✓ 其他参数组: {len(other_params)} 个参数, lr={config.lr}\n")
+
+    return param_groups
+
+
 def main():
     args = parse_args()
 
@@ -44,6 +99,8 @@ def main():
     if args.log_dir:
         config.log_dir = args.log_dir
 
+
+    """ ------------------------- 初始化模型 --------------------------- """
     model = JointAffordanceModel(model_config)
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
     data_collator = partial(
@@ -54,7 +111,7 @@ def main():
         precision=config.precision,
     )
 
-    # 先冻结所有参数
+    """ ------------------------- 选择训练参数、应用lora --------------------------- """
     for p in model.parameters():
         p.requires_grad = False
 
@@ -66,7 +123,7 @@ def main():
     # 解冻必要模块
     enable_trainable_modules(model, config.name_of_params_to_train)
 
-    # 加载数据集
+    """ ------------------------- 加载数据集 --------------------------- """
     train_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='train').load_all_data()
     val_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='val').load_all_data()
     if config.samples_per_epoch is not None:
@@ -97,15 +154,48 @@ def main():
         use_sample_cache=config.use_sample_cache,
     )
 
-    # DeepSpeed 初始化
-    model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
-        model=model,
-        model_parameters=[p for p in model.parameters() if p.requires_grad],
-        training_data=train_dataset,
-        collate_fn=data_collator,
-        config=config.deepspeed.to_dict(),
-    )
+    """ ------------------------- DeepSpeed 初始化（分层学习率） --------------------------- """
+    params_to_train = create_param_groups(model, config)
+    if len(params_to_train) == 0:
+        raise RuntimeError("没有可训练参数，请检查 name_of_params_to_train 或 LoRA 配置")
 
+    if config.use_layerwise_lr:
+        steps_per_epoch = config.steps_per_epoch
+        if steps_per_epoch is None:
+            micro_bs = config.deepspeed.train_micro_batch_size_per_gpu
+            steps_per_epoch = max(1, len(train_dataset) // max(1, micro_bs))
+
+        optimizer = torch.optim.AdamW(
+            params_to_train,
+            weight_decay=config.weight_decay,
+            betas=(config.beta1, config.beta2),
+        )
+        total_steps = config.epochs * steps_per_epoch
+        scheduler = get_cosine_schedule_with_warmup(
+            optimizer,
+            num_warmup_steps=config.warmup_num_steps,
+            num_training_steps=total_steps,
+        )
+        model_engine, _, train_loader, _ = deepspeed.initialize(
+            model=model,
+            model_parameters=params_to_train,
+            training_data=train_dataset,
+            optimizer=optimizer,
+            lr_scheduler=scheduler,
+            collate_fn=data_collator,
+            config=config.deepspeed.to_dict(),
+        )
+    else:
+        model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
+            model=model,
+            model_parameters=params_to_train,
+            training_data=train_dataset,
+            collate_fn=data_collator,
+            config=config.deepspeed.to_dict(),
+        )
+
+
+    """ ------------------------- 训练 --------------------------- """
     model_engine.train()
     for epoch in range(config.epochs):
         if hasattr(train_dataset, "set_epoch"):
@@ -138,6 +228,7 @@ def main():
             model_engine.step()
             model_engine.zero_grad()
 
+        """ ------------------------- 验证 --------------------------- """
         if val_dataset is not None:
             val_loader = torch.utils.data.DataLoader(
                 val_dataset,
