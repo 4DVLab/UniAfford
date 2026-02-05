@@ -59,13 +59,14 @@ def main():
         p.requires_grad = False
 
     # 使用 LoRA 包裹 MLLM 主干（qwen）
-    if config.lora_r > 0:
-        lora_config = config.get_lora_config()
+    if config.lora.lora_r > 0:
+        lora_config = config.lora.to_peft_config()
         model.mllm.model = get_peft_model(model.mllm.model, lora_config)
 
     # 解冻必要模块
     enable_trainable_modules(model, config.name_of_params_to_train)
 
+    # 加载数据集
     train_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='train').load_all_data()
     val_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='val').load_all_data()
     if config.samples_per_epoch is not None:

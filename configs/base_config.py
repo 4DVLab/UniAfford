@@ -80,6 +80,8 @@ class ImageDecoderConfigs(Configs):
 
     def __init__(
         self,
+        hidden_size: int = 768,
+        num_heads: int = 8,
         mm_vision_select_feature: str = "patch",
         image_aspect_ratio: str = "square",
         image_grid_pinpoints: Optional[object] = None,
@@ -92,6 +94,8 @@ class ImageDecoderConfigs(Configs):
         **kwargs,
     ):
         super().__init__(
+            hidden_size=hidden_size,
+            num_heads=num_heads,
             mm_vision_select_feature=mm_vision_select_feature,
             image_aspect_ratio=image_aspect_ratio,
             image_grid_pinpoints=image_grid_pinpoints,
@@ -112,13 +116,13 @@ class PointDecoderConfigs(Configs):
         self,
         hidden_size: int = 768,
         num_heads: int = 8,
-        point_out_dim: int = None, # 为空则可以适配任意点数的输入输出
+        # point_out_dim: int = None, # 为空则可以适配任意点数的输入输出
         **kwargs,
     ):
         super().__init__(
             hidden_size=hidden_size,
             num_heads=num_heads,
-            point_out_dim=point_out_dim,
+            # point_out_dim=point_out_dim,
             **kwargs,
         )
         

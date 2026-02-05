@@ -1254,8 +1254,7 @@ class JointDataset:
                  obj_type: list[str] = None,
                  aff_type: list[str] = None,
                  keep_id: bool = True,
-                 balance_data: bool = True,
-                 mask_prob: float = (0, 0.01, 0.003),
+                 balance_data: bool = False,
                  dtype: Optional[str] = None):
         """
         初始化数据集，不加载数据！！
@@ -1266,7 +1265,6 @@ class JointDataset:
             aff_type: 需要加载的 affordance 类型列表，None 时加载所有
             keep_id: 是否保持原有的 id
             balance_data: 是否平衡数据（当点云/图文对数量不一致时，复制较少的数据）
-            mask_prob: 获取数据时每个模态被 mask 的概率（0.0-1.0）
             dtype: 指定加载的分割（train/val/test），None 表示全量
         """
         
@@ -1304,10 +1302,12 @@ class JointDataset:
             split_data = json.load(f)
 
         if isinstance(dataset_types, str):
-            dataset_types = [dataset_types]
-
+            dataset_types_list = [dataset_types]
+        else:
+            dataset_types_list = dataset_types
+        
         res = []
-        for dtype in dataset_types:
+        for dtype in dataset_types_list:
             # 加载分割索引
             sample_ids = split_data.get(dtype, create_info_dict())
             
@@ -1816,8 +1816,9 @@ class JointDataset:
                 if pc_list and len(pc_list) < target_count:
                     self.sample_ids['pc'][obj_type][aff_type] = _balance_by_copy(pc_list, target_count)
 
-        print("数据平衡完成")
-    
+        print("数据平衡完成")  
+
+
 def main():
     """示例用法"""
     import argparse

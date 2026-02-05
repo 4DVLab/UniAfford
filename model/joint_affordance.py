@@ -139,43 +139,43 @@ class ImageHiddenStateDecoder(nn.Module):
 
         # 使用 SAM 的 image_encoder 作为图像特征提取器
         self.image_encoder = self.visual_model.image_encoder
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=text_hidden_size, num_heads=config.num_heads, batch_first=True
-        )
-        self.ffn = nn.Sequential(
-            nn.Linear(text_hidden_size,text_hidden_size * 4),
-            nn.GELU(),
-            nn.Linear(text_hidden_size * 4, text_hidden_size),
-        )
-        self.out_proj = nn.Linear(text_hidden_size, config.out_dim)
+        # self.cross_attn = nn.MultiheadAttention(
+        #     embed_dim=text_hidden_size, num_heads=config.num_heads, batch_first=True
+        # )
+        # self.ffn = nn.Sequential(
+        #     nn.Linear(text_hidden_size,text_hidden_size * 4),
+        #     nn.GELU(),
+        #     nn.Linear(text_hidden_size * 4, text_hidden_size),
+        # )
+        # self.out_proj = nn.Linear(text_hidden_size, config.out_dim)
 
         
-        text_fc = nn.Sequential(
+        text_fc = nn.Sequential(OrderedDict([
             ("fc1", nn.Linear(text_hidden_size, text_hidden_size)),
             ("relu", nn.ReLU(inplace=True)),
-            ("fc2", nn.Linear(config.hidden_size, config.out_dim)),
+            ("fc2", nn.Linear(text_hidden_size, self.config.hidden_size)),
             # ("dropout", nn.Dropout(0.0)),
-        )
+        ]))
         self.text_hidden_fcs = nn.ModuleList([text_fc])
         for param in self.text_hidden_fcs.parameters():
             param.requires_grad = True
 
 
-    def forward(
-        self,
-        hidden_states: Optional[torch.Tensor],
-        images: Optional[torch.Tensor] = None,
-        image_features: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
-        if hidden_states is None:
-            return None
-        if image_features is None:
-            if images is None:
-                return None
-            image_features = self.get_visual_embs(images)
-        attn_out, _ = self.cross_attn(hidden_states, image_features, image_features)
-        x = self.ffn(attn_out)
-        return self.out_proj(x)
+    # def forward(
+    #     self,
+    #     hidden_states: Optional[torch.Tensor],
+    #     images: Optional[torch.Tensor] = None,
+    #     image_features: Optional[torch.Tensor] = None,
+    # ) -> Optional[torch.Tensor]:
+    #     if hidden_states is None:
+    #         return None
+    #     if image_features is None:
+    #         if images is None:
+    #             return None
+    #         image_features = self.get_visual_embs(images)
+    #     attn_out, _ = self.cross_attn(hidden_states, image_features, image_features)
+    #     x = self.ffn(attn_out)
+    #     return self.out_proj(x)
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert len(self.text_hidden_fcs) == 1
@@ -254,21 +254,21 @@ class PointCloudHiddenStateDecoder(nn.Module):
         self.config = config
         # 使用 PointNet++ 编码器提取点云特征
         self.point_encoder = PointCloudEncoder(out_dim=text_hidden_size)
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=text_hidden_size, num_heads=config.num_heads, batch_first=True
-        )
-        self.ffn = nn.Sequential(
-            nn.Linear(text_hidden_size, text_hidden_size * 4),
-            nn.GELU(),
-            nn.Linear(text_hidden_size * 4, text_hidden_size),
-        )
-        self.out_proj = nn.Linear(text_hidden_size, config.out_dim)
+        # self.cross_attn = nn.MultiheadAttention(
+        #     embed_dim=text_hidden_size, num_heads=config.num_heads, batch_first=True
+        # )
+        # self.ffn = nn.Sequential(
+        #     nn.Linear(text_hidden_size, text_hidden_size * 4),
+        #     nn.GELU(),
+        #     nn.Linear(text_hidden_size * 4, text_hidden_size),
+        # )
+        # self.out_proj = nn.Linear(text_hidden_size, config.out_dim)
 
         # TODO: 移动到JointAff中
         text_fc = nn.Sequential(
             nn.Linear(text_hidden_size, text_hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(text_hidden_size, config.out_dim),
+            nn.Linear(text_hidden_size, config.hidden_size),
             # nn.Dropout(0.0),
         )
         self.text_hidden_fcs = nn.ModuleList([text_fc])
@@ -276,7 +276,7 @@ class PointCloudHiddenStateDecoder(nn.Module):
             param.requires_grad = True
 
         self.point_cloud_segmentor = PointCloud3DSegmentor(
-            embed_dim=config.out_dim,
+            embed_dim=config.hidden_size,
             num_heads=8,
             num_decoder_layers=3,
             max_text_len=77,
@@ -284,25 +284,25 @@ class PointCloudHiddenStateDecoder(nn.Module):
         for param in self.point_cloud_segmentor.parameters():
             param.requires_grad = True
 
-    def forward(
-        self,
-        hidden_states: Optional[torch.Tensor],
-        point_clouds: Optional[torch.Tensor] = None,
-        point_features: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
-        if hidden_states is None:
-            return None
-        if point_features is None:
-            if point_clouds is None:
-                return None
-            if point_clouds.dim() == 3 and point_clouds.shape[1] != 3:
-                point_clouds = point_clouds.permute(0, 2, 1).contiguous()
-            point_features = self.point_encoder(point_clouds)
-            if point_features.dim() == 2:
-                point_features = point_features.unsqueeze(1)
-        attn_out, _ = self.cross_attn(hidden_states, point_features, point_features)
-        x = self.ffn(attn_out)
-        return self.out_proj(x)
+    # def forward(
+    #     self,
+    #     hidden_states: Optional[torch.Tensor],
+    #     point_clouds: Optional[torch.Tensor] = None,
+    #     point_features: Optional[torch.Tensor] = None,
+    # ) -> Optional[torch.Tensor]:
+    #     if hidden_states is None:
+    #         return None
+    #     if point_features is None:
+    #         if point_clouds is None:
+    #             return None
+    #         if point_clouds.dim() == 3 and point_clouds.shape[1] != 3:
+    #             point_clouds = point_clouds.permute(0, 2, 1).contiguous()
+    #         point_features = self.point_encoder(point_clouds)
+    #         if point_features.dim() == 2:
+    #             point_features = point_features.unsqueeze(1)
+    #     attn_out, _ = self.cross_attn(hidden_states, point_features, point_features)
+    #     x = self.ffn(attn_out)
+    #     return self.out_proj(x)
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         assert len(self.text_hidden_fcs) == 1
@@ -375,29 +375,11 @@ class JointAffordanceModel(nn.Module):
         self.seg_token_idx = self.config.seg_token_idx
         self.aff_token_idx = self.config.aff_token_idx
 
-        self.mllm = MLLMBackbone(self.config.mllm)
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder)
         self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder)
+        self.mllm = MLLMBackbone(self.config.mllm)
         
         # self.clip_image_processor = CLIPImageProcessor.from_pretrained(self.config.mm_vision_tower)
-
-        # TODO: 转移到训练中处理
-        if config.lora_enable:
-            from peft import LoraConfig, get_peft_model, TaskType
-
-            for param in self.mllm.model.parameters():
-                param.requires_grad = False
-            target_modules = config.lora_target_modules
-
-            lora_config = LoraConfig(
-                r=config.lora_r,
-                lora_alpha=config.lora_alpha,
-                lora_dropout=config.lora_dropout,
-                target_modules=target_modules,
-                bias="none",
-                task_type=TaskType.CAUSAL_LM,
-            )
-            self.mllm.model = get_peft_model(self.mllm.model, lora_config)
 
 
     @property
