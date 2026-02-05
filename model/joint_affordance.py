@@ -125,6 +125,7 @@ class ImageHiddenStateDecoder(nn.Module):
     def __init__(
         self,
         config: ImageDecoderConfigs,
+        text_hidden_size: int = 2048,
     ):
         super().__init__()
         self.config = config
@@ -139,18 +140,18 @@ class ImageHiddenStateDecoder(nn.Module):
         # 使用 SAM 的 image_encoder 作为图像特征提取器
         self.image_encoder = self.visual_model.image_encoder
         self.cross_attn = nn.MultiheadAttention(
-            embed_dim=config.hidden_size, num_heads=config.num_heads, batch_first=True
+            embed_dim=text_hidden_size, num_heads=config.num_heads, batch_first=True
         )
         self.ffn = nn.Sequential(
-            nn.Linear(config.hidden_size,config.hidden_size * 4),
+            nn.Linear(text_hidden_size,text_hidden_size * 4),
             nn.GELU(),
-            nn.Linear(config.hidden_size * 4, config.hidden_size),
+            nn.Linear(text_hidden_size * 4, text_hidden_size),
         )
-        self.out_proj = nn.Linear(config.hidden_size, config.out_dim)
+        self.out_proj = nn.Linear(text_hidden_size, config.out_dim)
 
         
         text_fc = nn.Sequential(
-            ("fc1", nn.Linear(config.hidden_size, config.hidden_size)),
+            ("fc1", nn.Linear(text_hidden_size, text_hidden_size)),
             ("relu", nn.ReLU(inplace=True)),
             ("fc2", nn.Linear(config.hidden_size, config.out_dim)),
             # ("dropout", nn.Dropout(0.0)),
@@ -247,26 +248,27 @@ class PointCloudHiddenStateDecoder(nn.Module):
     def __init__(
         self,
         config: PointDecoderConfigs,
+        text_hidden_size: int = 2048,
     ):
         super().__init__()
         self.config = config
         # 使用 PointNet++ 编码器提取点云特征
-        self.point_encoder = PointCloudEncoder(out_dim=config.hidden_size)
+        self.point_encoder = PointCloudEncoder(out_dim=text_hidden_size)
         self.cross_attn = nn.MultiheadAttention(
-            embed_dim=config.hidden_size, num_heads=config.num_heads, batch_first=True
+            embed_dim=text_hidden_size, num_heads=config.num_heads, batch_first=True
         )
         self.ffn = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size * 4),
+            nn.Linear(text_hidden_size, text_hidden_size * 4),
             nn.GELU(),
-            nn.Linear(config.hidden_size * 4, config.hidden_size),
+            nn.Linear(text_hidden_size * 4, text_hidden_size),
         )
-        self.out_proj = nn.Linear(config.hidden_size, config.out_dim)
+        self.out_proj = nn.Linear(text_hidden_size, config.out_dim)
 
         # TODO: 移动到JointAff中
         text_fc = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size),
+            nn.Linear(text_hidden_size, text_hidden_size),
             nn.ReLU(inplace=True),
-            nn.Linear(config.hidden_size, config.out_dim),
+            nn.Linear(text_hidden_size, config.out_dim),
             # nn.Dropout(0.0),
         )
         self.text_hidden_fcs = nn.ModuleList([text_fc])
@@ -383,7 +385,7 @@ class JointAffordanceModel(nn.Module):
         if config.lora_enable:
             from peft import LoraConfig, get_peft_model, TaskType
 
-            for param in model.parameters():
+            for param in self.mllm.model.parameters():
                 param.requires_grad = False
             target_modules = config.lora_target_modules
 
@@ -399,8 +401,7 @@ class JointAffordanceModel(nn.Module):
 
 
     @property
-    def tokenizer(self):
-        return self.mllm.tokenizer
+    def tokenizer(self): return self.mllm.tokenizer
 
     def _normalize_size_lists(
         self,
