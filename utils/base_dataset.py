@@ -356,8 +356,11 @@ class PointCloud(Modality):
                 
                 # 注意：target_ids_dict 的 key 必须与文件夹名完全一致
                 if target_ids_dict:
-                    target_ids = target_ids_dict.get(obj_type_name)
-                    files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in sorted(target_ids)]
+                    files_id_to_load = set()
+                    for aff_type, target_ids in sorted(target_ids_dict.get(obj_type_name), {}):
+                        for target_id, mask_id in sorted(target_ids):
+                            files_id_to_load.add(target_id)
+                    files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in sorted(files_id_to_load)]
                 else:
                     files_to_load = [f for f in os.listdir(dir_path) if f.endswith('.csv')]
             
@@ -1064,14 +1067,16 @@ class Instruction(Modality):
             all_objs &= obj_set
         
         for obj in tqdm(sorted(all_objs), desc='加载Instruction'):
-            if obj_set is not None and obj not in obj_set: continue
-
             file_path = os.path.join(dataset_root_path, obj, 'Instruction.csv')
             if os.path.exists(file_path):
                 # 获取当前物体需要加载的具体 ID 列表
                 current_target_ids = None
                 if target_ids_dict is not None:
-                    current_target_ids = target_ids_dict.get(obj)
+                    files_id_to_load = set()
+                    for aff_type, target_ids in sorted(target_ids_dict.get(obj_type), {}):
+                        for target_id, mask_id in sorted(target_ids):
+                            files_id_to_load.add(target_id)
+                    current_target_ids = [f"{obj_type}_{target_id}.csv" for target_id in sorted(files_id_to_load)]
                 
                 cls.load_file(file_path, aff_type=aff_type, keep_id=keep_id, target_ids=current_target_ids)
         cls.sort_by_id()
