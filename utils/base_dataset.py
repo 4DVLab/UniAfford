@@ -358,7 +358,7 @@ class PointCloud(Modality):
                 if target_ids_dict:
                     files_id_to_load = set()
                     for aff_type, target_ids in target_ids_dict.get(obj_type_name, {}).items():
-                        for target_id, mask_id in target_ids.items():
+                        for target_id, mask_id in target_ids:
                             files_id_to_load.add(target_id)
                     files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in sorted(files_id_to_load)]
                 else:
@@ -1074,9 +1074,8 @@ class Instruction(Modality):
                 if target_ids_dict is not None:
                     files_id_to_load = set()
                     for aff_type, target_ids in target_ids_dict.get(obj, {}).items():
-                        for target_id, mask_id in target_ids.items():
-                            files_id_to_load.add(target_id)
-                    current_target_ids = [f"{obj}_{target_id}.csv" for target_id in sorted(files_id_to_load)]
+                        files_id_to_load |= set(target_ids)  # 直接取并集
+                    current_target_ids = sorted(files_id_to_load)
                 
                 cls.load_file(file_path, aff_type=aff_type, keep_id=keep_id, target_ids=current_target_ids)
         cls.sort_by_id()
