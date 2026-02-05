@@ -14,6 +14,7 @@ from pathlib import Path
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer
+from collections import OrderedDict
 
 from configs import JointAffordanceConfig, ImageDecoderConfigs, PointDecoderConfigs, MLLMConfigs
 from model.segment_anything import build_sam_vit_h
@@ -151,9 +152,9 @@ class ImageHiddenStateDecoder(nn.Module):
 
         
         text_fc = nn.Sequential(OrderedDict([
-            ("fc1", nn.Linear(text_hidden_size, text_hidden_size)),
+            ("fc1", nn.Linear(text_hidden_size, 2*text_hidden_size)),
             ("relu", nn.ReLU(inplace=True)),
-            ("fc2", nn.Linear(text_hidden_size, self.config.hidden_size)),
+            ("fc2", nn.Linear(2*text_hidden_size, self.config.hidden_size)),
             # ("dropout", nn.Dropout(0.0)),
         ]))
         self.text_hidden_fcs = nn.ModuleList([text_fc])
@@ -265,12 +266,12 @@ class PointCloudHiddenStateDecoder(nn.Module):
         # self.out_proj = nn.Linear(text_hidden_size, config.out_dim)
 
         # TODO: 移动到JointAff中
-        text_fc = nn.Sequential(
-            nn.Linear(text_hidden_size, text_hidden_size),
-            nn.ReLU(inplace=True),
-            nn.Linear(text_hidden_size, config.hidden_size),
-            # nn.Dropout(0.0),
-        )
+        text_fc = nn.Sequential(OrderedDict([
+            ("fc1", nn.Linear(text_hidden_size, 2*text_hidden_size)),
+            ("relu", nn.ReLU(inplace=True)),
+            ("fc2", nn.Linear(2*text_hidden_size, config.hidden_size)),
+            # ("dropout", nn.Dropout(0.0)),
+        ]))
         self.text_hidden_fcs = nn.ModuleList([text_fc])
         for param in self.text_hidden_fcs.parameters():
             param.requires_grad = True

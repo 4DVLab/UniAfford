@@ -229,7 +229,7 @@ class TrainingConfig(Configs):
         vis_save_path="./vis_output",
         **kwargs,
     ):  
-
+        
         
         if samples_per_epoch is not None:
             steps_per_epoch = samples_per_epoch // batch_size
