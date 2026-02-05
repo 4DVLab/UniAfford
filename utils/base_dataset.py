@@ -911,25 +911,25 @@ class Image(Modality):
                 if not os.path.exists(rgb_dir):
                     continue
                 
-                files_to_load = []
-                # 构造指定id的文件名
+                files_to_load = set()
+                # 构造指定id的rgb文件名
                 if target_ids_dict is not None:
-                    target_ids = target_ids_dict.get(obj_type_name, [])
                     # 这里虽然多了一层循环，但在 ID 确定的情况下，比 os.listdir 依然快得多
-                    for target_id in sorted(target_ids):
-                        found = False
-                        # 尝试构造文件名
-                        for ext in VALID_EXTS:
-                            filename = f"{obj_type_name}_{target_id}{ext}"
-                            # 只有文件真实存在时，才加入待加载列表
-                            if os.path.exists(os.path.join(rgb_dir, filename)):
-                                files_to_load.append(filename)
-                                found = True
-                                break
-                        
-                        if not found:
-                            warnings.warn(f"Image file not found: {obj_type_name}_{target_id}")
+                    for aff_type, target_ids in target_ids_dict.get(obj_type_name, dict()).items():
+                        for target_id, mask_id in sorted(target_ids):
+                            found = False
+                            # 尝试构造文件名
+                            for ext in VALID_EXTS:
+                                filename = f"{obj_type_name}_{target_id}{ext}"
+                                # 只有文件真实存在时，才加入待加载列表
+                                if os.path.exists(os.path.join(rgb_dir, filename)):
+                                    files_to_load.add(filename)
+                                    found = True
+                                    break
                             
+                            if not found:
+                                warnings.warn(f"Image file not found: {obj_type_name}_{target_id}.png")
+                    files_to_load = sorted(files_to_load)
                 # 加载整个目录
                 else:
                     files_to_load = sorted([f for f in os.listdir(rgb_dir) if f.lower().endswith(VALID_EXTS)])
@@ -1274,9 +1274,6 @@ class JointDataset:
         self.keep_id = keep_id
 
         self.dtype = dtype.lower() if dtype is not None else None
-        if self.dtype is not None and self.dtype not in ("train", "val", "test"):
-            raise ValueError(f"未知的分割类型: {self.dtype}，应为 'train', 'val' 或 'test'")
-
 
         # 配置ids
         if sample_ids is None:
@@ -1290,6 +1287,8 @@ class JointDataset:
         if balance_data:
             self.balance_data()
         
+        if self.dtype is not None:
+            self.load_all_data()
         self.samples = self.pair_samples()
     
     @staticmethod
@@ -1358,7 +1357,7 @@ class JointDataset:
         t2.join()
         t3.join()
 
-        
+        self.samples = self.pair_samples()
 
         print("所有数据加载完成")
         return self
