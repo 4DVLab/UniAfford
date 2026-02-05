@@ -357,7 +357,7 @@ class PointCloud(Modality):
                 # 注意：target_ids_dict 的 key 必须与文件夹名完全一致
                 if target_ids_dict:
                     files_id_to_load = set()
-                    for aff_type, target_ids in target_ids_dict.get(obj_type_name, {}).items():
+                    for _aff, target_ids in target_ids_dict.get(obj_type_name, {}).items():
                         for target_id, mask_id in target_ids:
                             files_id_to_load.add(target_id)
                     files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in sorted(files_id_to_load)]
@@ -918,7 +918,7 @@ class Image(Modality):
                 # 构造指定id的rgb文件名
                 if target_ids_dict is not None:
                     # 这里虽然多了一层循环，但在 ID 确定的情况下，比 os.listdir 依然快得多
-                    for aff_type, target_ids in target_ids_dict.get(obj_type_name, dict()).items():
+                    for _aff, target_ids in target_ids_dict.get(obj_type_name, dict()).items():
                         for target_id, mask_id in sorted(target_ids):
                             found = False
                             # 尝试构造文件名
@@ -1073,7 +1073,7 @@ class Instruction(Modality):
                 current_target_ids = None
                 if target_ids_dict is not None:
                     files_id_to_load = set()
-                    for aff_type, target_ids in target_ids_dict.get(obj, {}).items():
+                    for _aff, target_ids in target_ids_dict.get(obj, {}).items():
                         files_id_to_load |= set(target_ids)  # 直接取并集
                     current_target_ids = sorted(files_id_to_load)
                 
