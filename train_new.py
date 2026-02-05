@@ -9,7 +9,7 @@ from transformers import AutoProcessor
 from configs import TrainingConfig
 from model.joint_affordance import JointAffordanceModel
 from utils.base_dataset import JointDataset
-from utils.dataset import DatasetManager, QwenDataCollator
+from utils.dataset import Qwen3VLDataset, Qwen3VLTrainDataset, qwen3vl_collate_fn
 from utils.common import dict_to_cuda
 from utils import calculator as calc
 
@@ -46,7 +46,13 @@ def main():
 
     model = JointAffordanceModel(model_config)
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
-    data_collator = QwenDataCollator(processor.tokenizer)
+    data_collator = partial(
+        qwen3vl_collate_fn,
+        tokenizer=processor.tokenizer,
+        output_image_size=config.image_size,
+        output_point_nums=config.num_points,
+        precision=config.precision,
+    )
 
     # 先冻结所有参数
     for p in model.parameters():
@@ -60,8 +66,35 @@ def main():
     # 解冻必要模块
     enable_trainable_modules(model, config.name_of_params_to_train)
 
-    train_dataset = JointDataset(dataset_root=config.dataset_dir, dtype='train').load_all_data()
-    val_dataset = JointDataset(dataset_root=config.dataset_dir, dtype='val').load_all_data()
+    train_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='train').load_all_data()
+    val_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='val').load_all_data()
+    if config.samples_per_epoch is not None:
+        train_dataset = Qwen3VLTrainDataset(
+            train_data_manager.samples,
+            processor=processor,
+            image_size=config.image_size,
+            num_points=config.num_points,
+            precision=config.precision,
+            samples_per_epoch=config.samples_per_epoch,
+            use_sample_cache=config.use_sample_cache,
+        )
+    else:
+        train_dataset = Qwen3VLDataset(
+            train_data_manager.samples,
+            processor=processor,
+            image_size=config.image_size,
+            num_points=config.num_points,
+            precision=config.precision,
+            use_sample_cache=config.use_sample_cache,
+        )
+    val_dataset = Qwen3VLDataset(
+        val_data_manager.samples,
+        processor=processor,
+        image_size=config.image_size,
+        num_points=config.num_points,
+        precision=config.precision,
+        use_sample_cache=config.use_sample_cache,
+    )
 
     # DeepSpeed 初始化
     model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(

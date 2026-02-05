@@ -54,9 +54,9 @@ class MLLMBackbone(nn.Module):
     def __init__(self, config: MLLMConfigs):
         super().__init__()
         self.config = config
-        self.qwen_model = self._build_qwen_model(config)
-        self.hidden_size = self.qwen_model.config.hidden_size
-        self.vocab_size = self.qwen_model.config.vocab_size
+        self.model = self._build_qwen_model(config)
+        self.hidden_size = self.model.config.hidden_size
+        self.vocab_size = self.model.config.vocab_size
         if self.config.hidden_size != self.hidden_size:
             self.config.hidden_size = self.hidden_size
         if self.config.vocab_size != self.vocab_size:
@@ -108,30 +108,7 @@ class MLLMBackbone(nn.Module):
 
         model.config.use_cache = False
         
-        # TODO: 转移到训练中处理
-        if config.lora_enable:
-            from peft import LoraConfig, get_peft_model, TaskType
-
-            for param in model.parameters():
-                param.requires_grad = False
-            target_modules = config.lora_target_modules
-            if isinstance(target_modules, str):
-                target_modules = [m.strip() for m in target_modules.split(",") if m.strip()]
-            lora_config = LoraConfig(
-                r=config.lora_r,
-                lora_alpha=config.lora_alpha,
-                lora_dropout=config.lora_dropout,
-                target_modules=target_modules,
-                bias="none",
-                task_type=TaskType.CAUSAL_LM,
-            )
-            model = get_peft_model(model, lora_config)
-
         return model
-
-    @property
-    def model(self):
-        return self.qwen_model
 
     def forward(
         self,
@@ -152,7 +129,7 @@ class MLLMBackbone(nn.Module):
         if images is not None:
             model_inputs["pixel_values"] = images
         model_inputs.update(kwargs)
-        outputs = self.qwen_model(**model_inputs)
+        outputs = self.model(**model_inputs)
 
         # TODO: check outputs
         if outputs.hidden_states is not None:
@@ -419,8 +396,27 @@ class JointAffordanceModel(nn.Module):
         self.mllm = MLLMBackbone(self.config.mllm)
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder)
         self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder)
-
+        
         # self.clip_image_processor = CLIPImageProcessor.from_pretrained(self.config.mm_vision_tower)
+
+        # TODO: 转移到训练中处理
+        if config.lora_enable:
+            from peft import LoraConfig, get_peft_model, TaskType
+
+            for param in model.parameters():
+                param.requires_grad = False
+            target_modules = config.lora_target_modules
+
+            lora_config = LoraConfig(
+                r=config.lora_r,
+                lora_alpha=config.lora_alpha,
+                lora_dropout=config.lora_dropout,
+                target_modules=target_modules,
+                bias="none",
+                task_type=TaskType.CAUSAL_LM,
+            )
+            self.mllm.model = get_peft_model(self.mllm.model, lora_config)
+
 
     @property
     def tokenizer(self):
