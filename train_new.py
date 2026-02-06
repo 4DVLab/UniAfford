@@ -1,6 +1,8 @@
 import argparse
 import os
+import logging
 from functools import partial
+from datetime import datetime
 
 import deepspeed
 import torch
@@ -16,6 +18,52 @@ from utils.common import dict_to_cuda
 from utils import calculator as calc
 
 local_rank = int(os.environ.get("LOCAL_RANK", 0))
+
+
+def setup_logger(log_dir, local_rank=0):
+    """
+    设置日志系统
+    - Rank 0: 同时输出到控制台和文件
+    - 其他 Rank: 只输出到控制台
+    """
+    logger = logging.getLogger("train")
+    logger.setLevel(logging.INFO)
+    
+    # 避免重复添加 handler
+    if logger.handlers:
+        return logger
+    
+    # 日志格式
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [Rank %(rank)s] %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S"
+    )
+    
+    # 控制台输出（所有进程）
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+    
+    # 文件输出（仅 Rank 0）
+    if local_rank == 0 and log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        file_handler = logging.FileHandler(log_file, encoding='utf-8')
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+        logger.info(f"日志文件已创建: {log_file}")
+    
+    # 为日志记录添加 rank 信息
+    old_factory = logging.getLogRecordFactory()
+    def record_factory(*args, **kwargs):
+        record = old_factory(*args, **kwargs)
+        record.rank = local_rank
+        return record
+    logging.setLogRecordFactory(record_factory)
+    
+    return logger
 
 def parse_args():
     parser = argparse.ArgumentParser(description="JointAffordance (Qwen) training")
@@ -33,7 +81,7 @@ def enable_trainable_modules(model, name_filters):
             param.requires_grad = True
 
 
-def create_param_groups(model, config):
+def create_param_groups(model, config, logger):
     if not config.use_layerwise_lr:
         return [p for p in model.parameters() if p.requires_grad]
 
@@ -62,28 +110,28 @@ def create_param_groups(model, config):
             "lr": config.llm_lr,
             "name": "llm",
         })
-        print(f"\n✓ LLM 参数组: {len(llm_params)} 个参数, lr={config.llm_lr}")
+        logger.info(f"✓ LLM 参数组: {len(llm_params)} 个参数, lr={config.llm_lr}")
     if vision_2d_params:
         param_groups.append({
             "params": vision_2d_params,
             "lr": config.vision_2d_lr,
             "name": "vision_2d",
         })
-        print(f"✓ 2D 视觉参数组: {len(vision_2d_params)} 个参数, lr={config.vision_2d_lr}")
+        logger.info(f"✓ 2D 视觉参数组: {len(vision_2d_params)} 个参数, lr={config.vision_2d_lr}")
     if vision_3d_params:
         param_groups.append({
             "params": vision_3d_params,
             "lr": config.vision_3d_lr,
             "name": "vision_3d",
         })
-        print(f"✓ 3D 视觉参数组: {len(vision_3d_params)} 个参数, lr={config.vision_3d_lr}")
+        logger.info(f"✓ 3D 视觉参数组: {len(vision_3d_params)} 个参数, lr={config.vision_3d_lr}")
     if other_params:
         param_groups.append({
             "params": other_params,
             "lr": config.lr,
             "name": "other",
         })
-        print(f"✓ 其他参数组: {len(other_params)} 个参数, lr={config.lr}\n")
+        logger.info(f"✓ 其他参数组: {len(other_params)} 个参数, lr={config.lr}")
 
     return param_groups
 
@@ -105,10 +153,20 @@ def main():
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
     
-    deepspeed.init_distributed() 
+    # 初始化分布式训练
+    deepspeed.init_distributed()
+    
+    # 设置日志系统
+    logger = setup_logger(config.log_dir, local_rank)
+    logger.info("=" * 80)
+    logger.info("开始训练 - Joint Affordance Model")
+    logger.info("=" * 80) 
     
     """ ------------------------- 初始化模型 --------------------------- """
+    logger.info("正在初始化模型...")
     model = JointAffordanceModel(model_config)
+    logger.info(f"模型初始化完成: {model_config.mllm.qwen_model_name_or_path}")
+    
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
     data_collator = partial(
         qwen3vl_collate_fn,
@@ -119,40 +177,52 @@ def main():
     )
 
     """ ------------------------- 选择训练参数、应用lora --------------------------- """
+    logger.info("配置训练参数...")
     for p in model.parameters():
         p.requires_grad = False
 
     # 使用 LoRA 包裹 MLLM 主干（qwen）
     if config.lora.lora_r > 0:
+        logger.info(f"应用 LoRA: r={config.lora.lora_r}, alpha={config.lora.lora_alpha}")
         lora_config = config.lora.to_peft_config()
         model.mllm.model = get_peft_model(model.mllm.model, lora_config)
+    else:
+        logger.info("未使用 LoRA")
 
     # 解冻必要模块
+    logger.info(f"训练参数模块: {', '.join(config.name_of_params_to_train)}")
     enable_trainable_modules(model, config.name_of_params_to_train)
 
     """ ------------------------- 加载数据集 --------------------------- """
+    logger.info("=" * 80)
+    logger.info("加载数据集")
+    logger.info("=" * 80)
     data_objects = [None, None]
 
     if local_rank == 0:
-        print(f"【主进程 Rank {local_rank}】开始读取磁盘数据 (IO)...")
-        train_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='train').load_all_data()
-        val_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='val').load_all_data()
+        logger.info(f"主进程 (Rank {local_rank}) 开始读取磁盘数据...")
+        logger.info(f"数据集路径: {config.dataset_dir}")
+        train_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='train')
+        val_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='val')
         
         data_objects[0] = train_data_manager.samples
         data_objects[1] = val_data_manager.samples
-        print(f"【主进程 Rank {local_rank}】读取完成，准备广播元数据给其他 GPU...")
+        logger.info(f"数据加载完成: 训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
+        logger.info("准备广播数据到其他 GPU...")
     else:
-        print(f"【子进程 Rank {local_rank}】等待主进程广播数据...")
+        logger.info(f"子进程 (Rank {local_rank}) 等待主进程广播数据...")
 
-    # 3. 广播数据：将 data_objects 从 src=0 发送给所有进程
+    # 广播数据：将 data_objects 从 src=0 发送给所有进程
     dist.broadcast_object_list(data_objects, src=0)
 
-    # 4. 解包数据
+    # 解包数据
     train_samples = data_objects[0]
     val_samples = data_objects[1]
     
     if local_rank != 0:
-        print(f"【子进程 Rank {local_rank}】已收到数据: 训练集 {len(train_samples)} 条, 验证集 {len(val_samples)} 条")
+        logger.info(f"已收到数据: 训练集 {len(train_samples)} 条, 验证集 {len(val_samples)} 条")
+    
+    logger.info(f"数据集配置: image_size={config.image_size}, num_points={config.num_points}, precision={config.precision}")
     
     if config.samples_per_epoch is not None:
         train_dataset = Qwen3VLTrainDataset(
@@ -183,15 +253,25 @@ def main():
     )
 
     """ ------------------------- DeepSpeed 初始化（分层学习率） --------------------------- """
-    params_to_train = create_param_groups(model, config)
+    logger.info("=" * 80)
+    logger.info("初始化 DeepSpeed")
+    logger.info("=" * 80)
+    params_to_train = create_param_groups(model, config, logger)
     if len(params_to_train) == 0:
+        logger.error("没有可训练参数，请检查 name_of_params_to_train 或 LoRA 配置")
         raise RuntimeError("没有可训练参数，请检查 name_of_params_to_train 或 LoRA 配置")
+    
+    logger.info(f"DeepSpeed 配置: ZeRO Stage {config.deepspeed.zero_stage}")
+    logger.info(f"训练配置: epochs={config.epochs}, micro_batch_size={config.deepspeed.train_micro_batch_size_per_gpu}, "
+                f"gradient_accumulation={config.deepspeed.gradient_accumulation_steps}")
 
     if config.use_layerwise_lr:
+        logger.info("使用分层学习率 + 自定义优化器/调度器")
         steps_per_epoch = config.steps_per_epoch
         if steps_per_epoch is None:
             micro_bs = config.deepspeed.train_micro_batch_size_per_gpu
             steps_per_epoch = max(1, len(train_dataset) // max(1, micro_bs))
+        logger.info(f"每个 epoch 步数: {steps_per_epoch}, 总步数: {config.epochs * steps_per_epoch}")
 
         optimizer = torch.optim.AdamW(
             params_to_train,
@@ -204,6 +284,9 @@ def main():
             num_warmup_steps=config.warmup_num_steps,
             num_training_steps=total_steps,
         )
+        logger.info(f"优化器: AdamW (weight_decay={config.weight_decay}, betas=({config.beta1}, {config.beta2}))")
+        logger.info(f"学习率调度器: CosineAnnealingLR (warmup_steps={config.warmup_num_steps})")
+        
         model_engine, _, train_loader, _ = deepspeed.initialize(
             model=model,
             model_parameters=params_to_train,
@@ -214,6 +297,7 @@ def main():
             config=config.deepspeed.to_dict(),
         )
     else:
+        logger.info("使用 DeepSpeed 内置优化器/调度器")
         model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
             model=model,
             model_parameters=params_to_train,
@@ -221,14 +305,30 @@ def main():
             collate_fn=data_collator,
             config=config.deepspeed.to_dict(),
         )
+    
+    logger.info(f"DeepSpeed 初始化完成，训练数据加载器大小: {len(train_loader)}")
 
 
     """ ------------------------- 训练 --------------------------- """
+    logger.info("=" * 80)
+    logger.info("开始训练循环")
+    logger.info("=" * 80)
     model_engine.train()
+    
     for epoch in range(config.epochs):
+        logger.info("-" * 80)
+        logger.info(f"Epoch [{epoch+1}/{config.epochs}]")
+        logger.info("-" * 80)
+        
         if hasattr(train_dataset, "set_epoch"):
             train_dataset.set_epoch(epoch)
-        for input_dict in train_loader:
+        
+        epoch_img_loss = 0.0
+        epoch_pc_loss = 0.0
+        epoch_total_loss = 0.0
+        num_batches = 0
+        
+        for batch_idx, input_dict in enumerate(train_loader):
             input_dict = dict_to_cuda(input_dict)
             output_dict = model_engine(**input_dict)
 
@@ -255,9 +355,36 @@ def main():
             model_engine.backward(loss)
             model_engine.step()
             model_engine.zero_grad()
+            
+            # 累计损失
+            epoch_img_loss += img_loss.item()
+            epoch_pc_loss += pc_loss.item()
+            epoch_total_loss += loss.item()
+            num_batches += 1
+            
+            # 定期打印训练进度
+            if (batch_idx + 1) % config.print_freq == 0 or (batch_idx + 1) == len(train_loader):
+                current_lr = scheduler.get_last_lr()[0] if config.use_layerwise_lr and scheduler else None
+                log_msg = f"Epoch [{epoch+1}/{config.epochs}] Batch [{batch_idx+1}/{len(train_loader)}] " \
+                         f"Loss: {loss.item():.6f} (Img: {img_loss.item():.6f}, PC: {pc_loss.item():.6f})"
+                if current_lr is not None:
+                    log_msg += f" LR: {current_lr:.2e}"
+                logger.info(log_msg)
+        
+        # Epoch 结束统计
+        avg_img_loss = epoch_img_loss / max(1, num_batches)
+        avg_pc_loss = epoch_pc_loss / max(1, num_batches)
+        avg_total_loss = epoch_total_loss / max(1, num_batches)
+        current_lr = scheduler.get_last_lr()[0] if config.use_layerwise_lr and scheduler else None
+        
+        logger.info(f"Epoch [{epoch+1}/{config.epochs}] 训练完成 - "
+                   f"平均 Loss: {avg_total_loss:.6f} (Img: {avg_img_loss:.6f}, PC: {avg_pc_loss:.6f})")
+        if current_lr is not None:
+            logger.info(f"当前学习率: {current_lr:.2e}")
 
         """ ------------------------- 验证 --------------------------- """
         if val_dataset is not None:
+            logger.info("开始验证...")
             val_loader = torch.utils.data.DataLoader(
                 val_dataset,
                 batch_size=config.val_batch_size,
@@ -269,6 +396,8 @@ def main():
             model_engine.eval()
             with torch.no_grad():
                 total_val_loss = 0.0
+                total_val_img_loss = 0.0
+                total_val_pc_loss = 0.0
                 total_batches = 0
                 for val_dict in val_loader:
                     val_dict = dict_to_cuda(val_dict)
@@ -290,10 +419,20 @@ def main():
                             dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
                         )
                     total_val_loss += (img_loss + pc_loss).item()
+                    total_val_img_loss += img_loss.item()
+                    total_val_pc_loss += pc_loss.item()
                     total_batches += 1
                 if local_rank == 0 and total_batches > 0:
-                    print(f"[val] epoch={epoch} loss={total_val_loss / total_batches:.6f}")
+                    avg_val_loss = total_val_loss / total_batches
+                    avg_val_img_loss = total_val_img_loss / total_batches
+                    avg_val_pc_loss = total_val_pc_loss / total_batches
+                    logger.info(f"Epoch [{epoch+1}/{config.epochs}] 验证完成 - "
+                               f"Loss: {avg_val_loss:.6f} (Img: {avg_val_img_loss:.6f}, PC: {avg_val_pc_loss:.6f})")
             model_engine.train()
+    
+    logger.info("=" * 80)
+    logger.info("训练完成！")
+    logger.info("=" * 80)
 
 
 if __name__ == "__main__":
