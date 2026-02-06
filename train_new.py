@@ -1,6 +1,7 @@
 import argparse
 import os
 import logging
+from contextlib import nullcontext
 from functools import partial
 from datetime import datetime
 
@@ -164,7 +165,17 @@ def main():
     
     """ ------------------------- 初始化模型 --------------------------- """
     logger.info("正在初始化模型...")
-    model = JointAffordanceModel(model_config)
+    zero_init_context = nullcontext()
+    if config.deepspeed.zero_stage == 3:
+        logger.info("启用 ZeRO-3 初始化以避免显存峰值")
+        zero_init_context = deepspeed.zero.Init(
+            enabled=True,
+            config_dict_or_path=config.deepspeed.to_dict(),
+            remote_device=config.deepspeed.offload_param_device,
+            pin_memory=config.deepspeed.offload_param_pin_memory,
+        )
+    with zero_init_context:
+        model = JointAffordanceModel(model_config)
     logger.info(f"模型初始化完成: {model_config.mllm.qwen_model_name_or_path}")
     
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)

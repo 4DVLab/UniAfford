@@ -2,6 +2,7 @@ import os
 import shutil
 import time
 from functools import partial
+from contextlib import nullcontext
 
 import deepspeed
 import torch
@@ -162,9 +163,19 @@ def main():
     }
     
     # 初始化魔改后的 LISA 模型
-    model = LISAForCausalLM.from_pretrained(
-        mllm.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
-    )
+    zero_init_context = nullcontext()
+    if config.deepspeed.zero_stage == 3:
+        print("启用 ZeRO-3 初始化以避免显存峰值")
+        zero_init_context = deepspeed.zero.Init(
+            enabled=True,
+            config_dict_or_path=config.deepspeed.to_dict(),
+            remote_device=config.deepspeed.offload_param_device,
+            pin_memory=config.deepspeed.offload_param_pin_memory,
+        )
+    with zero_init_context:
+        model = LISAForCausalLM.from_pretrained(
+            mllm.version, dtype=config.precision, low_cpu_mem_usage=True, **model_args
+        )
     model.config.eos_token_id = tokenizer.eos_token_id
     model.config.bos_token_id = tokenizer.bos_token_id
     model.config.pad_token_id = tokenizer.pad_token_id
@@ -175,7 +186,8 @@ def main():
     # 初始化视觉模块
     model.get_model().initialize_vision_modules(model.get_model().config)
     vision_tower = model.get_model().get_vision_tower()
-    vision_tower.to(dtype=config.precision, device=config.local_rank)
+    if config.deepspeed.zero_stage != 3:
+        vision_tower.to(dtype=config.precision, device=config.local_rank)
     
     conversation_lib.default_conversation = conversation_lib.conv_templates[
         mllm.conv_type
