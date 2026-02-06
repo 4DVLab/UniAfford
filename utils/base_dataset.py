@@ -1290,10 +1290,8 @@ class JointDataset:
         
         if balance_data:
             self.balance_data()
-        
-        if self.dtype is not None:
-            self.load_all_data()
-        self.samples = self.pair_samples()
+            
+        self.samples = []
     
     @staticmethod
     def load_ids_from_json(split_json_path: str, dataset_types: list[str]):
