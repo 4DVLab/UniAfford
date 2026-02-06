@@ -22,13 +22,20 @@ class DeepSpeedConfigs(Configs):
         precision: Optional[torch.dtype] = None,
         gradient_clipping: float = 1.0,
 
-        # zero_optimization 相关
-        zero_stage: int = 2,
-        contiguous_gradients: bool = True,
+        # zero_optimization 相关（默认 ZeRO-3：模型+优化器+梯度全分片）
+        zero_stage: int = 3,
+        allgather_partitions: bool = True,
+        allgather_bucket_size: float = 5e8,
         overlap_comm: bool = True,
         reduce_scatter: bool = True,
         reduce_bucket_size: float = 5e8,
-        allgather_bucket_size: float = 5e8,
+        contiguous_gradients: bool = True,
+        # 优化器 Offload（显存不足时把优化器状态放 CPU）
+        offload_optimizer_device: str = "cpu",
+        offload_optimizer_pin_memory: bool = True,
+        # 模型参数 Offload（大模型冷参数放 CPU）
+        offload_param_device: str = "cpu",
+        offload_param_pin_memory: bool = True,
         # 是否使用分层学习率（为 True 时不写 optimizer/scheduler）
         use_layerwise_lr: bool = True,
         # optimizer / scheduler 用到的训练参数
@@ -49,11 +56,16 @@ class DeepSpeedConfigs(Configs):
             precision=precision,
             gradient_clipping=gradient_clipping,
             zero_stage=zero_stage,
-            contiguous_gradients=contiguous_gradients,
+            allgather_partitions=allgather_partitions,
+            allgather_bucket_size=allgather_bucket_size,
             overlap_comm=overlap_comm,
             reduce_scatter=reduce_scatter,
             reduce_bucket_size=reduce_bucket_size,
-            allgather_bucket_size=allgather_bucket_size,
+            contiguous_gradients=contiguous_gradients,
+            offload_optimizer_device=offload_optimizer_device,
+            offload_optimizer_pin_memory=offload_optimizer_pin_memory,
+            offload_param_device=offload_param_device,
+            offload_param_pin_memory=offload_param_pin_memory,
             use_layerwise_lr=use_layerwise_lr,
             lr=lr,
             weight_decay=weight_decay,
@@ -78,11 +90,20 @@ class DeepSpeedConfigs(Configs):
             "gradient_clipping": self.gradient_clipping,
             "zero_optimization": {
                 "stage": self.zero_stage,
-                "contiguous_gradients": self.contiguous_gradients,
+                "allgather_partitions": self.allgather_partitions,
+                "allgather_bucket_size": int(self.allgather_bucket_size),
                 "overlap_comm": self.overlap_comm,
                 "reduce_scatter": self.reduce_scatter,
                 "reduce_bucket_size": int(self.reduce_bucket_size),
-                "allgather_bucket_size": int(self.allgather_bucket_size),
+                "contiguous_gradients": self.contiguous_gradients,
+                "offload_optimizer": {
+                    "device": self.offload_optimizer_device,
+                    "pin_memory": self.offload_optimizer_pin_memory,
+                },
+                "offload_param": {
+                    "device": self.offload_param_device,
+                    "pin_memory": self.offload_param_pin_memory,
+                },
             },
         }
         if not self.use_layerwise_lr:

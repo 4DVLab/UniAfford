@@ -1,8 +1,10 @@
 import argparse
+import os
 from functools import partial
 
 import deepspeed
 import torch
+import torch.distributed as dist 
 from peft import get_peft_model
 from transformers import AutoProcessor, get_cosine_schedule_with_warmup
 
@@ -13,6 +15,7 @@ from utils.dataset import Qwen3VLDataset, Qwen3VLTrainDataset, qwen3vl_collate_f
 from utils.common import dict_to_cuda
 from utils import calculator as calc
 
+local_rank = int(os.environ.get("LOCAL_RANK", 0))
 
 def parse_args():
     parser = argparse.ArgumentParser(description="JointAffordance (Qwen) training")
@@ -20,7 +23,8 @@ def parse_args():
     parser.add_argument("--vision_pretrained", type=str, default=None, help="SAM 权重路径")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
-    return parser.parse_args()
+    parser.add_argument("--local_rank", type=int, default=0)
+    return parser.parse_known_args()[0]
 
 
 def enable_trainable_modules(model, name_filters):
@@ -86,7 +90,6 @@ def create_param_groups(model, config):
 
 def main():
     args = parse_args()
-
     config = TrainingConfig()
     model_config = config.model_config
 
@@ -99,7 +102,11 @@ def main():
     if args.log_dir:
         config.log_dir = args.log_dir
 
-
+    local_rank = args.local_rank
+    torch.cuda.set_device(local_rank)
+    
+    deepspeed.init_distributed() 
+    
     """ ------------------------- 初始化模型 --------------------------- """
     model = JointAffordanceModel(model_config)
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
@@ -124,11 +131,32 @@ def main():
     enable_trainable_modules(model, config.name_of_params_to_train)
 
     """ ------------------------- 加载数据集 --------------------------- """
-    train_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='train').load_all_data()
-    val_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='val').load_all_data()
+    data_objects = [None, None]
+
+    if local_rank == 0:
+        print(f"【主进程 Rank {local_rank}】开始读取磁盘数据 (IO)...")
+        train_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='train').load_all_data()
+        val_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='val').load_all_data()
+        
+        data_objects[0] = train_data_manager.samples
+        data_objects[1] = val_data_manager.samples
+        print(f"【主进程 Rank {local_rank}】读取完成，准备广播元数据给其他 GPU...")
+    else:
+        print(f"【子进程 Rank {local_rank}】等待主进程广播数据...")
+
+    # 3. 广播数据：将 data_objects 从 src=0 发送给所有进程
+    dist.broadcast_object_list(data_objects, src=0)
+
+    # 4. 解包数据
+    train_samples = data_objects[0]
+    val_samples = data_objects[1]
+    
+    if local_rank != 0:
+        print(f"【子进程 Rank {local_rank}】已收到数据: 训练集 {len(train_samples)} 条, 验证集 {len(val_samples)} 条")
+    
     if config.samples_per_epoch is not None:
         train_dataset = Qwen3VLTrainDataset(
-            train_data_manager.samples,
+            train_samples,
             processor=processor,
             image_size=config.image_size,
             num_points=config.num_points,
@@ -138,7 +166,7 @@ def main():
         )
     else:
         train_dataset = Qwen3VLDataset(
-            train_data_manager.samples,
+            train_samples,
             processor=processor,
             image_size=config.image_size,
             num_points=config.num_points,
@@ -146,7 +174,7 @@ def main():
             use_sample_cache=config.use_sample_cache,
         )
     val_dataset = Qwen3VLDataset(
-        val_data_manager.samples,
+        val_samples,
         processor=processor,
         image_size=config.image_size,
         num_points=config.num_points,
@@ -263,7 +291,7 @@ def main():
                         )
                     total_val_loss += (img_loss + pc_loss).item()
                     total_batches += 1
-                if config.local_rank == 0 and total_batches > 0:
+                if local_rank == 0 and total_batches > 0:
                     print(f"[val] epoch={epoch} loss={total_val_loss / total_batches:.6f}")
             model_engine.train()
 
