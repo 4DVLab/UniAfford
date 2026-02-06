@@ -5,6 +5,7 @@ from functools import partial
 from contextlib import nullcontext
 
 import deepspeed
+from deepspeed.ops.adam import DeepSpeedCPUAdam
 import torch
 from tqdm import tqdm
 import transformers
@@ -284,7 +285,12 @@ def main():
     # 如果使用分层学习率，需要手动创建优化器和调度器
     if config.use_layerwise_lr:
         # 手动创建优化器（支持参数组）
-        optimizer = torch.optim.AdamW(
+        optimizer_cls = (
+            DeepSpeedCPUAdam
+            if config.deepspeed.offload_optimizer_device == "cpu"
+            else torch.optim.AdamW
+        )
+        optimizer = optimizer_cls(
             params_to_train,  # 参数组列表，每组有自己的 lr
             weight_decay=config.weight_decay,
             betas=(config.beta1, config.beta2),
@@ -497,7 +503,7 @@ def train(
                 # 重新计时，避免迭代器重置导致data_time失真
                 end = time.time()
 
-            input_dict = dict_to_cuda(input_dict)
+            input_dict = dict_to_cuda(input_dict, device=model_engine.device)
             data_time.update(time.time() - end)
 
             # 调用魔改后的 LISA 模型
@@ -642,7 +648,7 @@ def validate(val_loader, model_engine, epoch, writer, config):
         torch.cuda.empty_cache()
 
         with torch.no_grad():
-            input_dict = dict_to_cuda(input_dict)
+            input_dict = dict_to_cuda(input_dict, device=model_engine.device)
             output_dict = model_engine(**input_dict, inference=True)
 
         # 使用统一的评估函数（支持批处理）

@@ -6,6 +6,7 @@ from functools import partial
 from datetime import datetime
 
 import deepspeed
+from deepspeed.ops.adam import DeepSpeedCPUAdam
 import torch
 import torch.distributed as dist 
 from peft import get_peft_model
@@ -284,7 +285,12 @@ def main():
             steps_per_epoch = max(1, len(train_dataset) // max(1, micro_bs))
         logger.info(f"每个 epoch 步数: {steps_per_epoch}, 总步数: {config.epochs * steps_per_epoch}")
 
-        optimizer = torch.optim.AdamW(
+        optimizer_cls = (
+            DeepSpeedCPUAdam
+            if config.deepspeed.offload_optimizer_device == "cpu"
+            else torch.optim.AdamW
+        )
+        optimizer = optimizer_cls(
             params_to_train,
             weight_decay=config.weight_decay,
             betas=(config.beta1, config.beta2),
@@ -340,7 +346,7 @@ def main():
         num_batches = 0
         
         for batch_idx, input_dict in enumerate(train_loader):
-            input_dict = dict_to_cuda(input_dict)
+            input_dict = dict_to_cuda(input_dict, device=model_engine.device)
             output_dict = model_engine(**input_dict)
 
             img_loss = torch.tensor(0.0, device=model_engine.device)
@@ -411,7 +417,7 @@ def main():
                 total_val_pc_loss = 0.0
                 total_batches = 0
                 for val_dict in val_loader:
-                    val_dict = dict_to_cuda(val_dict)
+                    val_dict = dict_to_cuda(val_dict, device=model_engine.device)
                     val_output = model_engine(**val_dict)
                     img_loss = torch.tensor(0.0, device=model_engine.device)
                     pc_loss = torch.tensor(0.0, device=model_engine.device)

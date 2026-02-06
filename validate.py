@@ -269,7 +269,7 @@ def validate(model, val_loader, device, config, save_predictions=False, output_d
         for batch_idx, input_dict in enumerate(tqdm(val_loader, desc='验证中')):
             torch.cuda.empty_cache()
 
-            input_dict = dict_to_cuda(input_dict)
+            input_dict = dict_to_cuda(input_dict, device=model_engine.device)
             output_dict = model(**input_dict, inference=True)
 
             # 使用统一的评估函数（支持批处理）
