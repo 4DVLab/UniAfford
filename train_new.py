@@ -11,6 +11,7 @@ import torch
 import torch.distributed as dist 
 from peft import get_peft_model
 from transformers import AutoProcessor, get_cosine_schedule_with_warmup
+from tqdm import tqdm
 
 from configs import TrainingConfig
 from model.joint_affordance import JointAffordanceModel
@@ -215,8 +216,8 @@ def main():
     if local_rank == 0:
         logger.info(f"主进程 (Rank {local_rank}) 开始读取磁盘数据...")
         logger.info(f"数据集路径: {config.dataset_dir}")
-        train_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='train')
-        val_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='val')
+        train_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='train').load_all_data()
+        val_data_manager = JointDataset(dataset_root=config.dataset_dir, dtype='val').load_all_data()
         
         data_objects[0] = train_data_manager.samples
         data_objects[1] = val_data_manager.samples
@@ -277,6 +278,11 @@ def main():
     logger.info(f"DeepSpeed 配置: ZeRO Stage {config.deepspeed.zero_stage}")
     logger.info(f"训练配置: epochs={config.epochs}, micro_batch_size={config.deepspeed.train_micro_batch_size_per_gpu}, "
                 f"gradient_accumulation={config.deepspeed.gradient_accumulation_steps}")
+
+    if config.deepspeed.zero_stage == 3 and config.deepspeed.offload_param_device == "cpu":
+        logger.info("ZeRO-3 + CPU 参数卸载：初始化前将模型留在 CPU")
+        model = model.cpu()
+        torch.cuda.empty_cache()
 
     if config.use_layerwise_lr:
         logger.info("使用分层学习率 + 自定义优化器/调度器")
@@ -346,7 +352,17 @@ def main():
         epoch_total_loss = 0.0
         num_batches = 0
         
-        for batch_idx, input_dict in enumerate(train_loader):
+        if local_rank == 0:
+            train_iter = tqdm(
+                train_loader,
+                total=len(train_loader),
+                dynamic_ncols=True,
+                desc=f"Epoch {epoch+1}/{config.epochs}",
+            )
+        else:
+            train_iter = train_loader
+
+        for batch_idx, input_dict in enumerate(train_iter):
             input_dict = dict_to_cuda(input_dict, device=model_engine.device)
             output_dict = model_engine(**input_dict)
 
@@ -388,6 +404,11 @@ def main():
                 if current_lr is not None:
                     log_msg += f" LR: {current_lr:.2e}"
                 logger.info(log_msg)
+                if local_rank == 0 and hasattr(train_iter, "set_postfix"):
+                    postfix = {"loss": f"{loss.item():.4f}"}
+                    if current_lr is not None:
+                        postfix["lr"] = f"{current_lr:.2e}"
+                    train_iter.set_postfix(postfix, refresh=False)
         
         # Epoch 结束统计
         avg_img_loss = epoch_img_loss / max(1, num_batches)

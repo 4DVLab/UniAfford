@@ -283,6 +283,11 @@ def main():
 
     # DeepSpeed 配置
     # 如果使用分层学习率，需要手动创建优化器和调度器
+    if config.deepspeed.zero_stage == 3 and config.deepspeed.offload_param_device == "cpu":
+        print("ZeRO-3 + CPU 参数卸载：初始化前将模型留在 CPU")
+        model = model.cpu()
+        torch.cuda.empty_cache()
+
     if config.use_layerwise_lr:
         # 手动创建优化器（支持参数组）
         optimizer_cls = (
@@ -488,7 +493,17 @@ def train(
     # switch to train mode
     model_engine.train()
     end = time.time()
-    for local_step in range(config.steps_per_epoch):
+    if config.local_rank == 0:
+        step_iter = tqdm(
+            range(config.steps_per_epoch),
+            total=config.steps_per_epoch,
+            dynamic_ncols=True,
+            desc=f"Epoch {epoch+1}/{config.epochs}",
+        )
+    else:
+        step_iter = range(config.steps_per_epoch)
+
+    for local_step in step_iter:
         # 计算全局步数
         global_step = epoch * config.steps_per_epoch + local_step
         total_loss = 0.0  # 累积总损失，用于归一化
@@ -591,6 +606,10 @@ def train(
 
             if config.local_rank == 0:
                 progress.display(local_step + 1)
+                if hasattr(step_iter, "set_postfix"):
+                    loss_meter = metrics_tracker.loss_meters.get("loss")
+                    postfix = {"loss": f"{loss_meter.val:.4f}"} if loss_meter else {}
+                    step_iter.set_postfix(postfix, refresh=False)
                 
                 # 使用 TensorBoardLogger 记录所有损失到 TensorBoard
                 if tb_logger is not None:
