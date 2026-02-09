@@ -356,26 +356,25 @@ class Qwen3VLDataset(Dataset):
             answer_parts.append(random.choice(no_input_templates))
         answer = " ".join(answer_parts)
 
-        messages = []
+        # [ZeRO-3 兼容] 无论样本是否有真实图片，都提供图片输入。
+        # 没有真实图片的样本使用 28×28 黑色占位图，确保 Qwen VL
+        # 的视觉编码器在所有 rank 上始终执行，避免 NCCL all-gather 死锁。
         if has_image:
             img_rgb = cv2.cvtColor(data["img"], cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(img_rgb)
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "image": pil_img},
-                        {"type": "text", "text": question},
-                    ],
-                }
-            )
         else:
-            messages.append(
-                {
-                    "role": "user",
-                    "content": [{"type": "text", "text": question}],
-                }
-            )
+            pil_img = Image.new("RGB", (28, 28), color=(0, 0, 0))
+
+        messages = []
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": pil_img},
+                    {"type": "text", "text": question},
+                ],
+            }
+        )
         messages.append(
             {"role": "assistant", "content": [{"type": "text", "text": answer}]}
         )
@@ -523,32 +522,61 @@ def qwen3vl_collate_fn(
         output_point_nums=2048,
         precision=torch.float32
     ) -> Dict[str, Any]:
+    """
+    Returns:
+        {
+            # mllm输入
+            "input_ids"            : [B, L]           # 文本 token ids（含图像 token）
+            "labels"               : [B, L]           # 语言建模标签（非目标位置为 IGNORE_INDEX）
+            "attention_mask"       : [B, L]           # 文本注意力 mask
+            "position_ids"         : [B, 3, L]        # Qwen3-VL RoPE 位置编码
+            "pixel_values"         : [B, 3, H, W]     # Qwen3-VL 视觉输入（占位样本用复用值回填）
+            "image_grid_thw"       : [B, 3]           # Qwen3-VL 图像网格 (T, H, W)
+            
+            # 2D 分割输入
+            "images"               : [B, 3, H, W]     # 2D 分割输入图像（统一 padding）
+            "img_gt_tensor"        : [B, H, W]        # 2D 分割 GT（无效样本为 0）
+            "original_size_list"   : list[(h, w)]     # 原始 GT 尺寸（与图像一致）
+            "img_valid_mask"       : [B]              # 是否有有效图像分割监督
+
+            # 3D 分割输入
+            "point_clouds"         : [B, N, 3]        # 点云输入（统一 padding）
+            "pc_gt_tensor"         : [B, N]           # 点云分割 GT（无效样本为 0）
+            "pc_valid_lengths"     : [B]              # 有效点数量（0 表示无效样本）
+        }
+    """
+    # -------- 1) 收集 batch 内各模态原始数据 --------
     batch_size = len(batch)
 
     input_ids_list, labels_list, position_ids_list = [], [], []
     pixel_values_list, image_grid_thw_list = [], []
+    pixel_values_valid_flags = []
 
     images_list, img_gt_masks = [], []
     point_clouds_list, pc_gt_masks = [], []
-    has_image_flags, has_pc_flags = [], []
+    has_image_flags = []
 
     for sample in batch:
+        # 文本与 Qwen3-VL 位置编码
         input_ids_list.append(sample["input_ids"].squeeze(0))
         labels_list.append(sample["labels"].squeeze(0))
         position_ids_list.append(sample["position_ids"])
 
-        if "pixel_values" in sample:
-            pixel_values_list.append(sample["pixel_values"])
-        if "image_grid_thw" in sample:
-            image_grid_thw_list.append(sample["image_grid_thw"])
+        # Qwen3-VL 视觉输入（可能缺失，后续统一回填）
+        pixel_values = sample.get("pixel_values")
+        image_grid_thw = sample.get("image_grid_thw")
+        pixel_values_list.append(pixel_values)
+        image_grid_thw_list.append(image_grid_thw)
+        pixel_values_valid_flags.append(pixel_values is not None and image_grid_thw is not None)
 
+        # 2D/3D 分割输入
         has_image_flags.append(sample.get("has_image", False))
-        has_pc_flags.append(sample.get("has_point_cloud", False))
         images_list.append(sample.get("images"))
         img_gt_masks.append(sample.get("img_gt"))
         point_clouds_list.append(sample.get("point_clouds"))
         pc_gt_masks.append(sample.get("pc_gt"))
 
+    # -------- 2) 文本输入 padding --------
     input_ids = torch.nn.utils.rnn.pad_sequence(
         input_ids_list, batch_first=True, padding_value=tokenizer.pad_token_id
     )
@@ -565,35 +593,56 @@ def qwen3vl_collate_fn(
         "position_ids": position_ids,
     }
 
-    if len(pixel_values_list) != 0:
-        batch_out["pixel_values"] = torch.cat(pixel_values_list, dim=0)
-        if len(image_grid_thw_list) != 0:
-            batch_out["image_grid_thw"] = torch.cat(image_grid_thw_list, dim=0)
+    # -------- 3) Qwen3-VL 视觉输入补齐（保证 ZeRO-3 各 rank 统一前向）--------
+    # 视觉输入非空是必要条件；缺失时用占位数据回填。
+    if any(pixel_values_valid_flags):
+        fallback_pixel_values = next(
+            pv for pv, ok in zip(pixel_values_list, pixel_values_valid_flags) if ok
+        )
+        fallback_grid_thw = next(
+            g for g, ok in zip(image_grid_thw_list, pixel_values_valid_flags) if ok
+        )
     else:
-        batch_out["pixel_values"] = None
-        batch_out["image_grid_thw"] = None
+        # 理论上不会发生（dataset 已提供占位图），若触发说明数据异常
+        import warnings
+        dummy_h, dummy_w = output_image_size
+        warnings.warn(
+            "qwen3vl_collate_fn: pixel_values 全为空，已使用占位图回填。"
+            "请检查数据集/预处理逻辑。",
+            RuntimeWarning,
+        )
+        fallback_pixel_values = torch.zeros(
+            1, 3, dummy_h, dummy_w, dtype=precision
+        )
+        fallback_grid_thw = torch.ones(1, 3, dtype=torch.long)
 
+    fixed_pixel_values = [
+        pv if pv is not None else fallback_pixel_values for pv in pixel_values_list
+    ]
+    fixed_grid_thw = [
+        g if g is not None else fallback_grid_thw for g in image_grid_thw_list
+    ]
+    batch_out["pixel_values"] = torch.cat(fixed_pixel_values, dim=0)
+    batch_out["image_grid_thw"] = torch.cat(fixed_grid_thw, dim=0)
+
+    # -------- 4) 2D 图像与 GT padding --------
     valid_images = [img for img in images_list if img is not None]
     if len(valid_images) == 0:
         dummy_h, dummy_w = output_image_size
         batch_out["images"] = torch.zeros(batch_size, 3, dummy_h, dummy_w, dtype=precision)
         batch_out["img_gt_tensor"] = torch.zeros(batch_size, dummy_h, dummy_w, dtype=precision)
-        batch_out["resize_list"] = [(dummy_h, dummy_w)] * batch_size
         batch_out["original_size_list"] = [(dummy_h, dummy_w)] * batch_size
     else:
         max_h, max_w = output_image_size
         padded_images = []
         padded_masks = []
-        resize_list = []
         original_size_list = []
 
         for i, img in enumerate(images_list):
             if img is None:
                 padded_images.append(torch.zeros(3, max_h, max_w, dtype=precision))
-                resize_list.append((max_h, max_w))
             else:
                 c, h, w = img.shape
-                resize_list.append((h, w))
                 if h < max_h or w < max_w:
                     pad_h = max_h - h
                     pad_w = max_w - w
@@ -624,11 +673,12 @@ def qwen3vl_collate_fn(
         stacked_images = torch.stack(padded_images)
         batch_out["images"] = stacked_images
         batch_out["img_gt_tensor"] = torch.stack(padded_masks)
-        batch_out["resize_list"] = resize_list
         batch_out["original_size_list"] = original_size_list
 
+    # 2D 有效样本标记（供上游屏蔽无效样本梯度）
     batch_out["img_valid_mask"] = torch.tensor(has_image_flags, dtype=torch.bool)
 
+    # -------- 5) 3D 点云与 GT padding --------
     valid_pcs = [pc for pc in point_clouds_list if pc is not None]
     if len(valid_pcs) == 0:
         batch_out["point_clouds"] = torch.zeros(batch_size, output_point_nums, 3, dtype=precision)
@@ -675,214 +725,3 @@ def qwen3vl_collate_fn(
 
     return batch_out
 
-
-# discard
-def collate_fn(
-        batch: List[Dict],
-        tokenizer=None,
-        output_image_size=(1024,1024), 
-        output_point_nums=2048,
-        precision=torch.float32
-    ) -> Dict[str, Any]:
-    """
-    批量数据整理函数（优化版：conversation 已在预处理阶段构建）
-    
-    将数据集返回的样本整理成模型所需的输入格式，支持图像和点云两种模态。
-    自动处理不同模态数据的padding和对齐，确保批次内数据形状一致。
-    只需进行 tokenization 和 padding
-    
-    Args:
-        batch: 样本列表，每个样本是一个字典
-        tokenizer: 分词器
-        output_image_size: 输出的图片大小 (h,w)
-        output_point_nums: 输出的点云点数
-    Returns:
-        包含模型输入的字典
-    """
-    
-    # 初始化结果字典
-    batch_size = len(batch)
-    
-    # 收集各模态数据（优化：减少重复操作）
-    images_list = []
-    img_gt_masks = []
-    point_clouds_list = []
-    pc_gt_masks = []
-    
-    has_image_flags = []
-    has_pc_flags = []
-    
-    input_ids_list, labels_list = [], []
-    
-    
-    for sample in batch:
-        has_image_flags.append(sample['has_image'])
-        has_pc_flags.append(sample['has_point_cloud'])
-
-        input_ids_list.append(sample['input_ids'])
-        labels_list.append(sample['labels'])
-        
-        images_list.append(sample.get('images'))
-        img_gt_masks.append(sample.get('img_gt'))
-        
-        point_clouds_list.append(sample.get('point_clouds'))
-        pc_gt_masks.append(sample.get('pc_gt'))
-        
-            
-    """ ------------------------------------- 处理文本数据 ------------------------------------- """
-    # 填充 input_ids 和 labels
-    max_len = max(len(ids) for ids in input_ids_list)
-    padded_input_ids = []
-    padded_labels = []
-    attention_masks = []
-    
-    for input_ids, labels in zip(input_ids_list, labels_list):
-        padding_len = max_len - len(input_ids)
-        padded_input_ids.append(torch.cat([input_ids, torch.full((padding_len,), tokenizer.pad_token_id, dtype=torch.long)]))
-        padded_labels.append(torch.cat([labels, torch.full((padding_len,), IGNORE_INDEX, dtype=torch.long)]))
-        attention_masks.append(torch.cat([torch.ones(len(input_ids), dtype=torch.long), torch.zeros(padding_len, dtype=torch.long)]))
-    
-    # 构建结果字典
-    result = {
-        'input_ids': torch.stack(padded_input_ids),
-        'labels': torch.stack(padded_labels),
-        'attention_masks': torch.stack(attention_masks),
-        'offset': torch.tensor([0] + [i + 1 for i in range(batch_size)], dtype=torch.long),
-    }
-    
-    """ ------------------------------------- 处理图像数据 ------------------------------------- """
-    # 过滤掉 None 值
-    valid_images = [img for img in images_list if img is not None]
-    # valid_masks = [mask for mask in masks_list if mask is not None]
-    
-    if len(valid_images) == 0:
-        # 全为 None，使用全0张量填充
-        dummy_h, dummy_w = output_image_size  # 默认尺寸
-        result['images'] = torch.zeros(batch_size, 3, dummy_h, dummy_w, dtype=precision)
-        result['img_gt_tensor'] = torch.zeros(batch_size, dummy_h, dummy_w, dtype=precision)
-        result['resize_list'] = [(dummy_h, dummy_w)] * batch_size
-        result['original_size_list'] = [(dummy_h, dummy_w)] * batch_size
-    else:
-        # 获取第一个有效图像的形状
-        # first_shape = valid_images[0].shape
-        # all_same_shape = all(img.shape == first_shape for img in valid_images)
-        # if not all_same_shape:
-        #     # # 尺寸不一致，需要padding到最大尺寸
-        #     max_h = max(*(img.shape[1] for img in valid_images), output_image_size[0])
-        #     max_w = max(*(img.shape[2] for img in valid_images), output_image_size[1])
-        # else:
-        #     max_h, max_w = first_shape[1], first_shape[2]
-        max_h, max_w = output_image_size  # HACK: 固定输出大小适配 clip、sam
-        
-        padded_images = []
-        padded_masks = []
-        resize_list = []
-        original_size_list = []
-
-        for i, img in enumerate(images_list):
-            if img is None:
-                # 使用全0张量填充
-                padded_images.append(torch.zeros(3, max_h, max_w, dtype=precision))
-                resize_list.append((max_h, max_w))
-            else:
-                c, h, w = img.shape
-                resize_list.append((h, w))
-                # Padding图像（只在需要时）
-                if h < max_h or w < max_w:
-                    pad_h = max_h - h
-                    pad_w = max_w - w
-                    padded_img = torch.nn.functional.pad(img, (0, pad_w, 0, pad_h), mode='constant', value=0)
-                else:
-                    padded_img = img
-                # 保证精度一致
-                if padded_img.dtype != precision:
-                    padded_img = padded_img.to(precision)
-                padded_images.append(padded_img)
-
-            # Padding掩码
-            mask = img_gt_masks[i] if i < len(img_gt_masks) else None
-            if mask is None:
-                padded_masks.append(torch.zeros(max_h, max_w, dtype=precision))
-                original_size_list.append((max_h, max_w))
-            else:
-                mask_h, mask_w = mask.shape[0], mask.shape[1]
-                original_size_list.append((mask_h, mask_w))
-
-                if mask_h < max_h or mask_w < max_w:
-                    pad_h = max_h - mask_h
-                    pad_w = max_w - mask_w
-                    padded_mask = torch.nn.functional.pad(mask, (0, pad_w, 0, pad_h), mode='constant', value=0)
-                else:
-                    padded_mask = mask
-                # 保证精度一致
-                if padded_mask.dtype != precision:
-                    padded_mask = padded_mask.to(precision)
-                padded_masks.append(padded_mask)
-
-        # 一次性 stack 所有张量
-        stacked_images = torch.stack(padded_images)  # [Batch, 3, MaxH, MaxW]
-        result['images'] = stacked_images
-        result['img_gt_tensor'] = torch.stack(padded_masks)
-        result['resize_list'] = resize_list
-        result['original_size_list'] = original_size_list
-
-    # 添加有效性标记
-    result['img_valid_mask'] = torch.tensor(has_image_flags, dtype=torch.bool)
-    # result['pc_valid_mask'] = torch.tensor(has_pc_flags, dtype=torch.bool)
-
-    """ ------------------------------------- 处理点云数据 ------------------------------------- """
-    # 过滤掉 None 值
-    valid_pcs = [pc for pc in point_clouds_list if pc is not None]
-    # valid_pc_masks = [mask for mask in pc_masks_list if mask is not None]
-    
-    if len(valid_pcs) == 0:
-        # 全为 None，使用全0张量填充
-        result['point_clouds'] = torch.zeros(batch_size, output_point_nums, 3, dtype=precision)
-        result['pc_gt_tensor'] = torch.zeros(batch_size, output_point_nums, dtype=precision)
-        result['pc_valid_lengths'] = torch.zeros(batch_size, dtype=torch.long)
-    else:
-        point_nums = []
-        padded_pcs = []
-        padded_pc_masks = []
-
-        for i, pc in enumerate(point_clouds_list):
-            if pc is None:
-                padded_pcs.append(torch.zeros(output_point_nums, 3, dtype=precision))
-                point_nums.append(0)
-            else:
-                num_points = min(pc.shape[0], output_point_nums)
-                pc_cut = pc[:num_points]  # 截取前num_points个
-                point_nums.append(num_points)
-
-                # Padding点云（只在需要时）
-                if num_points < output_point_nums:
-                    padding = torch.zeros(output_point_nums - num_points, 3, dtype=pc_cut.dtype)
-                    padded_pc = torch.cat([pc_cut, padding], dim=0)
-                else:
-                    padded_pc = pc_cut
-                # 保证精度一致
-                if padded_pc.dtype != precision:
-                    padded_pc = padded_pc.to(precision)
-                padded_pcs.append(padded_pc)
-
-            # Padding掩码
-            pc_mask = pc_gt_masks[i] if i < len(pc_gt_masks) else None
-            if pc_mask is None:
-                padded_pc_masks.append(torch.zeros(output_point_nums, dtype=precision))
-            else:
-                num_mask_points = pc_mask.shape[0]
-                if num_mask_points < output_point_nums:
-                    mask_padding = torch.zeros(output_point_nums - num_mask_points, dtype=pc_mask.dtype)
-                    padded_mask = torch.cat([pc_mask[:num_mask_points], mask_padding], dim=0)
-                else:
-                    padded_mask = pc_mask[:output_point_nums]
-                # 保证精度一致
-                if padded_mask.dtype != precision:
-                    padded_mask = padded_mask.to(precision)
-                padded_pc_masks.append(padded_mask)
-
-        result['point_clouds'] = torch.stack(padded_pcs)  # [Batch, MaxPoints, 3]
-        result['pc_gt_tensor'] = torch.stack(padded_pc_masks)
-        result['pc_valid_lengths'] = torch.tensor(point_nums, dtype=torch.long)
-
-    return result

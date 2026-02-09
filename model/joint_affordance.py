@@ -354,7 +354,6 @@ class JointAffordanceModel(nn.Module):
         image_grid_thw: Optional[torch.Tensor] = None,
         # 图像分割所需
         images: Optional[torch.Tensor] = None,
-        resize_list: Optional[List] = None,
         original_size_list: Optional[List] = None,
         img_valid_mask: Optional[torch.Tensor] = None,
         img_gt_tensor: Optional[torch.Tensor] = None,  # 后续可能支持，暂且保留
@@ -391,50 +390,35 @@ class JointAffordanceModel(nn.Module):
                 input_ids, point_hidden, self.seg_token_idx
             )  # [B, C']
 
-            # ---- 3. 2D 图像分割（仅有效样本）----
-            if images is not None:
-                # 确定有效样本索引
-                if img_valid_mask is not None:
-                    img_valid = img_valid_mask.bool()
-                else:
-                    img_valid = torch.ones(B, dtype=torch.bool, device=images.device)
-                valid_img_idx = img_valid.nonzero(as_tuple=True)[0]
+            # ---- 3. 2D 图像分割 ----
+            # 默认 images 非空（由数据集与 collate 保证），所有 rank 统一前向。
+            image_embeddings = self.image_decoder.get_visual_embs(images)
+            H, W = images.shape[-2], images.shape[-1]
+            input_size = (H, W)
+            original_size = tuple(original_size_list[0]) if original_size_list else (H, W)
 
-                if valid_img_idx.numel() > 0:
-                    valid_images = images[valid_img_idx]
-                    valid_img_emb = image_pred_emb[valid_img_idx]
+            all_image_logits = self.image_decoder(
+                image_pred_emb, image_embeddings, input_size, original_size
+            )
+            all_image_logits = all_image_logits.sigmoid_()
 
-                    image_embeddings = self.image_decoder.get_visual_embs(valid_images)
-                    H, W = valid_images.shape[-2], valid_images.shape[-1]
-                    input_size = tuple(resize_list[valid_img_idx[0].item()]) if resize_list else (H, W)
-                    original_size = tuple(original_size_list[valid_img_idx[0].item()]) if original_size_list else (H, W)
+            # 将无效样本的输出置零（不影响 loss 计算）
+            if img_valid_mask is not None:
+                mask_2d = img_valid_mask.bool().view(B, 1, 1).to(all_image_logits.dtype)
+                image_logits = all_image_logits * mask_2d
+            else:
+                image_logits = all_image_logits
 
-                    valid_image_logits = self.image_decoder(
-                        valid_img_emb, image_embeddings, input_size, original_size
-                    )
-                    valid_image_logits = valid_image_logits.sigmoid_()
+            # ---- 4. 3D 点云分割 ----
+            # 默认 point_clouds 非空（由数据集与 collate 保证），所有 rank 统一前向。
+            all_point_logits = self.point_decoder(point_pred_emb, point_clouds)
 
-                    # 回填到完整 batch
-                    image_logits = valid_images.new_zeros(B, *valid_image_logits.shape[1:])
-                    image_logits[valid_img_idx] = valid_image_logits
-
-            # ---- 4. 3D 点云分割（仅有效样本）----
-            if point_clouds is not None:
-                if pc_valid_lengths is not None:
-                    pc_valid = pc_valid_lengths > 0
-                else:
-                    pc_valid = torch.ones(B, dtype=torch.bool, device=point_clouds.device)
-                valid_pc_idx = pc_valid.nonzero(as_tuple=True)[0]
-
-                if valid_pc_idx.numel() > 0:
-                    valid_pcs = point_clouds[valid_pc_idx]
-                    valid_pc_emb = point_pred_emb[valid_pc_idx]
-
-                    valid_point_logits = self.point_decoder(valid_pc_emb, valid_pcs)
-
-                    # 回填到完整 batch
-                    point_logits = point_clouds.new_zeros(B, valid_point_logits.shape[-1])
-                    point_logits[valid_pc_idx] = valid_point_logits
+            # 将无效样本的输出置零
+            if pc_valid_lengths is not None:
+                mask_3d = (pc_valid_lengths > 0).to(all_point_logits.dtype).unsqueeze(-1)
+                point_logits = all_point_logits * mask_3d
+            else:
+                point_logits = all_point_logits
 
         return {
             "hidden_states": hidden_states,
