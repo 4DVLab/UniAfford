@@ -17,7 +17,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 from utils.base_dataset import JointDataset, JointDataSample
-from model.llava.constants import (
+from utils.common import (
     IGNORE_INDEX, IMAGE_TOKEN_INDEX, DEFAULT_IMAGE_TOKEN,
     DEFAULT_IMAGE_PATCH_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_IM_END_TOKEN
 )

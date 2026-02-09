@@ -1,4 +1,4 @@
-﻿"""
+"""
 联合可供性模型骨架。
 
 本文件定义一个高层模型管理基座，包含三个主要模块：
@@ -8,7 +8,7 @@
 
 实现刻意轻量，仅聚焦结构。
 """
-from typing import Optional, Dict, Any, List
+from typing import Optional, Dict, List
 from pathlib import Path
 
 import torch
@@ -91,7 +91,9 @@ class MLLMBackbone(nn.Module):
         labels: Optional[torch.Tensor] = None,
         images: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        **kwargs: Any,
+        pixel_values: Optional[torch.Tensor] = None,
+        image_grid_thw: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         model_inputs = {
             "input_ids": input_ids,
@@ -103,7 +105,12 @@ class MLLMBackbone(nn.Module):
             model_inputs["labels"] = labels
         if images is not None:
             model_inputs["pixel_values"] = images
-        model_inputs.update(kwargs)
+        if pixel_values is not None:
+            model_inputs["pixel_values"] = pixel_values
+        if image_grid_thw is not None:
+            model_inputs["image_grid_thw"] = image_grid_thw
+        if position_ids is not None:
+            model_inputs["position_ids"] = position_ids
         outputs = self.model(**model_inputs)
 
         # TODO: check outputs
@@ -455,17 +462,29 @@ class JointAffordanceModel(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         image_features: Optional[torch.Tensor] = None,
         point_features: Optional[torch.Tensor] = None,
-        **kwargs: Any,
+        pixel_values: Optional[torch.Tensor] = None,
+        image_grid_thw: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        original_size_list: Optional[List] = None,
+        resize_list: Optional[List] = None,
+        # 以下参数由 collate_fn 产生但 forward 不使用，显式接收以避免 **kwargs
+        images_clip: Optional[torch.Tensor] = None,
+        img_gt_tensor: Optional[torch.Tensor] = None,
+        img_valid_mask: Optional[torch.Tensor] = None,
+        pc_gt_tensor: Optional[torch.Tensor] = None,
+        pc_lengths: Optional[torch.Tensor] = None,
+        pc_valid_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, Optional[torch.Tensor]]:
-        # 兼容 Qwen 数据处理：pixel_values / image_grid_thw / position_ids 等通过 kwargs 透传
-        pixel_values = kwargs.pop("pixel_values", None)
+        # 兼容 Qwen 数据处理：pixel_values / image_grid_thw / position_ids 等
         images_for_mllm = pixel_values if pixel_values is not None else images
         mllm_out = self.mllm(
             input_ids=input_ids,
             labels=labels,
             images=images_for_mllm,
             attention_mask=attention_mask,
-            **kwargs,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            position_ids=position_ids,
         )
         hidden_states = mllm_out["hidden_states"]
 
@@ -487,8 +506,8 @@ class JointAffordanceModel(nn.Module):
                 image_embeddings = self.image_decoder.get_visual_embs(images_for_sam)
                 original_size_list, resize_list = self._normalize_size_lists(
                     images_for_sam,
-                    kwargs.get("original_size_list"),
-                    kwargs.get("resize_list"),
+                    original_size_list,
+                    resize_list,
                 )
                 pred_masks = self.image_decoder.generate_2d_masks(
                     image_pred_embeddings, image_embeddings, resize_list, original_size_list

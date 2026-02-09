@@ -292,12 +292,12 @@ def main():
             steps_per_epoch = max(1, len(train_dataset) // max(1, micro_bs))
         logger.info(f"每个 epoch 步数: {steps_per_epoch}, 总步数: {config.epochs * steps_per_epoch}")
 
-        optimizer_cls = (
-            DeepSpeedCPUAdam
-            if config.deepspeed.offload_optimizer_device == "cpu"
-            else torch.optim.AdamW
-        )
-        optimizer = optimizer_cls(
+        # optimizer_cls = (
+        #     DeepSpeedCPUAdam
+        #     if config.deepspeed.offload_optimizer_device == "cpu"
+        #     else torch.optim.AdamW
+        # )
+        optimizer = torch.optim.AdamW(
             params_to_train,
             weight_decay=config.weight_decay,
             betas=(config.beta1, config.beta2),
