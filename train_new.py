@@ -92,6 +92,35 @@ def create_param_groups(model, config, logger):
     return param_groups
 
 
+def compute_losses(output_dict, input_dict, model_engine):
+    """计算 image 和 point cloud 的损失，训练与验证共用。"""
+    device = model_engine.device
+    img_loss = torch.tensor(0.0, device=device)
+    pc_loss = torch.tensor(0.0, device=device)
+
+    module = model_engine.module
+    bce_w = module.config.bce_loss_weight if hasattr(module, "config") else 1.0
+    dice_w = module.config.dice_loss_weight if hasattr(module, "config") else 1.0
+
+    if output_dict.get("image_logits") is not None and "img_gt_tensor" in input_dict:
+        _, _, img_loss = calc.img_loss(
+            pred_masks=output_dict["image_logits"],
+            gt_masks=input_dict["img_gt_tensor"],
+            bce_loss_weight=bce_w,
+            dice_loss_weight=dice_w,
+        )
+
+    if output_dict.get("point_logits") is not None and "pc_gt_tensor" in input_dict:
+        _, _, pc_loss = calc.pc_loss(
+            pred_3d_masks=output_dict["point_logits"],
+            gt_3d_masks=input_dict["pc_gt_tensor"],
+            bce_loss_weight=bce_w,
+            dice_loss_weight=dice_w,
+        )
+
+    return img_loss, pc_loss
+
+
 def main():
     args = parse_args()
     config = TrainingConfig()
@@ -318,25 +347,7 @@ def main():
         for batch_idx, input_dict in enumerate(train_iter):
             input_dict = dict_to_cuda(input_dict, device=model_engine.device)
             output_dict = model_engine(**input_dict)
-
-            img_loss = torch.tensor(0.0, device=model_engine.device)
-            pc_loss = torch.tensor(0.0, device=model_engine.device)
-
-            if output_dict.get("image_logits") is not None and "img_gt_tensor" in input_dict:
-                _, _, img_loss = calc.img_loss(
-                    pred_masks=output_dict["image_logits"],
-                    gt_masks=input_dict["img_gt_tensor"],
-                    bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                    dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                )
-
-            if output_dict.get("point_logits") is not None and "pc_gt_tensor" in input_dict:
-                _, _, pc_loss = calc.pc_loss(
-                    pred_3d_masks=output_dict["point_logits"],
-                    gt_3d_masks=input_dict["pc_gt_tensor"],
-                    bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                    dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                )
+            img_loss, pc_loss = compute_losses(output_dict, input_dict, model_engine)
 
             loss = (img_loss + pc_loss) / max(1, config.grad_accumulation_steps)
             model_engine.backward(loss)
@@ -394,22 +405,8 @@ def main():
                 for val_dict in val_loader:
                     val_dict = dict_to_cuda(val_dict, device=model_engine.device)
                     val_output = model_engine(**val_dict)
-                    img_loss = torch.tensor(0.0, device=model_engine.device)
-                    pc_loss = torch.tensor(0.0, device=model_engine.device)
-                    if val_output.get("image_logits") is not None and "img_gt_tensor" in val_dict:
-                        _, _, img_loss = calc.img_loss(
-                            pred_masks=val_output["image_logits"],
-                            gt_masks=val_dict["img_gt_tensor"],
-                            bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                            dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                        )
-                    if val_output.get("point_logits") is not None and "pc_gt_tensor" in val_dict:
-                        _, _, pc_loss = calc.pc_loss(
-                            pred_3d_masks=val_output["point_logits"],
-                            gt_3d_masks=val_dict["pc_gt_tensor"],
-                            bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                            dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                        )
+                    img_loss, pc_loss = compute_losses(val_output, val_dict, model_engine)
+                    
                     total_val_loss += (img_loss + pc_loss).item()
                     total_val_img_loss += img_loss.item()
                     total_val_pc_loss += pc_loss.item()

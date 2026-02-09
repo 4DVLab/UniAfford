@@ -357,11 +357,11 @@ class JointAffordanceModel(nn.Module):
         resize_list: Optional[List] = None,
         original_size_list: Optional[List] = None,
         img_valid_mask: Optional[torch.Tensor] = None,
+        img_gt_tensor: Optional[torch.Tensor] = None,  # 后续可能支持，暂且保留
         # 点云分割所需
         point_clouds: Optional[torch.Tensor] = None,
-        pc_valid_mask: Optional[torch.Tensor] = None,
-        # 其余 collate_fn 产出的字段（img_gt_tensor、pc_gt_tensor 等）由训练脚本使用
-        **kwargs,
+        pc_valid_lengths: Optional[torch.Tensor] = None,
+        pc_gt_tensor: Optional[torch.Tensor] = None,  # 后续可能支持，暂且保留
     ) -> Dict[str, Optional[torch.Tensor]]:
         B = input_ids.shape[0] if input_ids is not None else 1
 
@@ -420,8 +420,8 @@ class JointAffordanceModel(nn.Module):
 
             # ---- 4. 3D 点云分割（仅有效样本）----
             if point_clouds is not None:
-                if pc_valid_mask is not None:
-                    pc_valid = pc_valid_mask.bool()
+                if pc_valid_lengths is not None:
+                    pc_valid = pc_valid_lengths > 0
                 else:
                     pc_valid = torch.ones(B, dtype=torch.bool, device=point_clouds.device)
                 valid_pc_idx = pc_valid.nonzero(as_tuple=True)[0]

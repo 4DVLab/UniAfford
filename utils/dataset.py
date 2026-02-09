@@ -676,6 +676,8 @@ def qwen3vl_collate_fn(
 
     return batch_out
 
+
+# discard
 def collate_fn(
         batch: List[Dict],
         tokenizer=None,
