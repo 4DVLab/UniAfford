@@ -497,7 +497,7 @@ class PointCloud(Modality):
         self.free_memory()
 
         # 删除self的记录
-        PointCloud.all[self.obj_type][self.id - 1] = None
+        # PointCloud.all[self.obj_type][self.id - 1] = None
         PointCloud.index[self.obj_type].pop(self.id, None)
 
     def _merge(self, other):
@@ -990,7 +990,7 @@ class Image(Modality):
         self.free_memory()
 
         # 删除self的记录
-        Image.all[self.obj_type][self.id - 1] = None
+        # Image.all[self.obj_type][self.id - 1] = None
         Image.index[self.obj_type].pop(self.id, None)
 
 class Instruction(Modality):
