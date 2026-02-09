@@ -1,9 +1,7 @@
 import argparse
 import os
 import logging
-from contextlib import nullcontext
 from functools import partial
-from datetime import datetime
 
 import deepspeed
 from deepspeed.ops.adam import DeepSpeedCPUAdam
@@ -17,56 +15,10 @@ from configs import TrainingConfig
 from model.joint_affordance import JointAffordanceModel
 from utils.base_dataset import JointDataset
 from utils.dataset import Qwen3VLDataset, Qwen3VLTrainDataset, qwen3vl_collate_fn
-from utils.common import dict_to_cuda
+from utils.common import dict_to_cuda, setup_logger
 from utils import calculator as calc
 
 local_rank = int(os.environ.get("LOCAL_RANK", 0))
-
-
-def setup_logger(log_dir, local_rank=0):
-    """
-    设置日志系统
-    - Rank 0: 同时输出到控制台和文件
-    - 其他 Rank: 只输出到控制台
-    """
-    logger = logging.getLogger("train")
-    logger.setLevel(logging.INFO)
-    
-    # 避免重复添加 handler
-    if logger.handlers:
-        return logger
-    
-    # 日志格式
-    formatter = logging.Formatter(
-        fmt="%(asctime)s [Rank %(rank)s] %(levelname)s - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S"
-    )
-    
-    # 控制台输出（所有进程）
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_handler.setFormatter(formatter)
-    logger.addHandler(console_handler)
-    
-    # 文件输出（仅 Rank 0）
-    if local_rank == 0 and log_dir:
-        os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
-        file_handler = logging.FileHandler(log_file, encoding='utf-8')
-        file_handler.setLevel(logging.INFO)
-        file_handler.setFormatter(formatter)
-        logger.addHandler(file_handler)
-        logger.info(f"日志文件已创建: {log_file}")
-    
-    # 为日志记录添加 rank 信息
-    old_factory = logging.getLogRecordFactory()
-    def record_factory(*args, **kwargs):
-        record = old_factory(*args, **kwargs)
-        record.rank = local_rank
-        return record
-    logging.setLogRecordFactory(record_factory)
-    
-    return logger
 
 def parse_args():
     parser = argparse.ArgumentParser(description="JointAffordance (Qwen) training")
@@ -76,6 +28,45 @@ def parse_args():
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--local_rank", type=int, default=0)
     return parser.parse_known_args()[0]
+
+
+def separate_gt(input_dict):
+    """从 input_dict 中分离出 gt 数据，返回 (model_inputs, gt_data)。
+    注意：会就地修改 input_dict（pop 掉 gt 键）。"""
+    gt_data = {
+        "img_gt_tensor": input_dict.pop("img_gt_tensor", None),
+        "pc_gt_tensor": input_dict.pop("pc_gt_tensor", None),
+    }
+    return input_dict, gt_data
+
+
+def compute_losses(output_dict, gt_data, model_engine):
+    """根据模型输出和 gt 计算图像/点云损失，返回 (img_loss, pc_loss)。"""
+    device = model_engine.device
+    img_loss = torch.tensor(0.0, device=device)
+    pc_loss = torch.tensor(0.0, device=device)
+
+    module = model_engine.module if hasattr(model_engine, "module") else model_engine
+    bce_w = module.config.bce_loss_weight if hasattr(module, "config") else 1.0
+    dice_w = module.config.dice_loss_weight if hasattr(module, "config") else 1.0
+
+    if output_dict.get("image_logits") is not None and gt_data.get("img_gt_tensor") is not None:
+        _, _, img_loss = calc.img_loss(
+            pred_masks=output_dict["image_logits"],
+            gt_masks=gt_data["img_gt_tensor"],
+            bce_loss_weight=bce_w,
+            dice_loss_weight=dice_w,
+        )
+
+    if output_dict.get("point_logits") is not None and gt_data.get("pc_gt_tensor") is not None:
+        _, _, pc_loss = calc.pc_loss(
+            pred_3d_masks=output_dict["point_logits"],
+            gt_3d_masks=gt_data["pc_gt_tensor"],
+            bce_loss_weight=bce_w,
+            dice_loss_weight=dice_w,
+        )
+
+    return img_loss, pc_loss
 
 
 def enable_trainable_modules(model, name_filters):
@@ -167,18 +158,7 @@ def main():
     
     """ ------------------------- 初始化模型 --------------------------- """
     logger.info("正在初始化模型...")
-    zero_init_context = nullcontext()
-    # 和SAM有冲突，暂不使用
-    # if config.deepspeed.zero_stage == 3:
-    #     logger.info("启用 ZeRO-3 初始化以避免显存峰值")
-    #     zero_init_context = deepspeed.zero.Init(
-    #         enabled=True,
-    #         config_dict_or_path=config.deepspeed.to_dict(),
-    #         remote_device=config.deepspeed.offload_param_device,
-    #         pin_memory=config.deepspeed.offload_param_pin_memory,
-    #     )
-    with zero_init_context:
-        model = JointAffordanceModel(model_config)
+    model = JointAffordanceModel(model_config)
     logger.info(f"模型初始化完成: {model_config.mllm.qwen_model_name_or_path}")
     
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
@@ -292,6 +272,7 @@ def main():
             steps_per_epoch = max(1, len(train_dataset) // max(1, micro_bs))
         logger.info(f"每个 epoch 步数: {steps_per_epoch}, 总步数: {config.epochs * steps_per_epoch}")
 
+        # 使用ds的优化器会导致模型无法分片，容易爆显存
         # optimizer_cls = (
         #     DeepSpeedCPUAdam
         #     if config.deepspeed.offload_optimizer_device == "cpu"
@@ -364,26 +345,10 @@ def main():
 
         for batch_idx, input_dict in enumerate(train_iter):
             input_dict = dict_to_cuda(input_dict, device=model_engine.device)
+            input_dict, gt_data = separate_gt(input_dict)
+
             output_dict = model_engine(**input_dict)
-
-            img_loss = torch.tensor(0.0, device=model_engine.device)
-            pc_loss = torch.tensor(0.0, device=model_engine.device)
-
-            if output_dict.get("image_logits") is not None and "img_gt_tensor" in input_dict:
-                _, _, img_loss = calc.img_loss(
-                    pred_masks=output_dict["image_logits"],
-                    gt_masks=input_dict["img_gt_tensor"],
-                    bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                    dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                )
-
-            if output_dict.get("point_logits") is not None and "pc_gt_tensor" in input_dict:
-                _, _, pc_loss = calc.pc_loss(
-                    pred_3d_masks=output_dict["point_logits"],
-                    gt_3d_masks=input_dict["pc_gt_tensor"],
-                    bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                    dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                )
+            img_loss, pc_loss = compute_losses(output_dict, gt_data, model_engine)
 
             loss = (img_loss + pc_loss) / max(1, config.grad_accumulation_steps)
             model_engine.backward(loss)
@@ -440,23 +405,11 @@ def main():
                 total_batches = 0
                 for val_dict in val_loader:
                     val_dict = dict_to_cuda(val_dict, device=model_engine.device)
+                    val_dict, val_gt = separate_gt(val_dict)
+
                     val_output = model_engine(**val_dict)
-                    img_loss = torch.tensor(0.0, device=model_engine.device)
-                    pc_loss = torch.tensor(0.0, device=model_engine.device)
-                    if val_output.get("image_logits") is not None and "img_gt_tensor" in val_dict:
-                        _, _, img_loss = calc.img_loss(
-                            pred_masks=val_output["image_logits"],
-                            gt_masks=val_dict["img_gt_tensor"],
-                            bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                            dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                        )
-                    if val_output.get("point_logits") is not None and "pc_gt_tensor" in val_dict:
-                        _, _, pc_loss = calc.pc_loss(
-                            pred_3d_masks=val_output["point_logits"],
-                            gt_3d_masks=val_dict["pc_gt_tensor"],
-                            bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                            dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
-                        )
+                    img_loss, pc_loss = compute_losses(val_output, val_gt, model_engine)
+
                     total_val_loss += (img_loss + pc_loss).item()
                     total_val_img_loss += img_loss.item()
                     total_val_pc_loss += pc_loss.item()

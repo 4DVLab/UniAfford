@@ -31,11 +31,11 @@ class DeepSpeedConfigs(Configs):
         reduce_bucket_size: float = 5e8,
         contiguous_gradients: bool = True,
         # 优化器 Offload（显存不足时把优化器状态放 CPU）
-        offload_optimizer_device: str = "cpu",
-        offload_optimizer_pin_memory: bool = True,
-        # 模型参数 Offload（大模型冷参数放 CPU）
-        offload_param_device: str = "cpu",
-        offload_param_pin_memory: bool = True,
+        # offload_optimizer_device: str = "cpu",
+        # offload_optimizer_pin_memory: bool = True,
+        # # 模型参数 Offload（大模型冷参数放 CPU）
+        # offload_param_device: str = "cpu",
+        # offload_param_pin_memory: bool = True,
         # 是否使用分层学习率（为 True 时不写 optimizer/scheduler）
         use_layerwise_lr: bool = True,
         # optimizer / scheduler 用到的训练参数
@@ -62,10 +62,10 @@ class DeepSpeedConfigs(Configs):
             reduce_scatter=reduce_scatter,
             reduce_bucket_size=reduce_bucket_size,
             contiguous_gradients=contiguous_gradients,
-            offload_optimizer_device=offload_optimizer_device,
-            offload_optimizer_pin_memory=offload_optimizer_pin_memory,
-            offload_param_device=offload_param_device,
-            offload_param_pin_memory=offload_param_pin_memory,
+            # offload_optimizer_device=offload_optimizer_device,
+            # offload_optimizer_pin_memory=offload_optimizer_pin_memory,
+            # offload_param_device=offload_param_device,
+            # offload_param_pin_memory=offload_param_pin_memory,
             use_layerwise_lr=use_layerwise_lr,
             lr=lr,
             weight_decay=weight_decay,
@@ -96,14 +96,14 @@ class DeepSpeedConfigs(Configs):
                 "reduce_scatter": self.reduce_scatter,
                 "reduce_bucket_size": int(self.reduce_bucket_size),
                 "contiguous_gradients": self.contiguous_gradients,
-                "offload_optimizer": {
-                    "device": self.offload_optimizer_device,
-                    "pin_memory": self.offload_optimizer_pin_memory,
-                },
-                "offload_param": {
-                    "device": self.offload_param_device,
-                    "pin_memory": self.offload_param_pin_memory,
-                },
+                # "offload_optimizer": {
+                #     "device": self.offload_optimizer_device,
+                #     "pin_memory": self.offload_optimizer_pin_memory,
+                # },
+                # "offload_param": {
+                #     "device": self.offload_param_device,
+                #     "pin_memory": self.offload_param_pin_memory,
+                # },
             },
         }
         if not self.use_layerwise_lr:

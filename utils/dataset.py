@@ -577,7 +577,6 @@ def qwen3vl_collate_fn(
     if len(valid_images) == 0:
         dummy_h, dummy_w = output_image_size
         batch_out["images"] = torch.zeros(batch_size, 3, dummy_h, dummy_w, dtype=precision)
-        batch_out["images_clip"] = batch_out["images"]
         batch_out["img_gt_tensor"] = torch.zeros(batch_size, dummy_h, dummy_w, dtype=precision)
         batch_out["resize_list"] = [(dummy_h, dummy_w)] * batch_size
         batch_out["original_size_list"] = [(dummy_h, dummy_w)] * batch_size
@@ -624,7 +623,6 @@ def qwen3vl_collate_fn(
 
         stacked_images = torch.stack(padded_images)
         batch_out["images"] = stacked_images
-        batch_out["images_clip"] = stacked_images
         batch_out["img_gt_tensor"] = torch.stack(padded_masks)
         batch_out["resize_list"] = resize_list
         batch_out["original_size_list"] = original_size_list
@@ -673,9 +671,8 @@ def qwen3vl_collate_fn(
 
         batch_out["point_clouds"] = torch.stack(padded_pcs)
         batch_out["pc_gt_tensor"] = torch.stack(padded_pc_masks)
-        batch_out["pc_lengths"] = torch.tensor(point_nums, dtype=torch.long)
+        batch_out["pc_valid_lengths"] = torch.tensor(point_nums, dtype=torch.long)
 
-    batch_out["pc_valid_mask"] = torch.tensor(has_pc_flags, dtype=torch.bool)
     return batch_out
 
 def collate_fn(
@@ -760,7 +757,6 @@ def collate_fn(
         # 全为 None，使用全0张量填充
         dummy_h, dummy_w = output_image_size  # 默认尺寸
         result['images'] = torch.zeros(batch_size, 3, dummy_h, dummy_w, dtype=precision)
-        result['images_clip'] = result['images']
         result['img_gt_tensor'] = torch.zeros(batch_size, dummy_h, dummy_w, dtype=precision)
         result['resize_list'] = [(dummy_h, dummy_w)] * batch_size
         result['original_size_list'] = [(dummy_h, dummy_w)] * batch_size
@@ -824,7 +820,6 @@ def collate_fn(
         # 一次性 stack 所有张量
         stacked_images = torch.stack(padded_images)  # [Batch, 3, MaxH, MaxW]
         result['images'] = stacked_images
-        result['images_clip'] = stacked_images  # 直接引用，不复制
         result['img_gt_tensor'] = torch.stack(padded_masks)
         result['resize_list'] = resize_list
         result['original_size_list'] = original_size_list
@@ -885,8 +880,6 @@ def collate_fn(
 
         result['point_clouds'] = torch.stack(padded_pcs)  # [Batch, MaxPoints, 3]
         result['pc_gt_tensor'] = torch.stack(padded_pc_masks)
-        result['pc_lengths'] = torch.tensor(point_nums, dtype=torch.long)
+        result['pc_valid_lengths'] = torch.tensor(point_nums, dtype=torch.long)
 
-    # 添加有效性标记
-    result['pc_valid_mask'] = torch.tensor(has_pc_flags, dtype=torch.bool)
     return result

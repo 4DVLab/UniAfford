@@ -455,25 +455,21 @@ class JointAffordanceModel(nn.Module):
 
     def forward(
         self,
+        # Qwen 推理所需
         input_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
-        images: Optional[torch.Tensor] = None,
-        point_clouds: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        image_features: Optional[torch.Tensor] = None,
-        point_features: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
+        # 图像分割所需
+        images: Optional[torch.Tensor] = None,
         original_size_list: Optional[List] = None,
         resize_list: Optional[List] = None,
-        # 以下参数由 collate_fn 产生但 forward 不使用，显式接收以避免 **kwargs
-        images_clip: Optional[torch.Tensor] = None,
-        img_gt_tensor: Optional[torch.Tensor] = None,
         img_valid_mask: Optional[torch.Tensor] = None,
-        pc_gt_tensor: Optional[torch.Tensor] = None,
-        pc_lengths: Optional[torch.Tensor] = None,
-        pc_valid_mask: Optional[torch.Tensor] = None,
+        # 点云分割所需
+        point_clouds: Optional[torch.Tensor] = None,
+        pc_valid_lengths: Optional[torch.Tensor] = None,
     ) -> Dict[str, Optional[torch.Tensor]]:
         # 兼容 Qwen 数据处理：pixel_values / image_grid_thw / position_ids 等
         images_for_mllm = pixel_values if pixel_values is not None else images
@@ -488,8 +484,8 @@ class JointAffordanceModel(nn.Module):
         )
         hidden_states = mllm_out["hidden_states"]
 
-        pred_masks = None
-        pred_3d_masks = None
+        image_logits = None
+        point_logits = None
         if hidden_states is not None:
             image_hidden = self.image_decoder.project_hidden_states(hidden_states)
             point_hidden = self.point_decoder.project_hidden_states(hidden_states)
@@ -509,27 +505,17 @@ class JointAffordanceModel(nn.Module):
                     original_size_list,
                     resize_list,
                 )
-                pred_masks = self.image_decoder.generate_2d_masks(
+                image_logits = self.image_decoder.generate_2d_masks(
                     image_pred_embeddings, image_embeddings, resize_list, original_size_list
                 )
-                if pred_masks is not None:
-                    pred_masks = pred_masks.sigmoid_()
+                if image_logits is not None:
+                    image_logits = image_logits.sigmoid_()
 
             if point_clouds is not None:
-                pred_3d_masks = self.point_decoder.generate_3d_masks(
+                point_logits = self.point_decoder.generate_3d_masks(
                     point_pred_embeddings, point_clouds
                 )
 
-        image_logits = pred_masks
-        point_logits = pred_3d_masks
-        if image_logits is None:
-            image_logits = self.image_decoder(
-                hidden_states, images=images, image_features=image_features
-            )
-        if point_logits is None:
-            point_logits = self.point_decoder(
-                hidden_states, point_clouds=point_clouds, point_features=point_features
-            )
         return {
             "hidden_states": hidden_states,
             "image_logits": image_logits,

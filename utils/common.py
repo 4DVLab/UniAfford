@@ -1,16 +1,75 @@
 import os
 import shutil
+import logging
+from datetime import datetime
+
 import torch
 import torch.distributed as dist
-import logging
 
-# 建议初始化日志（全局配置）
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[logging.StreamHandler()]
-)
 logger = logging.getLogger(__name__)
+
+
+# ====================== 分布式日志工具 ======================
+
+class _RankFilter(logging.Filter):
+    """为 log record 注入 rank 属性，同时可限制只放行指定 rank。"""
+
+    def __init__(self, rank: int, max_rank: int = -1):
+        super().__init__()
+        self.rank = rank
+        self.max_rank = max_rank          # -1 表示不限制
+
+    def filter(self, record):
+        record.rank = self.rank           # 注入 rank，供 %(rank)s 使用
+        if self.max_rank >= 0:
+            return self.rank <= self.max_rank
+        return True
+
+
+def setup_logger(log_dir, local_rank=0, max_console_rank=1):
+    """
+    设置日志系统。
+    - Rank 0:   控制台 + 文件
+    - Rank 1:   仅控制台
+    - 其他 Rank: 静默（不输出到控制台，也不写文件）
+    - 文件中保存完整输出（仅 Rank 0 写文件，避免多进程 IO 冲突）
+    """
+    train_logger = logging.getLogger("train")
+    train_logger.setLevel(logging.INFO)
+
+    # 避免重复添加 handler
+    if train_logger.handlers:
+        return train_logger
+
+    formatter = logging.Formatter(
+        fmt="%(asctime)s [Rank %(rank)s] %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    # 控制台输出：仅 rank <= max_console_rank 放行
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(formatter)
+    console_handler.addFilter(_RankFilter(local_rank, max_rank=max_console_rank))
+    train_logger.addHandler(console_handler)
+
+    # 文件输出：仅 Rank 0 写文件（记录完整日志）
+    if local_rank == 0 and log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = os.path.join(log_dir, f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        file_handler = logging.FileHandler(log_file, encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        file_handler.addFilter(_RankFilter(local_rank))     # 只注入 rank，不限制
+        train_logger.addHandler(file_handler)
+
+    # 对 logger 自身也加一个 filter 保证所有 record 都有 rank 属性
+    train_logger.addFilter(_RankFilter(local_rank))
+
+    if local_rank == 0 and log_dir:
+        train_logger.info(f"日志文件已创建: {log_file}")
+
+    return train_logger
 
 
 """  ----------------------------------------------- utils functions ----------------------------------------------  """
