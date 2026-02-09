@@ -1,6 +1,7 @@
 import argparse
 import os
 import logging
+from contextlib import nullcontext
 from functools import partial
 
 import deepspeed
@@ -28,45 +29,6 @@ def parse_args():
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--local_rank", type=int, default=0)
     return parser.parse_known_args()[0]
-
-
-def separate_gt(input_dict):
-    """从 input_dict 中分离出 gt 数据，返回 (model_inputs, gt_data)。
-    注意：会就地修改 input_dict（pop 掉 gt 键）。"""
-    gt_data = {
-        "img_gt_tensor": input_dict.pop("img_gt_tensor", None),
-        "pc_gt_tensor": input_dict.pop("pc_gt_tensor", None),
-    }
-    return input_dict, gt_data
-
-
-def compute_losses(output_dict, gt_data, model_engine):
-    """根据模型输出和 gt 计算图像/点云损失，返回 (img_loss, pc_loss)。"""
-    device = model_engine.device
-    img_loss = torch.tensor(0.0, device=device)
-    pc_loss = torch.tensor(0.0, device=device)
-
-    module = model_engine.module if hasattr(model_engine, "module") else model_engine
-    bce_w = module.config.bce_loss_weight if hasattr(module, "config") else 1.0
-    dice_w = module.config.dice_loss_weight if hasattr(module, "config") else 1.0
-
-    if output_dict.get("image_logits") is not None and gt_data.get("img_gt_tensor") is not None:
-        _, _, img_loss = calc.img_loss(
-            pred_masks=output_dict["image_logits"],
-            gt_masks=gt_data["img_gt_tensor"],
-            bce_loss_weight=bce_w,
-            dice_loss_weight=dice_w,
-        )
-
-    if output_dict.get("point_logits") is not None and gt_data.get("pc_gt_tensor") is not None:
-        _, _, pc_loss = calc.pc_loss(
-            pred_3d_masks=output_dict["point_logits"],
-            gt_3d_masks=gt_data["pc_gt_tensor"],
-            bce_loss_weight=bce_w,
-            dice_loss_weight=dice_w,
-        )
-
-    return img_loss, pc_loss
 
 
 def enable_trainable_modules(model, name_filters):
@@ -158,7 +120,18 @@ def main():
     
     """ ------------------------- 初始化模型 --------------------------- """
     logger.info("正在初始化模型...")
-    model = JointAffordanceModel(model_config)
+    zero_init_context = nullcontext()
+    # 和SAM有冲突，暂不使用
+    # if config.deepspeed.zero_stage == 3:
+    #     logger.info("启用 ZeRO-3 初始化以避免显存峰值")
+    #     zero_init_context = deepspeed.zero.Init(
+    #         enabled=True,
+    #         config_dict_or_path=config.deepspeed.to_dict(),
+    #         remote_device=config.deepspeed.offload_param_device,
+    #         pin_memory=config.deepspeed.offload_param_pin_memory,
+    #     )
+    with zero_init_context:
+        model = JointAffordanceModel(model_config)
     logger.info(f"模型初始化完成: {model_config.mllm.qwen_model_name_or_path}")
     
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
@@ -259,10 +232,10 @@ def main():
     logger.info(f"训练配置: epochs={config.epochs}, micro_batch_size={config.deepspeed.train_micro_batch_size_per_gpu}, "
                 f"gradient_accumulation={config.deepspeed.gradient_accumulation_steps}")
 
-    if config.deepspeed.zero_stage == 3 and config.deepspeed.offload_param_device == "cpu":
-        logger.info("ZeRO-3 + CPU 参数卸载：初始化前将模型留在 CPU")
-        model = model.cpu()
-        torch.cuda.empty_cache()
+    # if config.deepspeed.zero_stage == 3 and config.deepspeed.offload_param_device == "cpu":
+    #     logger.info("ZeRO-3 + CPU 参数卸载：初始化前将模型留在 CPU")
+    #     model = model.cpu()
+    #     torch.cuda.empty_cache()
 
     if config.use_layerwise_lr:
         logger.info("使用分层学习率 + 自定义优化器/调度器")
@@ -272,7 +245,6 @@ def main():
             steps_per_epoch = max(1, len(train_dataset) // max(1, micro_bs))
         logger.info(f"每个 epoch 步数: {steps_per_epoch}, 总步数: {config.epochs * steps_per_epoch}")
 
-        # 使用ds的优化器会导致模型无法分片，容易爆显存
         # optimizer_cls = (
         #     DeepSpeedCPUAdam
         #     if config.deepspeed.offload_optimizer_device == "cpu"
@@ -345,10 +317,26 @@ def main():
 
         for batch_idx, input_dict in enumerate(train_iter):
             input_dict = dict_to_cuda(input_dict, device=model_engine.device)
-            input_dict, gt_data = separate_gt(input_dict)
-
             output_dict = model_engine(**input_dict)
-            img_loss, pc_loss = compute_losses(output_dict, gt_data, model_engine)
+
+            img_loss = torch.tensor(0.0, device=model_engine.device)
+            pc_loss = torch.tensor(0.0, device=model_engine.device)
+
+            if output_dict.get("image_logits") is not None and "img_gt_tensor" in input_dict:
+                _, _, img_loss = calc.img_loss(
+                    pred_masks=output_dict["image_logits"],
+                    gt_masks=input_dict["img_gt_tensor"],
+                    bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
+                    dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
+                )
+
+            if output_dict.get("point_logits") is not None and "pc_gt_tensor" in input_dict:
+                _, _, pc_loss = calc.pc_loss(
+                    pred_3d_masks=output_dict["point_logits"],
+                    gt_3d_masks=input_dict["pc_gt_tensor"],
+                    bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
+                    dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
+                )
 
             loss = (img_loss + pc_loss) / max(1, config.grad_accumulation_steps)
             model_engine.backward(loss)
@@ -405,11 +393,23 @@ def main():
                 total_batches = 0
                 for val_dict in val_loader:
                     val_dict = dict_to_cuda(val_dict, device=model_engine.device)
-                    val_dict, val_gt = separate_gt(val_dict)
-
                     val_output = model_engine(**val_dict)
-                    img_loss, pc_loss = compute_losses(val_output, val_gt, model_engine)
-
+                    img_loss = torch.tensor(0.0, device=model_engine.device)
+                    pc_loss = torch.tensor(0.0, device=model_engine.device)
+                    if val_output.get("image_logits") is not None and "img_gt_tensor" in val_dict:
+                        _, _, img_loss = calc.img_loss(
+                            pred_masks=val_output["image_logits"],
+                            gt_masks=val_dict["img_gt_tensor"],
+                            bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
+                            dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
+                        )
+                    if val_output.get("point_logits") is not None and "pc_gt_tensor" in val_dict:
+                        _, _, pc_loss = calc.pc_loss(
+                            pred_3d_masks=val_output["point_logits"],
+                            gt_3d_masks=val_dict["pc_gt_tensor"],
+                            bce_loss_weight=model_engine.module.config.bce_loss_weight if hasattr(model_engine.module, "config") else 1.0,
+                            dice_loss_weight=model_engine.module.config.dice_loss_weight if hasattr(model_engine.module, "config") else 1.0,
+                        )
                     total_val_loss += (img_loss + pc_loss).item()
                     total_val_img_loss += img_loss.item()
                     total_val_pc_loss += pc_loss.item()

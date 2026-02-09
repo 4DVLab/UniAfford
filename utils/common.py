@@ -28,45 +28,46 @@ class _RankFilter(logging.Filter):
 
 def setup_logger(log_dir, local_rank=0, max_console_rank=1):
     """
-    设置日志系统。
-    - Rank 0:   控制台 + 文件
-    - Rank 1:   仅控制台
-    - 其他 Rank: 静默（不输出到控制台，也不写文件）
-    - 文件中保存完整输出（仅 Rank 0 写文件，避免多进程 IO 冲突）
+    设置分布式训练日志系统。
+
+    - 控制台: 仅 rank <= max_console_rank 输出（默认 rank 0/1）
+    - 日志文件: 所有 rank 各自写独立文件，保存完整输出
+      rank 0 → train_<timestamp>.log
+      rank N → train_<timestamp>_rankN.log
     """
     train_logger = logging.getLogger("train")
-    train_logger.setLevel(logging.INFO)
+    train_logger.setLevel(logging.DEBUG)
 
     # 避免重复添加 handler
     if train_logger.handlers:
         return train_logger
+
+    # 先挂 logger 级 filter，保证所有 record 都有 rank 属性
+    train_logger.addFilter(_RankFilter(local_rank))
 
     formatter = logging.Formatter(
         fmt="%(asctime)s [Rank %(rank)s] %(levelname)s - %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # 控制台输出：仅 rank <= max_console_rank 放行
+    # 控制台: 仅 rank <= max_console_rank 放行
     console_handler = logging.StreamHandler()
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(formatter)
     console_handler.addFilter(_RankFilter(local_rank, max_rank=max_console_rank))
     train_logger.addHandler(console_handler)
 
-    # 文件输出：仅 Rank 0 写文件（记录完整日志）
-    if local_rank == 0 and log_dir:
+    # 日志文件: 所有 rank 各自写独立文件
+    if log_dir:
         os.makedirs(log_dir, exist_ok=True)
-        log_file = os.path.join(log_dir, f"train_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        log_filename = f"train_{timestamp}.log" if local_rank == 0 else f"train_{timestamp}_rank{local_rank}.log"
+        log_file = os.path.join(log_dir, log_filename)
         file_handler = logging.FileHandler(log_file, encoding="utf-8")
         file_handler.setLevel(logging.DEBUG)
         file_handler.setFormatter(formatter)
-        file_handler.addFilter(_RankFilter(local_rank))     # 只注入 rank，不限制
+        file_handler.addFilter(_RankFilter(local_rank))   # 注入 rank 属性
         train_logger.addHandler(file_handler)
-
-    # 对 logger 自身也加一个 filter 保证所有 record 都有 rank 属性
-    train_logger.addFilter(_RankFilter(local_rank))
-
-    if local_rank == 0 and log_dir:
         train_logger.info(f"日志文件已创建: {log_file}")
 
     return train_logger

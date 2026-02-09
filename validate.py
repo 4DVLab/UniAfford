@@ -420,7 +420,7 @@ def save_batch_predictions(input_dict, output_dict, batch_idx, output_dir, datas
                 points = np.transpose(points, (1, 0))
 
             mask_3d = _to_float_mask(pred_mask_3d).reshape(-1)
-            pc_lengths = input_dict.get("pc_valid_lengths")
+            pc_lengths = input_dict.get("pc_lengths")
             if isinstance(pc_lengths, torch.Tensor) and pc_lengths.shape[0] > i:
                 num_points = int(pc_lengths[i].item())
             else:

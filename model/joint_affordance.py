@@ -89,28 +89,23 @@ class MLLMBackbone(nn.Module):
         self,
         input_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
-        images: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
-    ) -> Optional[torch.Tensor]:
+    ) -> dict:
+        # 构建 Qwen 模型输入，自动过滤 None 值
         model_inputs = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
-            "output_hidden_states": True,
-            "return_dict": True,
+            "labels": labels,
+            "pixel_values": pixel_values,
+            "image_grid_thw": image_grid_thw,
+            "position_ids": position_ids,
         }
-        if labels is not None:
-            model_inputs["labels"] = labels
-        if images is not None:
-            model_inputs["pixel_values"] = images
-        if pixel_values is not None:
-            model_inputs["pixel_values"] = pixel_values
-        if image_grid_thw is not None:
-            model_inputs["image_grid_thw"] = image_grid_thw
-        if position_ids is not None:
-            model_inputs["position_ids"] = position_ids
+        model_inputs = {k: v for k, v in model_inputs.items() if v is not None}
+        model_inputs["output_hidden_states"] = True
+        model_inputs["return_dict"] = True
         outputs = self.model(**model_inputs)
 
         # TODO: check outputs
@@ -145,19 +140,8 @@ class ImageHiddenStateDecoder(nn.Module):
             for param in self.visual_model.mask_decoder.parameters():
                 param.requires_grad = True
 
-        # 使用 SAM 的 image_encoder 作为图像特征提取器
         self.image_encoder = self.visual_model.image_encoder
-        # self.cross_attn = nn.MultiheadAttention(
-        #     embed_dim=text_hidden_size, num_heads=config.num_heads, batch_first=True
-        # )
-        # self.ffn = nn.Sequential(
-        #     nn.Linear(text_hidden_size,text_hidden_size * 4),
-        #     nn.GELU(),
-        #     nn.Linear(text_hidden_size * 4, text_hidden_size),
-        # )
-        # self.out_proj = nn.Linear(text_hidden_size, config.out_dim)
 
-        
         text_fc = nn.Sequential(OrderedDict([
             ("fc1", nn.Linear(text_hidden_size, 2*text_hidden_size)),
             ("relu", nn.ReLU(inplace=True)),
@@ -169,23 +153,8 @@ class ImageHiddenStateDecoder(nn.Module):
             param.requires_grad = True
 
 
-    # def forward(
-    #     self,
-    #     hidden_states: Optional[torch.Tensor],
-    #     images: Optional[torch.Tensor] = None,
-    #     image_features: Optional[torch.Tensor] = None,
-    # ) -> Optional[torch.Tensor]:
-    #     if hidden_states is None:
-    #         return None
-    #     if image_features is None:
-    #         if images is None:
-    #             return None
-    #         image_features = self.get_visual_embs(images)
-    #     attn_out, _ = self.cross_attn(hidden_states, image_features, image_features)
-    #     x = self.ffn(attn_out)
-    #     return self.out_proj(x)
-
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """将 LLM 隐藏状态投影到 SAM prompt 空间。"""
         assert len(self.text_hidden_fcs) == 1
         projected = self.text_hidden_fcs[0](hidden_states)
         if projected.dim() == 2:
@@ -193,61 +162,55 @@ class ImageHiddenStateDecoder(nn.Module):
         return projected
 
     def get_visual_embs(self, pixel_values: torch.FloatTensor):
+        """使用 SAM image_encoder 提取图像特征，不计算梯度。"""
         with torch.no_grad():
             return self.visual_model.image_encoder(pixel_values)
 
-    def generate_2d_masks(
+    def forward(
         self,
-        pred_embeddings_list: List[torch.Tensor],
+        pred_embeddings: torch.Tensor,
         image_embeddings: torch.Tensor,
-        resize_list: List[List],
-        original_size_list: List[List],
-    ) -> Optional[torch.Tensor]:
-        batch_size = len(pred_embeddings_list)
-        valid_indices = [i for i in range(batch_size) if len(pred_embeddings_list[i]) > 0]
-        if len(valid_indices) == 0:
-            return None
+        input_size: tuple,
+        original_size: tuple,
+    ) -> torch.Tensor:
+        """
+        批量生成 2D 分割掩码。
 
-        # HACK: 逐个推理预测掩码，后续优化
-        pred_masks_list = []
-        for i in valid_indices:
-            (sparse_embeddings, dense_embeddings) = self.visual_model.prompt_encoder(
-                points=None, boxes=None, masks=None,
-                text_embeds=pred_embeddings_list[i].unsqueeze(1),
-            )
-            sparse_embeddings = sparse_embeddings.to(pred_embeddings_list[i].dtype)
-            low_res_masks, _ = self.visual_model.mask_decoder(
-                image_embeddings=image_embeddings[i].unsqueeze(0),
-                image_pe=self.visual_model.prompt_encoder.get_dense_pe(),
-                sparse_prompt_embeddings=sparse_embeddings,
-                dense_prompt_embeddings=dense_embeddings,
-                multimask_output=False,
-            )
-            pred_mask = self.visual_model.postprocess_masks(
-                low_res_masks,
-                input_size=resize_list[i],
-                original_size=original_size_list[i],
-            )
-            pred_masks_list.append(pred_mask[:, 0])
+        Args:
+            pred_embeddings: [B, C] — 每个样本的 SEG token 投影嵌入（已 mean-pool）
+            image_embeddings: [B, C_sam, H_emb, W_emb] — SAM 图像编码特征
+            input_size: (H, W) — 输入图像尺寸（batch 内统一）
+            original_size: (H, W) — 原始图像尺寸（batch 内统一）
 
-        batch_pred_masks = []
-        for pred_mask in pred_masks_list:
-            if pred_mask.shape[0] > 1:
-                pred_mask = pred_mask.mean(dim=0, keepdim=True)
-            batch_pred_masks.append(pred_mask[0])
-        batch_pred_masks = torch.stack(batch_pred_masks, dim=0)
+        Returns:
+            pred_masks: [B, H_orig, W_orig]
+        """
+        # [B, C] → [B, 1, C]，作为 prompt_encoder 的 text_embeds 输入
+        text_embeds = pred_embeddings.unsqueeze(1)
 
-        if len(valid_indices) < batch_size:
-            height, width = batch_pred_masks.shape[1], batch_pred_masks.shape[2]
-            full_pred_masks = torch.zeros(
-                batch_size, height, width,
-                dtype=batch_pred_masks.dtype,
-                device=batch_pred_masks.device,
-            )
-            for idx, valid_idx in enumerate(valid_indices):
-                full_pred_masks[valid_idx] = batch_pred_masks[idx]
-            return full_pred_masks
-        return batch_pred_masks
+        sparse_embeddings, dense_embeddings = self.visual_model.prompt_encoder(
+            points=None, boxes=None, masks=None,
+            text_embeds=text_embeds,
+        )
+        sparse_embeddings = sparse_embeddings.to(pred_embeddings.dtype)
+
+        # mask_decoder 已支持 batch：image_embeddings [B,...] 与 sparse [B,...] 一一对应
+        low_res_masks, _ = self.visual_model.mask_decoder(
+            image_embeddings=image_embeddings,
+            image_pe=self.visual_model.prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=False,
+        )
+        # low_res_masks: [B, 1, H_low, W_low]
+
+        pred_masks = self.visual_model.postprocess_masks(
+            low_res_masks,
+            input_size=input_size,
+            original_size=original_size,
+        )
+        # [B, 1, H, W] → [B, H, W]
+        return pred_masks[:, 0]
 
 
 class PointCloudHiddenStateDecoder(nn.Module):
@@ -260,19 +223,8 @@ class PointCloudHiddenStateDecoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        # 使用 PointNet++ 编码器提取点云特征
         self.point_encoder = PointCloudEncoder(out_dim=text_hidden_size)
-        # self.cross_attn = nn.MultiheadAttention(
-        #     embed_dim=text_hidden_size, num_heads=config.num_heads, batch_first=True
-        # )
-        # self.ffn = nn.Sequential(
-        #     nn.Linear(text_hidden_size, text_hidden_size * 4),
-        #     nn.GELU(),
-        #     nn.Linear(text_hidden_size * 4, text_hidden_size),
-        # )
-        # self.out_proj = nn.Linear(text_hidden_size, config.out_dim)
 
-        # TODO: 移动到JointAff中
         text_fc = nn.Sequential(OrderedDict([
             ("fc1", nn.Linear(text_hidden_size, 2*text_hidden_size)),
             ("relu", nn.ReLU(inplace=True)),
@@ -292,82 +244,40 @@ class PointCloudHiddenStateDecoder(nn.Module):
         for param in self.point_cloud_segmentor.parameters():
             param.requires_grad = True
 
-    # def forward(
-    #     self,
-    #     hidden_states: Optional[torch.Tensor],
-    #     point_clouds: Optional[torch.Tensor] = None,
-    #     point_features: Optional[torch.Tensor] = None,
-    # ) -> Optional[torch.Tensor]:
-    #     if hidden_states is None:
-    #         return None
-    #     if point_features is None:
-    #         if point_clouds is None:
-    #             return None
-    #         if point_clouds.dim() == 3 and point_clouds.shape[1] != 3:
-    #             point_clouds = point_clouds.permute(0, 2, 1).contiguous()
-    #         point_features = self.point_encoder(point_clouds)
-    #         if point_features.dim() == 2:
-    #             point_features = point_features.unsqueeze(1)
-    #     attn_out, _ = self.cross_attn(hidden_states, point_features, point_features)
-    #     x = self.ffn(attn_out)
-    #     return self.out_proj(x)
-
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
         assert len(self.text_hidden_fcs) == 1
         projected = self.text_hidden_fcs[0](hidden_states)
         if projected.dim() == 2:
             projected = projected.unsqueeze(0)
         return projected
 
-    def generate_3d_masks(
+    def forward(
         self,
-        pred_embeddings_list: List[torch.Tensor],
+        pred_embeddings: torch.Tensor,
         point_clouds: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
+    ) -> torch.Tensor:
+        """
+        批量生成 3D 分割掩码。
+
+        Args:
+            pred_embeddings: [B, C] — 每个样本的 SEG token 投影嵌入（已 mean-pool）
+            point_clouds: [B, N, 3] 或 [B, 3, N]
+
+        Returns:
+            pred_masks: [B, N]
+        """
         if point_clouds.shape[1] != 3:
             point_clouds = point_clouds.permute(0, 2, 1)
 
-        batch_size = point_clouds.shape[0]
-        num_points = point_clouds.shape[2]
-        valid_indices = [i for i in range(batch_size) if len(pred_embeddings_list[i]) > 0]
-        if len(valid_indices) == 0:
-            return None
-
-        valid_point_clouds = point_clouds[valid_indices]
-        max_text_len = max(len(pred_embeddings_list[i]) for i in valid_indices)
-        embed_dim = pred_embeddings_list[valid_indices[0]].shape[-1]
-
-        batch_text_feat = torch.zeros(
-            len(valid_indices), max_text_len, embed_dim,
-            dtype=pred_embeddings_list[valid_indices[0]].dtype,
-            device=pred_embeddings_list[valid_indices[0]].device,
-        )
-        batch_text_mask = torch.zeros(
-            len(valid_indices), max_text_len,
-            dtype=torch.bool,
-            device=pred_embeddings_list[valid_indices[0]].device,
-        )
-        for batch_idx, orig_idx in enumerate(valid_indices):
-            text_len = len(pred_embeddings_list[orig_idx])
-            batch_text_feat[batch_idx, :text_len] = pred_embeddings_list[orig_idx]
-            batch_text_mask[batch_idx, :text_len] = True
-
-        batch_pred_3d_masks = self.point_cloud_segmentor(
-            valid_point_clouds,
-            batch_text_feat,
-            batch_text_mask,
+        # [B, C] → [B, 1, C]，PointCloud3DSegmentor 接受 [B, L, C] 的 text_feat
+        text_feat = pred_embeddings.unsqueeze(1)
+        text_mask = torch.ones(
+            text_feat.shape[0], 1,
+            dtype=torch.bool, device=text_feat.device,
         )
 
-        if len(valid_indices) < batch_size:
-            full_pred_3d_masks = torch.zeros(
-                batch_size, num_points,
-                dtype=batch_pred_3d_masks.dtype,
-                device=batch_pred_3d_masks.device,
-            )
-            for idx, valid_idx in enumerate(valid_indices):
-                full_pred_3d_masks[valid_idx] = batch_pred_3d_masks[idx]
-            return full_pred_3d_masks
-        return batch_pred_3d_masks
+        return self.point_cloud_segmentor(point_clouds, text_feat, text_mask)
 
 
 class JointAffordanceModel(nn.Module):
@@ -376,82 +286,62 @@ class JointAffordanceModel(nn.Module):
     def __init__(self, config: Optional[JointAffordanceConfig] = None):
         super().__init__()
         self.config = config or JointAffordanceConfig()
-        # self.vision_pretrained = self.config.vision_pretrained
-        # self.ce_loss_weight = self.config.ce_loss_weight
-        # self.dice_loss_weight = self.config.dice_loss_weight
-        # self.bce_loss_weight = self.config.bce_loss_weight
         self.seg_token_idx = self.config.seg_token_idx
         self.aff_token_idx = self.config.aff_token_idx
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder)
         self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder)
         self.mllm = MLLMBackbone(self.config.mllm)
-        
-        # self.clip_image_processor = CLIPImageProcessor.from_pretrained(self.config.mm_vision_tower)
 
 
     @property
     def tokenizer(self): return self.mllm.tokenizer
-
-    def _normalize_size_lists(
-        self,
-        images: torch.Tensor,
-        original_size_list: Optional[List[List]],
-        resize_list: Optional[List[List]],
-    ):
-        if images is None:
-            return original_size_list, resize_list
-        if original_size_list is None or resize_list is None:
-            height, width = images.shape[-2], images.shape[-1]
-            batch_size = images.shape[0]
-            original_size_list = original_size_list or [[height, width] for _ in range(batch_size)]
-            resize_list = resize_list or [[height, width] for _ in range(batch_size)]
-        return original_size_list, resize_list
 
     def _extract_token_embeddings(
         self,
         input_ids: Optional[torch.Tensor],
         last_hidden_state: torch.Tensor,
         token_idx: Optional[int],
-    ):
+    ) -> torch.Tensor:
         """
-        从语言模型隐藏状态中提取指定特殊 token（如 [SEG]）位置的嵌入，并按样本分组。
+        从隐藏状态中提取**第一个**匹配特殊 token（如 [SEG]）位置的嵌入。
+
+        当前假设每个样本恰好有 1 个 [SEG] token。
+        TODO: 若后续支持多 [SEG]（一个 SEG 对应一组图像/点云），
+              应返回 [B, N_seg, C] 并在下游逐 SEG 生成 mask。
 
         Args:
-            input_ids: 输入 token IDs，形状 [B, L]。
-            last_hidden_state: 投影后的隐藏状态，形状 [B, L', C]（L' 可能因图像 token 插入而大于 L）。
-            token_idx: 要提取的特殊 token 的词汇表索引（如 [SEG] 的 id）。
+            input_ids: [B, L] 输入 token IDs。
+            last_hidden_state: [B, L', C] 投影后的隐藏状态。
+            token_idx: 特殊 token 的词汇表索引。
 
         Returns:
-            token_embeddings_list: 长度为 B 的列表，第 i 个元素为第 i 个样本中该 token 的嵌入，形状 [num_tokens_i, C]。
+            token_embeddings: [B, C] — 每个样本中第一个匹配 token 的嵌入。
+                若某样本无匹配 token，对应行为零向量。
         """
+        B, _, C = last_hidden_state.shape
         if input_ids is None or token_idx is None:
-            return [last_hidden_state.new_empty((0, last_hidden_state.shape[-1])) for _ in range(last_hidden_state.shape[0])]
+            return last_hidden_state.new_zeros(B, C)
 
-        # Qwen 输入已包含视觉 token，占位符与 hidden_states 位置一致
-        token_mask = input_ids == token_idx
+        token_mask = input_ids == token_idx  # [B, L]
 
-        # 若长度不一致，截断到较短的公共长度，避免手动对齐
+        # 若长度不一致，截断到较短的公共长度
         if last_hidden_state.shape[1] != token_mask.shape[1]:
             min_len = min(last_hidden_state.shape[1], token_mask.shape[1])
             token_mask = token_mask[:, :min_len]
             last_hidden_state = last_hidden_state[:, :min_len, :]
 
-        # 按 mask 取出对应位置的嵌入，得到一维张量 [总 token 数, C]
-        token_embeddings = last_hidden_state[token_mask]
-        # 每个样本中该 token 的数量，用于后续按样本切分
-        token_counts = token_mask.int().sum(-1)
-        token_offset = token_counts.cumsum(-1)
-        token_offset = torch.cat(
-            [torch.zeros(1, dtype=torch.long, device=token_offset.device), token_offset], dim=0
-        )
-
-        # 按样本分组：第 i 个样本的嵌入为 token_embeddings[token_offset[i]:token_offset[i+1]]
-        token_embeddings_list = []
-        for i in range(len(token_offset) - 1):
-            start_i, end_i = token_offset[i], token_offset[i + 1]
-            token_embeddings_list.append(token_embeddings[start_i:end_i])
-        return token_embeddings_list
+        # 取每个样本中第一个匹配位置的嵌入（无匹配时返回零向量）
+        # has_token: [B], first_idx: [B]（无匹配时 first_idx 为 0，但会被 has_token 置零）
+        has_token = token_mask.any(dim=1)                                    # [B]
+        first_idx = token_mask.to(torch.long).argmax(dim=1)                  # [B]
+        # 用 gather 提取：[B, L, C] → [B, 1, C] → [B, C]
+        embeddings = last_hidden_state.gather(
+            1, first_idx.unsqueeze(-1).unsqueeze(-1).expand(B, 1, C)
+        ).squeeze(1)                                                         # [B, C]
+        # 无匹配 token 的样本置零
+        embeddings = embeddings * has_token.unsqueeze(-1).to(embeddings.dtype)
+        return embeddings
 
     def forward(
         self,
@@ -464,57 +354,87 @@ class JointAffordanceModel(nn.Module):
         image_grid_thw: Optional[torch.Tensor] = None,
         # 图像分割所需
         images: Optional[torch.Tensor] = None,
-        original_size_list: Optional[List] = None,
         resize_list: Optional[List] = None,
+        original_size_list: Optional[List] = None,
         img_valid_mask: Optional[torch.Tensor] = None,
         # 点云分割所需
         point_clouds: Optional[torch.Tensor] = None,
-        pc_valid_lengths: Optional[torch.Tensor] = None,
+        pc_valid_mask: Optional[torch.Tensor] = None,
+        # 其余 collate_fn 产出的字段（img_gt_tensor、pc_gt_tensor 等）由训练脚本使用
+        **kwargs,
     ) -> Dict[str, Optional[torch.Tensor]]:
-        # 兼容 Qwen 数据处理：pixel_values / image_grid_thw / position_ids 等
-        images_for_mllm = pixel_values if pixel_values is not None else images
+        B = input_ids.shape[0] if input_ids is not None else 1
+
+        # ---- 1. MLLM 前向 ----
         mllm_out = self.mllm(
             input_ids=input_ids,
             labels=labels,
-            images=images_for_mllm,
             attention_mask=attention_mask,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
             position_ids=position_ids,
         )
-        hidden_states = mllm_out["hidden_states"]
+        hidden_states = mllm_out["hidden_states"]  # [B, L, C]
 
         image_logits = None
         point_logits = None
+
         if hidden_states is not None:
+            # ---- 2. 投影 + 提取 SEG token 嵌入 ----
             image_hidden = self.image_decoder.project_hidden_states(hidden_states)
             point_hidden = self.point_decoder.project_hidden_states(hidden_states)
 
-            image_pred_embeddings = self._extract_token_embeddings(
+            image_pred_emb = self._extract_token_embeddings(
                 input_ids, image_hidden, self.seg_token_idx
-            )
-            point_pred_embeddings = self._extract_token_embeddings(
+            )  # [B, C']
+            point_pred_emb = self._extract_token_embeddings(
                 input_ids, point_hidden, self.seg_token_idx
-            )
+            )  # [B, C']
 
-            images_for_sam = images if images is not None else pixel_values
-            if images_for_sam is not None:
-                image_embeddings = self.image_decoder.get_visual_embs(images_for_sam)
-                original_size_list, resize_list = self._normalize_size_lists(
-                    images_for_sam,
-                    original_size_list,
-                    resize_list,
-                )
-                image_logits = self.image_decoder.generate_2d_masks(
-                    image_pred_embeddings, image_embeddings, resize_list, original_size_list
-                )
-                if image_logits is not None:
-                    image_logits = image_logits.sigmoid_()
+            # ---- 3. 2D 图像分割（仅有效样本）----
+            if images is not None:
+                # 确定有效样本索引
+                if img_valid_mask is not None:
+                    img_valid = img_valid_mask.bool()
+                else:
+                    img_valid = torch.ones(B, dtype=torch.bool, device=images.device)
+                valid_img_idx = img_valid.nonzero(as_tuple=True)[0]
 
+                if valid_img_idx.numel() > 0:
+                    valid_images = images[valid_img_idx]
+                    valid_img_emb = image_pred_emb[valid_img_idx]
+
+                    image_embeddings = self.image_decoder.get_visual_embs(valid_images)
+                    H, W = valid_images.shape[-2], valid_images.shape[-1]
+                    input_size = tuple(resize_list[valid_img_idx[0].item()]) if resize_list else (H, W)
+                    original_size = tuple(original_size_list[valid_img_idx[0].item()]) if original_size_list else (H, W)
+
+                    valid_image_logits = self.image_decoder(
+                        valid_img_emb, image_embeddings, input_size, original_size
+                    )
+                    valid_image_logits = valid_image_logits.sigmoid_()
+
+                    # 回填到完整 batch
+                    image_logits = valid_images.new_zeros(B, *valid_image_logits.shape[1:])
+                    image_logits[valid_img_idx] = valid_image_logits
+
+            # ---- 4. 3D 点云分割（仅有效样本）----
             if point_clouds is not None:
-                point_logits = self.point_decoder.generate_3d_masks(
-                    point_pred_embeddings, point_clouds
-                )
+                if pc_valid_mask is not None:
+                    pc_valid = pc_valid_mask.bool()
+                else:
+                    pc_valid = torch.ones(B, dtype=torch.bool, device=point_clouds.device)
+                valid_pc_idx = pc_valid.nonzero(as_tuple=True)[0]
+
+                if valid_pc_idx.numel() > 0:
+                    valid_pcs = point_clouds[valid_pc_idx]
+                    valid_pc_emb = point_pred_emb[valid_pc_idx]
+
+                    valid_point_logits = self.point_decoder(valid_pc_emb, valid_pcs)
+
+                    # 回填到完整 batch
+                    point_logits = point_clouds.new_zeros(B, valid_point_logits.shape[-1])
+                    point_logits[valid_pc_idx] = valid_point_logits
 
         return {
             "hidden_states": hidden_states,
