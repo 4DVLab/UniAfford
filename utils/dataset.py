@@ -628,7 +628,6 @@ def qwen3vl_collate_fn(
         batch_out["original_size_list"] = original_size_list
 
     batch_out["img_valid_mask"] = torch.tensor(has_image_flags, dtype=torch.bool)
-    batch_out["pc_valid_mask"] = torch.tensor(has_pc_flags, dtype=torch.bool)
 
     valid_pcs = [pc for pc in point_clouds_list if pc is not None]
     if len(valid_pcs) == 0:
@@ -829,7 +828,7 @@ def collate_fn(
 
     # 添加有效性标记
     result['img_valid_mask'] = torch.tensor(has_image_flags, dtype=torch.bool)
-    result['pc_valid_mask'] = torch.tensor(has_pc_flags, dtype=torch.bool)
+    # result['pc_valid_mask'] = torch.tensor(has_pc_flags, dtype=torch.bool)
 
     """ ------------------------------------- 处理点云数据 ------------------------------------- """
     # 过滤掉 None 值
