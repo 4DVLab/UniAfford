@@ -263,7 +263,7 @@ class TrainingConfig(Configs):
             
             precision = resolved_precision,
 
-            model_config = model_config or JointAffordanceConfig(),
+            model_config = model_config or JointAffordanceConfig(compute_dtype=resolved_precision),
             vis_save_path = vis_save_path,
             
             # 模型配置
