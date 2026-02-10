@@ -33,6 +33,7 @@ class MLLMBackbone(nn.Module):
 
         if self.config.hidden_size != self.hidden_size:
             self.config.hidden_size = self.hidden_size
+
         if self.config.vocab_size != self.vocab_size:
             self.config.vocab_size = self.vocab_size
 
@@ -128,7 +129,7 @@ class ImageHiddenStateDecoder(nn.Module):
     def __init__(
         self,
         config: ImageDecoderConfigs,
-        text_hidden_size: int = 2048,
+        text_hidden_size: int,
     ):
         super().__init__()
         self.config = config
@@ -219,7 +220,7 @@ class PointCloudHiddenStateDecoder(nn.Module):
     def __init__(
         self,
         config: PointDecoderConfigs,
-        text_hidden_size: int = 2048,
+        text_hidden_size: int,
     ):
         super().__init__()
         self.config = config
@@ -289,9 +290,9 @@ class JointAffordanceModel(nn.Module):
         self.seg_token_idx = self.config.seg_token_idx
         self.aff_token_idx = self.config.aff_token_idx
 
-        self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder)
-        self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder)
         self.mllm = MLLMBackbone(self.config.mllm)
+        self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
+        self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
 
 
     @property

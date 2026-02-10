@@ -19,7 +19,7 @@ class DeepSpeedConfigs(Configs):
         # 与 DeepSpeed 顶层键对应的属性
         train_micro_batch_size_per_gpu: int = 1,
         gradient_accumulation_steps: int = 1,
-        precision: Optional[torch.dtype] = None,
+        precision: Optional[torch.dtype] = 'bf16',
         gradient_clipping: float = 1.0,
 
         # zero_optimization 相关（默认 ZeRO-3：模型+优化器+梯度全分片）
@@ -31,8 +31,8 @@ class DeepSpeedConfigs(Configs):
         reduce_bucket_size: float = 5e8,
         contiguous_gradients: bool = True,
         # 优化器 Offload（显存不足时把优化器状态放 CPU）
-        # offload_optimizer_device: str = "cpu",
-        # offload_optimizer_pin_memory: bool = True,
+        offload_optimizer_device: str = "cpu",
+        offload_optimizer_pin_memory: bool = True,
         # # 模型参数 Offload（大模型冷参数放 CPU）
         # offload_param_device: str = "cpu",
         # offload_param_pin_memory: bool = True,
@@ -50,6 +50,7 @@ class DeepSpeedConfigs(Configs):
         warmup_type: str = "linear",
         **kwargs,
     ):
+        precision = resolve_dtype(precision)
         super().__init__(
             train_micro_batch_size_per_gpu=train_micro_batch_size_per_gpu,
             gradient_accumulation_steps=gradient_accumulation_steps,
@@ -62,8 +63,8 @@ class DeepSpeedConfigs(Configs):
             reduce_scatter=reduce_scatter,
             reduce_bucket_size=reduce_bucket_size,
             contiguous_gradients=contiguous_gradients,
-            # offload_optimizer_device=offload_optimizer_device,
-            # offload_optimizer_pin_memory=offload_optimizer_pin_memory,
+            offload_optimizer_device=offload_optimizer_device,
+            offload_optimizer_pin_memory=offload_optimizer_pin_memory,
             # offload_param_device=offload_param_device,
             # offload_param_pin_memory=offload_param_pin_memory,
             use_layerwise_lr=use_layerwise_lr,
@@ -81,12 +82,11 @@ class DeepSpeedConfigs(Configs):
 
     def to_dict(self) -> dict:
         """将当前属性转换为 DeepSpeed 配置字典（嵌套结构）。"""
-        precision = self.precision if self.precision is not None else torch.float32
         ds_config = {
             "train_micro_batch_size_per_gpu": self.train_micro_batch_size_per_gpu,
             "gradient_accumulation_steps": self.gradient_accumulation_steps,
-            "fp16": {"enabled": precision == torch.half},
-            "bf16": {"enabled": precision == torch.bfloat16},
+            "fp16": {"enabled": self.precision == torch.half},
+            "bf16": {"enabled": self.precision == torch.bfloat16},
             "gradient_clipping": self.gradient_clipping,
             "zero_optimization": {
                 "stage": self.zero_stage,
@@ -96,10 +96,10 @@ class DeepSpeedConfigs(Configs):
                 "reduce_scatter": self.reduce_scatter,
                 "reduce_bucket_size": int(self.reduce_bucket_size),
                 "contiguous_gradients": self.contiguous_gradients,
-                # "offload_optimizer": {
-                #     "device": self.offload_optimizer_device,
-                #     "pin_memory": self.offload_optimizer_pin_memory,
-                # },
+                "offload_optimizer": {
+                    "device": self.offload_optimizer_device,
+                    "pin_memory": self.offload_optimizer_pin_memory,
+                },
                 # "offload_param": {
                 #     "device": self.offload_param_device,
                 #     "pin_memory": self.offload_param_pin_memory,
@@ -187,7 +187,7 @@ class TrainingConfig(Configs):
         self,
         # 基础配置
         local_rank=0,
-        precision="fp32",  # fp32。 bf16会报错，fp16会导致nan
+        precision="bf16",
         model_config: Optional[JointAffordanceConfig] = None,
         
         # 模型配置
@@ -312,7 +312,7 @@ class TrainingConfig(Configs):
             warmup_type = warmup_type,
 
             # DeepSpeed / LoRA 配置对象
-            deepspeed = DeepSpeedConfigs(),
+            deepspeed = DeepSpeedConfigs(precision=resolved_precision),
             lora = LoRAConfigs(),
             
             # 其他配置

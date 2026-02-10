@@ -149,18 +149,7 @@ def main():
     
     """ ------------------------- 初始化模型 --------------------------- """
     logger.info("正在初始化模型...")
-    zero_init_context = nullcontext()
-    # 和SAM有冲突，暂不使用
-    # if config.deepspeed.zero_stage == 3:
-    #     logger.info("启用 ZeRO-3 初始化以避免显存峰值")
-    #     zero_init_context = deepspeed.zero.Init(
-    #         enabled=True,
-    #         config_dict_or_path=config.deepspeed.to_dict(),
-    #         remote_device=config.deepspeed.offload_param_device,
-    #         pin_memory=config.deepspeed.offload_param_pin_memory,
-    #     )
-    with zero_init_context:
-        model = JointAffordanceModel(model_config)
+    model = JointAffordanceModel(model_config)
     logger.info(f"模型初始化完成: {model_config.mllm.qwen_model_name_or_path}")
     
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
@@ -274,12 +263,12 @@ def main():
             steps_per_epoch = max(1, len(train_dataset) // max(1, micro_bs))
         logger.info(f"每个 epoch 步数: {steps_per_epoch}, 总步数: {config.epochs * steps_per_epoch}")
 
-        # optimizer_cls = (
-        #     DeepSpeedCPUAdam
-        #     if config.deepspeed.offload_optimizer_device == "cpu"
-        #     else torch.optim.AdamW
-        # )
-        optimizer = torch.optim.AdamW(
+        optimizer_cls = (
+            DeepSpeedCPUAdam
+            if config.deepspeed.offload_optimizer_device == "cpu"
+            else torch.optim.AdamW
+        )
+        optimizer = optimizer_cls(
             params_to_train,
             weight_decay=config.weight_decay,
             betas=(config.beta1, config.beta2),
