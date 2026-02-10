@@ -19,6 +19,7 @@ from collections import OrderedDict
 from configs import JointAffordanceConfig, ImageDecoderConfigs, PointDecoderConfigs, MLLMConfigs
 from model.segment_anything import build_sam_vit_h
 from model.pointnet2_utils import PointCloud3DSegmentor, PointCloudEncoder
+from utils.common import resolve_dtype
 
 
 class MLLMBackbone(nn.Module):
@@ -130,9 +131,11 @@ class ImageHiddenStateDecoder(nn.Module):
         self,
         config: ImageDecoderConfigs,
         text_hidden_size: int,
+        compute_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.config = config
+        self.compute_dtype = compute_dtype
         self.visual_model = build_sam_vit_h(getattr(config, "vision_pretrained", None))
         for param in self.visual_model.parameters():
             param.requires_grad = False
@@ -153,10 +156,15 @@ class ImageHiddenStateDecoder(nn.Module):
         for param in self.text_hidden_fcs.parameters():
             param.requires_grad = True
 
+        if self.compute_dtype is not None:
+            self.visual_model = self.visual_model.to(dtype=self.compute_dtype)
+            self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.compute_dtype)
+
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到 SAM prompt 空间。"""
         assert len(self.text_hidden_fcs) == 1
+        hidden_states = hidden_states.to(self.compute_dtype)
         projected = self.text_hidden_fcs[0](hidden_states)
         if projected.dim() == 2:
             projected = projected.unsqueeze(0)
@@ -164,6 +172,7 @@ class ImageHiddenStateDecoder(nn.Module):
 
     def get_visual_embs(self, pixel_values: torch.FloatTensor):
         """使用 SAM image_encoder 提取图像特征，不计算梯度。"""
+        pixel_values = pixel_values.to(dtype=self.compute_dtype)
         with torch.no_grad():
             return self.visual_model.image_encoder(pixel_values)
 
@@ -186,6 +195,9 @@ class ImageHiddenStateDecoder(nn.Module):
         Returns:
             pred_masks: [B, H_orig, W_orig]
         """
+        pred_embeddings = pred_embeddings.to(self.compute_dtype)
+        image_embeddings = image_embeddings.to(self.compute_dtype)
+
         # [B, C] → [B, 1, C]，作为 prompt_encoder 的 text_embeds 输入
         text_embeds = pred_embeddings.unsqueeze(1)
 
@@ -221,9 +233,11 @@ class PointCloudHiddenStateDecoder(nn.Module):
         self,
         config: PointDecoderConfigs,
         text_hidden_size: int,
+        compute_dtype: Optional[torch.dtype] = None,
     ):
         super().__init__()
         self.config = config
+        self.compute_dtype = compute_dtype
         self.point_encoder = PointCloudEncoder(out_dim=text_hidden_size)
 
         text_fc = nn.Sequential(OrderedDict([
@@ -245,9 +259,14 @@ class PointCloudHiddenStateDecoder(nn.Module):
         for param in self.point_cloud_segmentor.parameters():
             param.requires_grad = True
 
+        if self.compute_dtype is not None:
+            self.point_encoder = self.point_encoder.to(dtype=self.compute_dtype)
+            self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.compute_dtype)
+            self.point_cloud_segmentor = self.point_cloud_segmentor.to(dtype=self.compute_dtype)
+
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
-        assert len(self.text_hidden_fcs) == 1
+        hidden_states = hidden_states.to(self.compute_dtype)
         projected = self.text_hidden_fcs[0](hidden_states)
         if projected.dim() == 2:
             projected = projected.unsqueeze(0)
@@ -271,6 +290,9 @@ class PointCloudHiddenStateDecoder(nn.Module):
         if point_clouds.shape[1] != 3:
             point_clouds = point_clouds.permute(0, 2, 1)
 
+        pred_embeddings = pred_embeddings.to(self.compute_dtype)
+        point_clouds = point_clouds.to(self.compute_dtype)
+
         # [B, C] → [B, 1, C]，PointCloud3DSegmentor 接受 [B, L, C] 的 text_feat
         text_feat = pred_embeddings.unsqueeze(1)
         text_mask = torch.ones(
@@ -289,10 +311,15 @@ class JointAffordanceModel(nn.Module):
         self.config = config or JointAffordanceConfig()
         self.seg_token_idx = self.config.seg_token_idx
         self.aff_token_idx = self.config.aff_token_idx
+        self.compute_dtype = self.config.precision
 
         self.mllm = MLLMBackbone(self.config.mllm)
-        self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
-        self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
+        self.image_decoder = ImageHiddenStateDecoder(
+            self.config.image_decoder, self.config.mllm.hidden_size, compute_dtype=self.compute_dtype
+        )
+        self.point_decoder = PointCloudHiddenStateDecoder(
+            self.config.point_decoder, self.config.mllm.hidden_size, compute_dtype=self.compute_dtype
+        )
 
 
     @property
