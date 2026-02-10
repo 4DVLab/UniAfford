@@ -310,12 +310,8 @@ class JointAffordanceModel(nn.Module):
         self.aff_token_idx = self.config.aff_token_idx
 
         self.mllm = MLLMBackbone(self.config.mllm)
-        self.image_decoder = ImageHiddenStateDecoder(
-            self.config.image_decoder, self.config.mllm.hidden_size, compute_dtype=self.config.compute_dtype
-        )
-        self.point_decoder = PointCloudHiddenStateDecoder(
-            self.config.point_decoder, self.config.mllm.hidden_size, compute_dtype=self.config.compute_dtype
-        )
+        self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
+        self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
 
 
     @property
