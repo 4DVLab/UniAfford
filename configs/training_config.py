@@ -250,14 +250,10 @@ class TrainingConfig(Configs):
         vis_save_path="./vis_output",
         **kwargs,
     ):  
-        
-        
         if samples_per_epoch is not None:
             steps_per_epoch = samples_per_epoch // batch_size
 
         resolved_precision = resolve_dtype(precision)
-        # 直接设置torch默认精度，避免精度问题
-        torch.set_default_dtype(resolved_precision)
         
         super().__init__(
             # 基础配置

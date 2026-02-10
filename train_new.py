@@ -92,80 +92,6 @@ def create_param_groups(model, config, logger):
     return param_groups
 
 
-def _split_param_groups_by_dtype(params_to_train, logger):
-    """
-    DeepSpeed ZeRO-3 需要同一参数组中的参数 dtype 一致，否则会在分片阶段触发断言。
-    该函数会按 dtype 自动拆分参数组，兼容:
-    - list[Parameter]
-    - list[dict] (PyTorch optimizer param groups)
-    """
-    # 情况1：list[Parameter]
-    if params_to_train and isinstance(params_to_train[0], torch.nn.Parameter):
-        by_dtype = {}
-        for p in params_to_train:
-            by_dtype.setdefault(p.dtype, []).append(p)
-        if len(by_dtype) <= 1:
-            return params_to_train
-        normalized_groups = []
-        for dtype, params in by_dtype.items():
-            normalized_groups.append({"params": params, "name": f"all_{str(dtype).replace('torch.', '')}"})
-        logger.warning(
-            "检测到混合 dtype 可训练参数，已按 dtype 拆分参数组: "
-            + ", ".join([f"{str(k)}={len(v)}" for k, v in by_dtype.items()])
-        )
-        return normalized_groups
-
-    # 情况2：list[dict]（分层学习率）
-    if params_to_train and isinstance(params_to_train[0], dict):
-        normalized_groups = []
-        changed = False
-        for group in params_to_train:
-            params = group.get("params", [])
-            by_dtype = {}
-            for p in params:
-                by_dtype.setdefault(p.dtype, []).append(p)
-
-            if len(by_dtype) <= 1:
-                normalized_groups.append(group)
-                continue
-
-            changed = True
-            group_name = group.get("name", "group")
-            for dtype, sub_params in by_dtype.items():
-                sub_group = {k: v for k, v in group.items() if k != "params"}
-                sub_group["params"] = sub_params
-                sub_group["name"] = f"{group_name}_{str(dtype).replace('torch.', '')}"
-                normalized_groups.append(sub_group)
-
-            logger.warning(
-                f"参数组 `{group_name}` 存在混合 dtype，已拆分: "
-                + ", ".join([f"{str(k)}={len(v)}" for k, v in by_dtype.items()])
-            )
-
-        return normalized_groups if changed else params_to_train
-
-    return params_to_train
-
-
-def _log_trainable_dtype_stats(params_to_train, logger):
-    """打印可训练参数 dtype 统计，便于排查精度问题。"""
-    all_params = []
-    if not params_to_train:
-        return
-    if isinstance(params_to_train[0], torch.nn.Parameter):
-        all_params = params_to_train
-    elif isinstance(params_to_train[0], dict):
-        for group in params_to_train:
-            all_params.extend(group.get("params", []))
-    dtype_count = {}
-    for p in all_params:
-        dtype_count[p.dtype] = dtype_count.get(p.dtype, 0) + 1
-    logger.info(
-        "可训练参数 dtype 统计: "
-        + ", ".join([f"{str(dtype)}={count}" for dtype, count in dtype_count.items()])
-    )
-
-
 def compute_losses(output_dict, input_dict, model_engine):
     """计算 image 和 point cloud 的损失，训练与验证共用。"""
     device = model_engine.device
@@ -316,9 +242,6 @@ def main():
     logger.info("初始化 DeepSpeed")
     logger.info("=" * 80)
     params_to_train = create_param_groups(model, config, logger)
-    _log_trainable_dtype_stats(params_to_train, logger)
-    params_to_train = _split_param_groups_by_dtype(params_to_train, logger)
-    _log_trainable_dtype_stats(params_to_train, logger)
     if len(params_to_train) == 0:
         logger.error("没有可训练参数，请检查 name_of_params_to_train 或 LoRA 配置")
         raise RuntimeError("没有可训练参数，请检查 name_of_params_to_train 或 LoRA 配置")

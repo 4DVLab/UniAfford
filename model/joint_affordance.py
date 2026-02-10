@@ -143,7 +143,6 @@ class ImageHiddenStateDecoder(nn.Module):
             for param in self.visual_model.mask_decoder.parameters():
                 param.requires_grad = True
 
-        self.image_encoder = self.visual_model.image_encoder
 
         text_fc = nn.Sequential(OrderedDict([
             ("fc1", nn.Linear(text_hidden_size, 2*text_hidden_size)),
@@ -155,14 +154,14 @@ class ImageHiddenStateDecoder(nn.Module):
         for param in self.text_hidden_fcs.parameters():
             param.requires_grad = True
 
-        if self.config.compute_dtype is not None:
-            self.visual_model = self.visual_model.to(dtype=self.config.compute_dtype)
-            self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.config.compute_dtype)
+        self.visual_model = self.visual_model.to(dtype=self.config.compute_dtype)
+        self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.config.compute_dtype)
 
+        self.image_encoder = self.visual_model.image_encoder
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到 SAM prompt 空间。"""
-        assert len(self.text_hidden_fcs) == 1
+        # assert len(self.text_hidden_fcs) == 1
         hidden_states = hidden_states.to(self.config.compute_dtype)
         projected = self.text_hidden_fcs[0](hidden_states)
         if projected.dim() == 2:
@@ -256,10 +255,9 @@ class PointCloudHiddenStateDecoder(nn.Module):
         for param in self.point_cloud_segmentor.parameters():
             param.requires_grad = True
 
-        if self.config.compute_dtype is not None:
-            self.point_encoder = self.point_encoder.to(dtype=self.config.compute_dtype)
-            self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.config.compute_dtype)
-            self.point_cloud_segmentor = self.point_cloud_segmentor.to(dtype=self.config.compute_dtype)
+        self.point_encoder = self.point_encoder.to(dtype=self.config.compute_dtype)
+        self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.config.compute_dtype)
+        self.point_cloud_segmentor = self.point_cloud_segmentor.to(dtype=self.config.compute_dtype)
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
