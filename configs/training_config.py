@@ -8,7 +8,7 @@ from typing import Optional
 import torch
 from utils.common import resolve_dtype
 
-from .base_config import Configs, JointAffordanceConfig, MLLMConfigs
+from .base_config import Configs, ImageDecoderConfigs, JointAffordanceConfig, MLLMConfigs, PointDecoderConfigs
 
 
 class DeepSpeedConfigs(Configs):
@@ -187,7 +187,12 @@ class TrainingConfig(Configs):
         self,
         # 基础配置
         local_rank=0,
-        precision="bf16",
+        mllm_precision=None,
+        image_precision=None,
+        point_precision=None,
+        deepspeed_precision=None,
+        trainable_param_dtype=None,
+        strict_zero3_dtype_check=True,
         model_config: Optional[JointAffordanceConfig] = None,
         
         # 模型配置
@@ -253,28 +258,20 @@ class TrainingConfig(Configs):
         if samples_per_epoch is not None:
             steps_per_epoch = samples_per_epoch // batch_size
 
-        resolved_precision = resolve_dtype(precision)
+        deepspeed_config = DeepSpeedConfigs(precision='bf16')
+        lora_config = LoRAConfigs()
 
         if model_config is None:
             model_config = JointAffordanceConfig(
-                mllm_config=MLLMConfigs(qwen_dtype=resolved_precision),
-                compute_dtype=resolved_precision,
+                mllm_config=MLLMConfigs(qwen_dtype='bf16'),
+                image_decoder=ImageDecoderConfigs(compute_dtype='fp32'),
+                point_decoder=PointDecoderConfigs(compute_dtype='fp32'),
             )
-        else:
-            # 训练精度统一入口：确保 TrainingConfig.precision 与模型内部 dtype 一致。
-            model_config.compute_dtype = resolved_precision
-            if getattr(model_config, "mllm", None) is not None:
-                model_config.mllm.qwen_dtype = resolved_precision
-            if getattr(model_config, "image_decoder", None) is not None:
-                model_config.image_decoder.compute_dtype = resolved_precision
-            if getattr(model_config, "point_decoder", None) is not None:
-                model_config.point_decoder.compute_dtype = resolved_precision
         
         super().__init__(
             # 基础配置
             local_rank = local_rank,
-            
-            precision = resolved_precision,
+        
 
             model_config = model_config,
             vis_save_path = vis_save_path,
@@ -325,8 +322,8 @@ class TrainingConfig(Configs):
             warmup_type = warmup_type,
 
             # DeepSpeed / LoRA 配置对象
-            deepspeed = DeepSpeedConfigs(precision=resolved_precision),
-            lora = LoRAConfigs(),
+            deepspeed = deepspeed_config,
+            lora = lora_config,
             
             # 其他配置
             num_classes_per_sample = num_classes_per_sample,

@@ -15,7 +15,11 @@ from tqdm import tqdm
 from configs import TrainingConfig
 from model.joint_affordance import JointAffordanceModel
 from utils.base_dataset import JointDataset
-from utils.dataset import Qwen3VLDataset, Qwen3VLTrainDataset, qwen3vl_collate_fn
+from utils.dataset import (
+    JointAffordanceTorchDataset,
+    JointAffordanceTrainDataset,
+    joint_affordance_collate_fn,
+)
 from utils.common import dict_to_cuda, setup_logger
 from utils import calculator as calc
 
@@ -194,11 +198,13 @@ def main():
     
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
     data_collator = partial(
-        qwen3vl_collate_fn,
+        joint_affordance_collate_fn,
         tokenizer=processor.tokenizer,
         output_image_size=config.image_size,
         output_point_nums=config.num_points,
-        precision=config.precision,
+        mllm_precision=model_config.mllm.qwen_dtype,
+        image_precision=model_config.image_decoder.compute_dtype,
+        point_precision=model_config.point_decoder.compute_dtype,
     )
 
     """ ------------------------- 选择训练参数、应用lora --------------------------- """
@@ -216,6 +222,13 @@ def main():
 
     # 解冻必要模块
     logger.info(f"训练参数模块: {', '.join(config.name_of_params_to_train)}")
+    logger.info(
+        "精度配置: "
+        f"mllm={model_config.mllm.qwen_dtype}, "
+        f"image={model_config.image_decoder.compute_dtype}, "
+        f"point={model_config.point_decoder.compute_dtype}, "
+        f"deepspeed={config.deepspeed.precision}"
+    )
     enable_trainable_modules(model, config.name_of_params_to_train)
     align_trainable_param_dtypes(model, config.precision, logger)
 
@@ -248,33 +261,45 @@ def main():
     if local_rank != 0:
         logger.info(f"已收到数据: 训练集 {len(train_samples)} 条, 验证集 {len(val_samples)} 条")
     
-    logger.info(f"数据集配置: image_size={config.image_size}, num_points={config.num_points}, precision={config.precision}")
+    logger.info(
+        "数据集配置: "
+        f"image_size={config.image_size}, num_points={config.num_points}, "
+        f"collate(mllm={model_config.mllm.qwen_dtype}, "
+        f"image={model_config.image_decoder.compute_dtype}, "
+        f"point={model_config.point_decoder.compute_dtype})"
+    )
     
     if config.samples_per_epoch is not None:
-        train_dataset = Qwen3VLTrainDataset(
+        train_dataset = JointAffordanceTrainDataset(
             train_samples,
             processor=processor,
             image_size=config.image_size,
             num_points=config.num_points,
-            precision=config.precision,
             samples_per_epoch=config.samples_per_epoch,
+            mllm_precision=model_config.mllm.qwen_dtype,
+            image_precision=model_config.image_decoder.compute_dtype,
+            point_precision=model_config.point_decoder.compute_dtype,
             use_sample_cache=config.use_sample_cache,
         )
     else:
-        train_dataset = Qwen3VLDataset(
+        train_dataset = JointAffordanceTorchDataset(
             train_samples,
             processor=processor,
             image_size=config.image_size,
             num_points=config.num_points,
-            precision=config.precision,
+            mllm_precision=model_config.mllm.qwen_dtype,
+            image_precision=model_config.image_decoder.compute_dtype,
+            point_precision=model_config.point_decoder.compute_dtype,
             use_sample_cache=config.use_sample_cache,
         )
-    val_dataset = Qwen3VLDataset(
+    val_dataset = JointAffordanceTorchDataset(
         val_samples,
         processor=processor,
         image_size=config.image_size,
         num_points=config.num_points,
-        precision=config.precision,
+        mllm_precision=model_config.mllm.qwen_dtype,
+        image_precision=model_config.image_decoder.compute_dtype,
+        point_precision=model_config.point_decoder.compute_dtype,
         use_sample_cache=config.use_sample_cache,
     )
 

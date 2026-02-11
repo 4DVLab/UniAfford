@@ -74,7 +74,7 @@ class ImageDecoderConfigs(Configs):
 
     def __init__(
         self,
-        compute_dtype: Optional[torch.dtype] = torch.float32,
+        compute_dtype: Optional[torch.dtype] = 'fp32',
         hidden_size: int = 256,
         num_heads: int = 8,
         mm_vision_select_feature: str = "patch",
@@ -89,7 +89,7 @@ class ImageDecoderConfigs(Configs):
         **kwargs,
     ):  
         super().__init__(
-            compute_dtype=compute_dtype,
+            compute_dtype=resolve_dtype(compute_dtype),
             hidden_size=hidden_size,
             num_heads=num_heads,
             mm_vision_select_feature=mm_vision_select_feature,
@@ -110,14 +110,14 @@ class PointDecoderConfigs(Configs):
 
     def __init__(
         self,
-        compute_dtype: Optional[torch.dtype] = torch.float32,
+        compute_dtype: Optional[torch.dtype] = 'fp32',
         hidden_size: int = 128,
         num_heads: int = 8,
         # point_out_dim: int = None, # 为空则可以适配任意点数的输入输出
         **kwargs,
     ):
         super().__init__(
-            compute_dtype=compute_dtype,
+            compute_dtype=resolve_dtype(compute_dtype),
             hidden_size=hidden_size,
             num_heads=num_heads,
             # point_out_dim=point_out_dim,
@@ -132,13 +132,12 @@ class JointAffordanceConfig(Configs):
         mllm_config:Optional[MLLMConfigs] = None,
         image_decoder: Optional[ImageDecoderConfigs] = None,
         point_decoder: Optional[PointDecoderConfigs] = None,
-        compute_dtype: Optional[torch.dtype] = None,
         **kwargs,
     ):  
-        super().__init__(compute_dtype=compute_dtype, **kwargs)
+        super().__init__(**kwargs)
         self.mllm = mllm_config or MLLMConfigs()
-        self.image_decoder = image_decoder or ImageDecoderConfigs(compute_dtype=compute_dtype)
-        self.point_decoder = point_decoder or PointDecoderConfigs(compute_dtype=compute_dtype)
+        self.image_decoder = image_decoder or ImageDecoderConfigs()
+        self.point_decoder = point_decoder or PointDecoderConfigs()
 
         if self.mllm is not None:
             self.tokenizer = self.mllm.tokenizer

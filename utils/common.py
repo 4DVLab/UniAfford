@@ -76,14 +76,20 @@ def setup_logger(log_dir, local_rank=0, max_console_rank=1):
 """  ----------------------------------------------- utils functions ----------------------------------------------  """
 
 
-def resolve_dtype(dtype_name: str):
-    """解析 dtype 字符串为 torch.dtype"""
-    if dtype_name == "bf16":
-        return torch.bfloat16
-    if dtype_name == "fp16":
-        return torch.float16
-    if dtype_name == "fp32":
-        return torch.float32
+def resolve_dtype(dtype_name):
+    """解析 dtype（支持字符串或 torch.dtype）为 torch.dtype。"""
+    if dtype_name is None:
+        return None
+    if isinstance(dtype_name, torch.dtype):
+        return dtype_name
+    if isinstance(dtype_name, str):
+        key = dtype_name.strip().lower()
+        if key in {"bf16", "bfloat16"}:
+            return torch.bfloat16
+        if key in {"fp16", "float16", "half"}:
+            return torch.float16
+        if key in {"fp32", "float32", "float"}:
+            return torch.float32
     return None
 
 
