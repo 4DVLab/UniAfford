@@ -248,7 +248,7 @@ def main():
         f"deepspeed={config.deepspeed.precision}"
     )
     enable_trainable_modules(model, config.name_of_params_to_train)
-    align_mllm_trainable_dtypes(model, model_config.mllm.qwen_dtype, logger)
+    # align_mllm_trainable_dtypes(model, model_config.mllm.qwen_dtype, logger)
     log_param_dtype_stats(model, logger, stage="before_deepspeed_init")
 
     """ ------------------------- 加载数据集 --------------------------- """

@@ -19,7 +19,7 @@ class DeepSpeedConfigs(Configs):
         # 与 DeepSpeed 顶层键对应的属性
         train_micro_batch_size_per_gpu: int = 1,
         gradient_accumulation_steps: int = 1,
-        precision: Optional[torch.dtype] = 'bf16',
+        precision: Optional[torch.dtype] = 'fp32',
         gradient_clipping: float = 1.0,
 
         # zero_optimization 相关（默认 ZeRO-3：模型+优化器+梯度全分片）
@@ -263,7 +263,7 @@ class TrainingConfig(Configs):
 
         if model_config is None:
             model_config = JointAffordanceConfig(
-                mllm_config=MLLMConfigs(qwen_dtype='bf16'),
+                mllm_config=MLLMConfigs(compute_dtype='bf16'),
                 image_decoder=ImageDecoderConfigs(compute_dtype='fp32'),
                 point_decoder=PointDecoderConfigs(compute_dtype='fp32'),
             )
