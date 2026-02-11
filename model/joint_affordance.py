@@ -61,28 +61,28 @@ class MLLMBackbone(nn.Module):
             model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
                 model_name,
                 attn_implementation=config.qwen_attn_implementation,
-                torch_dtype=dtype,
+                dtype=dtype,
             )
         elif "qwen3" in model_name_lower:
             from transformers import Qwen3VLForConditionalGeneration
             model = Qwen3VLForConditionalGeneration.from_pretrained(
                 model_name,
                 attn_implementation=config.qwen_attn_implementation,
-                torch_dtype=dtype,
+                dtype=dtype,
             )
         elif "qwen2.5" in model_name_lower:
             from transformers import Qwen2_5_VLForConditionalGeneration
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 model_name,
                 attn_implementation=config.qwen_attn_implementation,
-                torch_dtype=dtype,
+                dtype=dtype,
             )
         else:
             from transformers import Qwen2VLForConditionalGeneration
             model = Qwen2VLForConditionalGeneration.from_pretrained(
                 model_name,
                 attn_implementation=config.qwen_attn_implementation,
-                torch_dtype=dtype,
+                dtype=dtype,
             )
 
         # 二次兜底：确保参数实际 dtype 与训练配置一致，避免被预训练权重默认 dtype 影响。
@@ -168,7 +168,9 @@ class ImageHiddenStateDecoder(nn.Module):
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到 SAM prompt 空间。"""
         # assert len(self.text_hidden_fcs) == 1
-        hidden_states = hidden_states.to(self.config.compute_dtype)
+        # 以实际权重 dtype 为准，避免 config 与参数真实 dtype 不一致导致 matmul 报错。
+        target_dtype = next(self.text_hidden_fcs[0].parameters()).dtype
+        hidden_states = hidden_states.to(target_dtype)
         projected = self.text_hidden_fcs[0](hidden_states)
         if projected.dim() == 2:
             projected = projected.unsqueeze(0)
@@ -267,7 +269,9 @@ class PointCloudHiddenStateDecoder(nn.Module):
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
-        hidden_states = hidden_states.to(self.config.compute_dtype)
+        # 以实际权重 dtype 为准，避免 config 与参数真实 dtype 不一致导致 matmul 报错。
+        target_dtype = next(self.text_hidden_fcs[0].parameters()).dtype
+        hidden_states = hidden_states.to(target_dtype)
         projected = self.text_hidden_fcs[0](hidden_states)
         if projected.dim() == 2:
             projected = projected.unsqueeze(0)
@@ -403,16 +407,17 @@ class JointAffordanceModel(nn.Module):
         point_logits = None
 
         if hidden_states is not None:
-            # ---- 2. 投影 + 提取 SEG token 嵌入 ----
-            image_hidden = self.image_decoder.project_hidden_states(hidden_states)
-            point_hidden = self.point_decoder.project_hidden_states(hidden_states)
+            # ---- 2. 提取 SEG token 嵌入、投影 ----
+            # HACK: 目前先共用语义空间，看看会不会有相互增强的效果
+            point_pred_emb = image_pred_emb = self._extract_token_embeddings(
+                input_ids, hidden_states, self.seg_token_idx
+            )  # [B, C']
+            # point_pred_emb = self._extract_token_embeddings(
+            #     input_ids, hidden_states, self.aff_token_idx
+            # )  # [B, C']
 
-            image_pred_emb = self._extract_token_embeddings(
-                input_ids, image_hidden, self.seg_token_idx
-            )  # [B, C']
-            point_pred_emb = self._extract_token_embeddings(
-                input_ids, point_hidden, self.seg_token_idx
-            )  # [B, C']
+            image_pred_emb = self.image_decoder.project_hidden_states(image_pred_emb)
+            point_pred_emb = self.point_decoder.project_hidden_states(point_pred_emb)
 
             # ---- 3. 2D 图像分割 ----
             # 默认 images 非空（由数据集与 collate 保证），所有 rank 统一前向。

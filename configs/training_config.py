@@ -258,7 +258,7 @@ class TrainingConfig(Configs):
         if samples_per_epoch is not None:
             steps_per_epoch = samples_per_epoch // batch_size
 
-        deepspeed_config = DeepSpeedConfigs(precision='bf16')
+        deepspeed_config = DeepSpeedConfigs(precision='fp32')
         lora_config = LoRAConfigs()
 
         if model_config is None:
