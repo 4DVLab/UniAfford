@@ -128,41 +128,30 @@ def log_param_dtype_stats(model, logger, stage):
         logger.info(f"[{stage}] param dtype({name}): total={total_sub}, dist={counts_sub}")
 
 
-def align_trainable_param_dtypes(model, target_dtype, logger):
-    """确保所有可训练浮点参数 dtype 一致，避免 ZeRO-3 通信时报类型不匹配。"""
+def align_mllm_trainable_dtypes(model, target_dtype, logger):
+    """将 MLLM 中可训练浮点参数统一到目标 dtype（通常用于 LoRA 注入后对齐）。"""
     if target_dtype is None:
-        logger.warning("未指定 precision，对可训练参数 dtype 不做统一。")
+        return
+    mllm_module = getattr(model, "mllm", None)
+    if mllm_module is None:
         return
 
-    before_counts = {}
     converted = 0
-    total = 0
-    for _, param in model.named_parameters():
+    total_trainable = 0
+    for name, param in mllm_module.named_parameters():
         if not param.requires_grad or not param.is_floating_point():
             continue
-        total += 1
-        before_counts[str(param.dtype)] = before_counts.get(str(param.dtype), 0) + 1
+        total_trainable += 1
         if param.dtype != target_dtype:
             param.data = param.data.to(dtype=target_dtype)
             if param.grad is not None:
                 param.grad.data = param.grad.data.to(dtype=target_dtype)
             converted += 1
 
-    after_counts = {}
-    for _, param in model.named_parameters():
-        if not param.requires_grad or not param.is_floating_point():
-            continue
-        after_counts[str(param.dtype)] = after_counts.get(str(param.dtype), 0) + 1
-
     logger.info(
-        f"统一可训练参数 dtype -> {target_dtype}: total={total}, converted={converted}, "
-        f"before={before_counts}, after={after_counts}"
+        f"MLLM 可训练参数 dtype 对齐 -> {target_dtype}: "
+        f"trainable={total_trainable}, converted={converted}"
     )
-    if len(after_counts) > 1:
-        raise RuntimeError(
-            f"可训练参数仍存在混合 dtype，无法安全使用 ZeRO-3: {after_counts}. "
-            "请检查 name_of_params_to_train、LoRA 注入后参数 dtype 与 precision 配置。"
-        )
 
 
 def compute_losses(output_dict, input_dict, model_engine):
@@ -259,7 +248,7 @@ def main():
         f"deepspeed={config.deepspeed.precision}"
     )
     enable_trainable_modules(model, config.name_of_params_to_train)
-    # align_trainable_param_dtypes(model, config.precision, logger)
+    align_mllm_trainable_dtypes(model, model_config.mllm.qwen_dtype, logger)
     log_param_dtype_stats(model, logger, stage="before_deepspeed_init")
 
     """ ------------------------- 加载数据集 --------------------------- """
