@@ -116,7 +116,6 @@ class MLLMBackbone(nn.Module):
         model_inputs["return_dict"] = True
         outputs = self.model(**model_inputs)
 
-        print(outputs)
         # TODO: check outputs
         if outputs.hidden_states is not None:
             hidden_states = outputs.hidden_states[-1]
@@ -173,8 +172,6 @@ class ImageHiddenStateDecoder(nn.Module):
         target_dtype = next(self.text_hidden_fcs[0].parameters()).dtype
         hidden_states = hidden_states.to(target_dtype)
         projected = self.text_hidden_fcs[0](hidden_states)
-        if projected.dim() == 2:
-            projected = projected.unsqueeze(0)
         return projected
 
     def get_visual_embs(self, pixel_values: torch.FloatTensor):
@@ -274,8 +271,6 @@ class PointCloudHiddenStateDecoder(nn.Module):
         target_dtype = next(self.text_hidden_fcs[0].parameters()).dtype
         hidden_states = hidden_states.to(target_dtype)
         projected = self.text_hidden_fcs[0](hidden_states)
-        if projected.dim() == 2:
-            projected = projected.unsqueeze(0)
         return projected
 
     def forward(
