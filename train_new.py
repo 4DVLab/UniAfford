@@ -99,8 +99,8 @@ def create_param_groups(model, config, logger):
     return param_groups
 
 
-def log_trainable_dtype_stats(model, logger, stage):
-    """打印可训练参数 dtype 分布，便于定位初始化前后 dtype 变化。"""
+def log_param_dtype_stats(model, logger, stage):
+    """打印全部参数 dtype 分布（含冻结参数）。"""
     module_refs = {
         "mllm": getattr(model, "mllm", None),
         "image_decoder": getattr(model, "image_decoder", None),
@@ -111,7 +111,7 @@ def log_trainable_dtype_stats(model, logger, stage):
         counts = {}
         total = 0
         for p in params_iter:
-            if not p.requires_grad or not p.is_floating_point():
+            if not p.is_floating_point():
                 continue
             total += 1
             key = str(p.dtype)
@@ -119,13 +119,13 @@ def log_trainable_dtype_stats(model, logger, stage):
         return total, counts
 
     total_all, counts_all = _count_dtypes(model.parameters())
-    logger.info(f"[{stage}] trainable dtype(all): total={total_all}, dist={counts_all}")
+    logger.info(f"[{stage}] param dtype(all): total={total_all}, dist={counts_all}")
 
     for name, module in module_refs.items():
         if module is None:
             continue
         total_sub, counts_sub = _count_dtypes(module.parameters())
-        logger.info(f"[{stage}] trainable dtype({name}): total={total_sub}, dist={counts_sub}")
+        logger.info(f"[{stage}] param dtype({name}): total={total_sub}, dist={counts_sub}")
 
 
 def align_trainable_param_dtypes(model, target_dtype, logger):
@@ -260,7 +260,7 @@ def main():
     )
     enable_trainable_modules(model, config.name_of_params_to_train)
     # align_trainable_param_dtypes(model, config.precision, logger)
-    log_trainable_dtype_stats(model, logger, stage="before_deepspeed_init")
+    log_param_dtype_stats(model, logger, stage="before_deepspeed_init")
 
     """ ------------------------- 加载数据集 --------------------------- """
     logger.info("=" * 80)
@@ -399,7 +399,7 @@ def main():
     
     logger.info(f"DeepSpeed 初始化完成，训练数据加载器大小: {len(train_loader)}")
     model_for_dtype_log = model_engine.module if hasattr(model_engine, "module") else model_engine
-    log_trainable_dtype_stats(model_for_dtype_log, logger, stage="after_deepspeed_init")
+    log_param_dtype_stats(model_for_dtype_log, logger, stage="after_deepspeed_init")
 
 
     """ ------------------------- 训练 --------------------------- """

@@ -116,6 +116,7 @@ class MLLMBackbone(nn.Module):
         model_inputs["return_dict"] = True
         outputs = self.model(**model_inputs)
 
+        print(outputs)
         # TODO: check outputs
         if outputs.hidden_states is not None:
             hidden_states = outputs.hidden_states[-1]
@@ -327,20 +328,20 @@ class JointAffordanceModel(nn.Module):
 
     def _extract_token_embeddings(
         self,
-        input_ids: Optional[torch.Tensor],
         last_hidden_state: torch.Tensor,
-        token_idx: Optional[int],
+        token_ids: Optional[torch.Tensor],
+        token_idx: int,
     ) -> torch.Tensor:
         """
-        从隐藏状态中提取**第一个**匹配特殊 token（如 [SEG]）位置的嵌入。
+        从隐藏状态中提取匹配特殊 token（如 [SEG]）位置的嵌入。
 
         当前假设每个样本恰好有 1 个 [SEG] token。
         TODO: 若后续支持多 [SEG]（一个 SEG 对应一组图像/点云），
               应返回 [B, N_seg, C] 并在下游逐 SEG 生成 mask。
 
         Args:
-            input_ids: [B, L] 输入 token IDs。
             last_hidden_state: [B, L', C] 投影后的隐藏状态。
+            token_ids: [B, L] 的 token id 序列（通常来自模型输出 logits 的 argmax）。
             token_idx: 特殊 token 的词汇表索引。
 
         Returns:
@@ -348,10 +349,9 @@ class JointAffordanceModel(nn.Module):
                 若某样本无匹配 token，对应行为零向量。
         """
         B, _, C = last_hidden_state.shape
-        if input_ids is None or token_idx is None:
+        if token_ids is None or token_idx is None:
             return last_hidden_state.new_zeros(B, C)
-
-        token_mask = input_ids == token_idx  # [B, L]
+        token_mask = (token_ids == token_idx)
 
         # 若长度不一致，截断到较短的公共长度
         if last_hidden_state.shape[1] != token_mask.shape[1]:
@@ -402,22 +402,22 @@ class JointAffordanceModel(nn.Module):
             position_ids=position_ids,
         )
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
+        output_obj = mllm_out.get("output")
+        token_ids = None
+        if output_obj is not None and getattr(output_obj, "logits", None) is not None:
+            token_ids = output_obj.logits.argmax(dim=-1)
 
         image_logits = None
         point_logits = None
 
         if hidden_states is not None:
-            # ---- 2. 提取 SEG token 嵌入、投影 ----
+            # ---- 2. 先提取 SEG token 的单 token hidden_state，再分别做投影 ----
             # HACK: 目前先共用语义空间，看看会不会有相互增强的效果
-            point_pred_emb = image_pred_emb = self._extract_token_embeddings(
-                input_ids, hidden_states, self.seg_token_idx
-            )  # [B, C']
-            # point_pred_emb = self._extract_token_embeddings(
-            #     input_ids, hidden_states, self.aff_token_idx
-            # )  # [B, C']
-
-            image_pred_emb = self.image_decoder.project_hidden_states(image_pred_emb)
-            point_pred_emb = self.point_decoder.project_hidden_states(point_pred_emb)
+            seg_hidden = self._extract_token_embeddings(
+                hidden_states, token_ids, self.seg_token_idx
+            )  # [B, C]
+            image_pred_emb = self.image_decoder.project_hidden_states(seg_hidden)
+            point_pred_emb = self.point_decoder.project_hidden_states(seg_hidden)
 
             # ---- 3. 2D 图像分割 ----
             # 默认 images 非空（由数据集与 collate 保证），所有 rank 统一前向。
