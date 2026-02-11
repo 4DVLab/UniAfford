@@ -44,7 +44,7 @@ def create_param_groups(model, config, logger):
     def _collect_params(module):
         if module is None:
             return []
-        return [p for p in module.parameters() if p.requires_grad]
+        return [p for p in module.parameters() if p.requires_grad and p.is_floating_point()]
 
     llm_params = _collect_params(getattr(model, "mllm", None))
     vision_2d_params = _collect_params(getattr(model, "image_decoder", None))
@@ -52,8 +52,11 @@ def create_param_groups(model, config, logger):
 
     used_ids = {id(p) for p in llm_params + vision_2d_params + vision_3d_params}
     other_params = []
-    for _, param in model.named_parameters():
+    for name, param in model.named_parameters():
         if not param.requires_grad:
+            continue
+        if not param.is_floating_point():
+            logger.warning(f"跳过非浮点可训练参数: {name}, dtype={param.dtype}")
             continue
         if id(param) in used_ids:
             continue
@@ -90,6 +93,43 @@ def create_param_groups(model, config, logger):
         logger.info(f"✓ 其他参数组: {len(other_params)} 个参数, lr={config.lr}")
 
     return param_groups
+
+
+def align_trainable_param_dtypes(model, target_dtype, logger):
+    """确保所有可训练浮点参数 dtype 一致，避免 ZeRO-3 通信时报类型不匹配。"""
+    if target_dtype is None:
+        logger.warning("未指定 precision，对可训练参数 dtype 不做统一。")
+        return
+
+    before_counts = {}
+    converted = 0
+    total = 0
+    for _, param in model.named_parameters():
+        if not param.requires_grad or not param.is_floating_point():
+            continue
+        total += 1
+        before_counts[str(param.dtype)] = before_counts.get(str(param.dtype), 0) + 1
+        if param.dtype != target_dtype:
+            param.data = param.data.to(dtype=target_dtype)
+            if param.grad is not None:
+                param.grad.data = param.grad.data.to(dtype=target_dtype)
+            converted += 1
+
+    after_counts = {}
+    for _, param in model.named_parameters():
+        if not param.requires_grad or not param.is_floating_point():
+            continue
+        after_counts[str(param.dtype)] = after_counts.get(str(param.dtype), 0) + 1
+
+    logger.info(
+        f"统一可训练参数 dtype -> {target_dtype}: total={total}, converted={converted}, "
+        f"before={before_counts}, after={after_counts}"
+    )
+    if len(after_counts) > 1:
+        raise RuntimeError(
+            f"可训练参数仍存在混合 dtype，无法安全使用 ZeRO-3: {after_counts}. "
+            "请检查 name_of_params_to_train、LoRA 注入后参数 dtype 与 precision 配置。"
+        )
 
 
 def compute_losses(output_dict, input_dict, model_engine):
@@ -177,6 +217,7 @@ def main():
     # 解冻必要模块
     logger.info(f"训练参数模块: {', '.join(config.name_of_params_to_train)}")
     enable_trainable_modules(model, config.name_of_params_to_train)
+    align_trainable_param_dtypes(model, config.precision, logger)
 
     """ ------------------------- 加载数据集 --------------------------- """
     logger.info("=" * 80)

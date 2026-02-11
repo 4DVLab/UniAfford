@@ -8,7 +8,7 @@ from typing import Optional
 import torch
 from utils.common import resolve_dtype
 
-from .base_config import Configs, JointAffordanceConfig
+from .base_config import Configs, JointAffordanceConfig, MLLMConfigs
 
 
 class DeepSpeedConfigs(Configs):
@@ -254,6 +254,21 @@ class TrainingConfig(Configs):
             steps_per_epoch = samples_per_epoch // batch_size
 
         resolved_precision = resolve_dtype(precision)
+
+        if model_config is None:
+            model_config = JointAffordanceConfig(
+                mllm_config=MLLMConfigs(qwen_dtype=resolved_precision),
+                compute_dtype=resolved_precision,
+            )
+        else:
+            # 训练精度统一入口：确保 TrainingConfig.precision 与模型内部 dtype 一致。
+            model_config.compute_dtype = resolved_precision
+            if getattr(model_config, "mllm", None) is not None:
+                model_config.mllm.qwen_dtype = resolved_precision
+            if getattr(model_config, "image_decoder", None) is not None:
+                model_config.image_decoder.compute_dtype = resolved_precision
+            if getattr(model_config, "point_decoder", None) is not None:
+                model_config.point_decoder.compute_dtype = resolved_precision
         
         super().__init__(
             # 基础配置
@@ -261,7 +276,7 @@ class TrainingConfig(Configs):
             
             precision = resolved_precision,
 
-            model_config = model_config or JointAffordanceConfig(compute_dtype=resolved_precision),
+            model_config = model_config,
             vis_save_path = vis_save_path,
             
             # 模型配置

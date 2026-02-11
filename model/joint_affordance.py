@@ -33,9 +33,11 @@ class MLLMBackbone(nn.Module):
         self.vocab_size = self.model.config.text_config.vocab_size
 
         if self.config.hidden_size != self.hidden_size:
+            print(f"Warning: hidden_size mismatch, config={self.config.hidden_size}, model={self.hidden_size}")
             self.config.hidden_size = self.hidden_size
 
         if self.config.vocab_size != self.vocab_size:
+            print(f"Warning: vocab_size mismatch, config={self.config.vocab_size}, model={self.vocab_size}")
             self.config.vocab_size = self.vocab_size
 
         if self.config.tokenizer is None:
@@ -59,29 +61,33 @@ class MLLMBackbone(nn.Module):
             model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
                 model_name,
                 attn_implementation=config.qwen_attn_implementation,
-                dtype=dtype,
+                torch_dtype=dtype,
             )
         elif "qwen3" in model_name_lower:
             from transformers import Qwen3VLForConditionalGeneration
             model = Qwen3VLForConditionalGeneration.from_pretrained(
                 model_name,
                 attn_implementation=config.qwen_attn_implementation,
-                dtype=dtype,
+                torch_dtype=dtype,
             )
         elif "qwen2.5" in model_name_lower:
             from transformers import Qwen2_5_VLForConditionalGeneration
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 model_name,
                 attn_implementation=config.qwen_attn_implementation,
-                dtype=dtype,
+                torch_dtype=dtype,
             )
         else:
             from transformers import Qwen2VLForConditionalGeneration
             model = Qwen2VLForConditionalGeneration.from_pretrained(
                 model_name,
                 attn_implementation=config.qwen_attn_implementation,
-                dtype=dtype,
+                torch_dtype=dtype,
             )
+
+        # 二次兜底：确保参数实际 dtype 与训练配置一致，避免被预训练权重默认 dtype 影响。
+        if dtype is not None:
+            model = model.to(dtype=dtype)
 
         model.config.use_cache = False
         

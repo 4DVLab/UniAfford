@@ -74,8 +74,8 @@ class ImageDecoderConfigs(Configs):
 
     def __init__(
         self,
-        compute_dtype: Optional[torch.dtype] = 'fp32',
-        hidden_size: int = 768,
+        compute_dtype: Optional[torch.dtype] = torch.float32,
+        hidden_size: int = 256,
         num_heads: int = 8,
         mm_vision_select_feature: str = "patch",
         image_aspect_ratio: str = "square",
@@ -88,7 +88,6 @@ class ImageDecoderConfigs(Configs):
         use_cache: bool = False,
         **kwargs,
     ):  
-        compute_dtype = resolve_dtype(compute_dtype)
         super().__init__(
             compute_dtype=compute_dtype,
             hidden_size=hidden_size,
@@ -111,13 +110,12 @@ class PointDecoderConfigs(Configs):
 
     def __init__(
         self,
-        compute_dtype: Optional[torch.dtype] = 'fp32',
-        hidden_size: int = 768,
+        compute_dtype: Optional[torch.dtype] = torch.float32,
+        hidden_size: int = 128,
         num_heads: int = 8,
         # point_out_dim: int = None, # 为空则可以适配任意点数的输入输出
         **kwargs,
     ):
-        compute_dtype = resolve_dtype(compute_dtype)
         super().__init__(
             compute_dtype=compute_dtype,
             hidden_size=hidden_size,
@@ -139,8 +137,8 @@ class JointAffordanceConfig(Configs):
     ):  
         super().__init__(compute_dtype=compute_dtype, **kwargs)
         self.mllm = mllm_config or MLLMConfigs()
-        self.image_decoder = image_decoder or ImageDecoderConfigs()
-        self.point_decoder = point_decoder or PointDecoderConfigs()
+        self.image_decoder = image_decoder or ImageDecoderConfigs(compute_dtype=compute_dtype)
+        self.point_decoder = point_decoder or PointDecoderConfigs(compute_dtype=compute_dtype)
 
         if self.mllm is not None:
             self.tokenizer = self.mllm.tokenizer
