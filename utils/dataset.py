@@ -366,7 +366,6 @@ def joint_affordance_collate_fn(
         pixel_values_valid_flags.append(pixel_values is not None and image_grid_thw is not None)
 
         # 2D/3D 分割输入
-        has_image_flags.append(sample.get("has_image", False))
         images_list.append(sample.get("images"))
         img_gt_masks.append(sample.get("img_gt"))
         point_clouds_list.append(sample.get("point_clouds"))

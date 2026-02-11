@@ -16,4 +16,4 @@ train_new.py \
 --vision_pretrained ../pretrained/sam_vit_h_4b8939.pth \
 --log_dir ../runs/joint-aff-exp-01/ \
 --dataset_dir ../datasets/merged1-2-3/ \
---qwen_model ../pretrained/Qwen3-VL-30B-A3B-Instruct
+--qwen_model ../pretrained/Qwen/Qwen3-VL-8B-Instruct

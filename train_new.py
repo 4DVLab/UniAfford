@@ -230,7 +230,7 @@ def main():
         f"deepspeed={config.deepspeed.precision}"
     )
     enable_trainable_modules(model, config.name_of_params_to_train)
-    align_trainable_param_dtypes(model, config.precision, logger)
+    # align_trainable_param_dtypes(model, config.precision, logger)
 
     """ ------------------------- 加载数据集 --------------------------- """
     logger.info("=" * 80)
