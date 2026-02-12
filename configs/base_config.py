@@ -27,7 +27,7 @@ class MLLMConfigs(Configs):
         # version: str = "../pretrained/llava-llama-2-13b-chat-lightning-preview",
         qwen_model_name_or_path: str = "Qwen/Qwen3-VL-8B-Instruct",
         qwen_attn_implementation: str = "flash_attention_2",
-        compute_dtype: str = "fp32",
+        compute_dtype: str = "bf16",
         model_max_length: int = 512,
         # conv_type: str = "llava_llama_2",
         vocab_size: int = 32000,
