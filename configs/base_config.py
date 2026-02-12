@@ -39,9 +39,6 @@ class MLLMConfigs(Configs):
         # vision_pretrained: Optional[str] = "../pretrained/sam_vit_h_4b8939.pth",
         train_mask_decoder: bool = True,
         out_dim: int = 256,
-        ce_loss_weight: float = 1.0,
-        dice_loss_weight: float = 0.5,
-        bce_loss_weight: float = 2.0,
         seg_token_idx: Optional[int] = None,
         aff_token_idx: Optional[int] = None,
     ):
@@ -61,9 +58,6 @@ class MLLMConfigs(Configs):
             # vision_pretrained=vision_pretrained,
             train_mask_decoder=train_mask_decoder,
             out_dim=out_dim,
-            ce_loss_weight=ce_loss_weight,
-            dice_loss_weight=dice_loss_weight,
-            bce_loss_weight=bce_loss_weight,
             seg_token_idx=seg_token_idx,
             aff_token_idx=aff_token_idx,
         )

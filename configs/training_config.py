@@ -187,12 +187,6 @@ class TrainingConfig(Configs):
         self,
         # 基础配置
         local_rank=0,
-        mllm_precision=None,
-        image_precision=None,
-        point_precision=None,
-        deepspeed_precision=None,
-        trainable_param_dtype=None,
-        strict_zero3_dtype_check=True,
         model_config: Optional[JointAffordanceConfig] = None,
         
         # 模型配置
@@ -241,9 +235,18 @@ class TrainingConfig(Configs):
         
         # 其他配置
         num_classes_per_sample=3,
-        mask_threshold_2d=0.0,
+        mask_threshold_2d=0.5,
         mask_threshold_3d=0.5,
         gradient_checkpointing=True,
+        
+        # 损失配置
+        focal_loss_weight=2.0,
+        dice_loss_weight=0.5,
+        focal_alpha=0.25,
+        focal_gamma=2.0,
+        bce_loss_weight=2.0,
+        pc_dice_loss_weight=0.5,
+        ce_loss_weight=1.0,
         
         # 高级配置
         exclude_val=False,
@@ -258,14 +261,14 @@ class TrainingConfig(Configs):
         if samples_per_epoch is not None:
             steps_per_epoch = samples_per_epoch // batch_size
 
-        deepspeed_config = DeepSpeedConfigs(precision='fp32')
+        deepspeed_config = DeepSpeedConfigs(precision='bf16')
         lora_config = LoRAConfigs()
 
         if model_config is None:
             model_config = JointAffordanceConfig(
-                mllm_config=MLLMConfigs(compute_dtype='bf16'),
-                image_decoder=ImageDecoderConfigs(compute_dtype='fp32'),
-                point_decoder=PointDecoderConfigs(compute_dtype='fp32'),
+                mllm_config=MLLMConfigs(compute_dtype='bf16'),  # Qwen必须使用bf16以使用flash-attn
+                image_decoder=ImageDecoderConfigs(compute_dtype='bf16'),  # 由于deepspeed
+                point_decoder=PointDecoderConfigs(compute_dtype='bf16'),
             )
         
         super().__init__(
@@ -331,6 +334,15 @@ class TrainingConfig(Configs):
             mask_threshold_3d = mask_threshold_3d,
             gradient_checkpointing = gradient_checkpointing,
             
+            # 损失配置
+            focal_loss_weight = focal_loss_weight,
+            dice_loss_weight = dice_loss_weight,
+            focal_alpha = focal_alpha,
+            focal_gamma = focal_gamma,
+            bce_loss_weight = bce_loss_weight,
+            pc_dice_loss_weight = pc_dice_loss_weight,
+            ce_loss_weight = ce_loss_weight,
+
             # 高级配置
             exclude_val = exclude_val,
             no_eval = no_eval,

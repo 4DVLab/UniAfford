@@ -37,23 +37,21 @@ def img_DICE_loss(
     eps: float = 1e-6,
 ) -> torch.Tensor:
     """
-    批量计算2D Dice损失（1 - Dice系数）
+    批量计算2D Dice损失（1 - Dice系数）。
+    输入为 logits（内部自动 sigmoid）。
     Returns:
         loss: 标量，所有样本的平均损失
     """
-    batch_size = inputs.shape[0]
-    
-    inputs = inputs.sigmoid()  # [Batch, H, W]
+    inputs = inputs.sigmoid()  # logits → [0, 1]
     inputs = inputs.flatten(1)  # [Batch, H*W]
     targets = targets.flatten(1)  # [Batch, H*W]
     
-    # 逐样本计算 Dice 系数
-    numerator = 2 * (inputs / scale * targets).sum(dim=1)  # [Batch]
-    denominator = (inputs / scale).sum(dim=1) + (targets / scale).sum(dim=1)  # [Batch]
-    dice = (numerator + eps) / (denominator + eps)  # [Batch]
+    numerator = 2 * (inputs / scale * targets).sum(dim=1)
+    denominator = (inputs / scale).sum(dim=1) + (targets / scale).sum(dim=1)
+    dice = (numerator + eps) / (denominator + eps)
     
-    loss = 1 - dice  # [Batch]
-    return loss.mean()  # 返回平均损失
+    loss = 1 - dice
+    return loss.mean()
 
 
 def sigmoid_CE_loss(
@@ -61,34 +59,85 @@ def sigmoid_CE_loss(
     targets: torch.Tensor,
 ) -> torch.Tensor:
     """
-    批量计算Sigmoid交叉熵损失（二元交叉熵）
+    批量计算 Sigmoid 交叉熵损失（标准 BCE）。
+    输入为 logits（F.binary_cross_entropy_with_logits 内部自动 sigmoid）。
     Returns:
         loss: 标量，所有样本的平均损失
     """
     loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    loss = loss.flatten(1).mean(dim=1)  # [Batch]
-    return loss.mean()  # 返回平均损失
+    loss = loss.flatten(1).mean(dim=1)
+    return loss.mean()
+
+
+def sigmoid_focal_loss(
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+    alpha: float = 0.25,
+    gamma: float = 2.0,
+) -> torch.Tensor:
+    """
+    Sigmoid Focal Loss —— 对 BCE 的改进，降低已分类正确（易分类）像素的权重，
+    迫使模型关注困难样本（如物体上的非 affordance 像素）。
+
+    核心公式：FL(p_t) = -alpha_t * (1 - p_t)^gamma * log(p_t)
+    - gamma=0 时退化为标准 BCE
+    - gamma>0 时，对 p_t 接近 1（易分类）的像素大幅降低权重
+
+    适用于 2D affordance 分割：当模型预测覆盖了整个物体时，
+    物体上非 affordance 区域的 false positive 像素将获得更大的梯度信号，
+    推动模型精化到真正的 affordance 区域。
+
+    Args:
+        inputs: [Batch, H, W] raw logits（未经 sigmoid）
+        targets: [Batch, H, W] GT 标签，值域 {0, 1}
+        alpha: 正/负样本平衡因子，alpha 用于正样本，(1-alpha) 用于负样本
+        gamma: 聚焦参数，越大越聚焦于困难样本
+    Returns:
+        loss: 标量，所有样本的平均 Focal Loss
+    """
+    p = inputs.sigmoid()
+    # 标准 BCE（per-pixel）
+    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    # p_t: 正确类别的预测概率（p if target=1, 1-p if target=0）
+    p_t = p * targets + (1 - p) * (1 - targets)
+    # focal 调制因子：(1 - p_t)^gamma, 易分类样本权重趋近 0
+    focal_weight = (1 - p_t) ** gamma
+    # alpha 平衡因子
+    if alpha >= 0:
+        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
+        focal_weight = alpha_t * focal_weight
+    loss = focal_weight * ce_loss
+    return loss.flatten(1).mean(dim=1).mean()
 
 
 def img_loss(
     pred_masks: torch.Tensor,
     gt_masks: torch.Tensor,
-    bce_loss_weight: float,
-    dice_loss_weight: float,
+    focal_loss_weight: float = 2.0,
+    dice_loss_weight: float = 0.5,
+    focal_alpha: float = 0.25,
+    focal_gamma: float = 2.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    批量计算2D掩码总损失（BCE + Dice）
+    批量计算 2D 掩码总损失（Focal + Dice）。
+    用 Focal Loss 替代标准 BCE，解决 affordance 区域是物体子集时梯度信号不足的问题。
+
+    Args:
+        pred_masks: [Batch, H, W] 预测 logits
+        gt_masks: [Batch, H, W] GT 掩码
+        focal_loss_weight: Focal Loss 权重（对应旧版 bce_loss_weight 的位置）
+        dice_loss_weight: Dice Loss 权重
+        focal_alpha: Focal Loss 的 alpha 参数
+        focal_gamma: Focal Loss 的 gamma 参数（0 = 退化为标准 BCE）
     Returns:
-        mask_bce_loss: BCE损失
-        mask_dice_loss: Dice损失
-        mask_loss: 总损失
+        img_focal_loss: Focal 损失
+        img_dice_loss: Dice 损失
+        img_total_loss: 加权总损失
     """
-    mask_bce_loss = sigmoid_CE_loss(pred_masks, gt_masks)
-    mask_dice_loss = img_DICE_loss(pred_masks, gt_masks)
-    
-    mask_loss =  bce_loss_weight * mask_bce_loss + dice_loss_weight * mask_dice_loss
-    
-    return mask_bce_loss, mask_dice_loss, mask_loss
+    img_focal = sigmoid_focal_loss(pred_masks, gt_masks, alpha=focal_alpha, gamma=focal_gamma)
+    img_dice = img_DICE_loss(pred_masks, gt_masks)
+    img_total = focal_loss_weight * img_focal + dice_loss_weight * img_dice
+    return img_focal, img_dice, img_total
 
 
 """ -------------------------------------- pc Loss ------------------------------------- """
@@ -118,14 +167,29 @@ def smooth_L1_loss_heatmap(pred_heatmap: torch.Tensor, target_heatmap: torch.Ten
     return smooth_l1.mean()
 
 
-def dice_loss_heatmap(pred_heatmap: torch.Tensor, target_heatmap: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+def dice_loss_heatmap(
+    pred_heatmap: torch.Tensor,
+    target_heatmap: torch.Tensor,
+    from_logits: bool = True,
+    eps: float = 1e-6,
+) -> torch.Tensor:
     """
     批量计算热力图连续版Dice Loss
+    Args:
+        pred_heatmap: [Batch, N] 预测值（logits 或概率，由 from_logits 控制）
+        target_heatmap: [Batch, N] 目标值，值域 [0, 1]
+        from_logits: 若为 True，先对 pred 做 sigmoid 映射到 [0,1]；
+                     若为 False，假设 pred 已经是概率值。
+        eps: 防止除零的小常数
     Returns:
-        loss: 标量，所有样本的平均损失
+        loss: 标量，所有样本的平均 Dice Loss
     """
     pred_flat = pred_heatmap.flatten(1)
     target_flat = target_heatmap.flatten(1)
+
+    # 与 img_DICE_loss 保持一致：logits 输入时先做 sigmoid
+    if from_logits:
+        pred_flat = pred_flat.sigmoid()
     
     # 连续值交集（乘积和）
     intersection = (pred_flat * target_flat).sum(dim=1)  # [Batch]
@@ -142,39 +206,125 @@ def pc_loss(
     gt_3d_masks: torch.Tensor,
     bce_loss_weight: float,
     dice_loss_weight: float,
+    from_logits: bool = True,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     批量计算3D点云掩码总损失（BCE + Dice）
+    Args:
+        pred_3d_masks: [Batch, N] 预测 logits（raw model output）
+        gt_3d_masks: [Batch, N] GT 标签，值域 [0, 1]
+        bce_loss_weight: BCE 损失权重
+        dice_loss_weight: Dice 损失权重
+        from_logits: 输入是否为 logits（默认 True，与 sigmoid_CE_loss 保持一致）
     Returns:
         mask_3d_bce_loss: BCE损失
         mask_3d_dice_loss: Dice损失
-        mask_3d_loss: 总损失
+        mask_3d_loss: 加权总损失
     """
+    # sigmoid_CE_loss 内部使用 binary_cross_entropy_with_logits，自带 sigmoid
     mask_3d_bce_loss = sigmoid_CE_loss(pred_3d_masks, gt_3d_masks)
-    mask_3d_dice_loss = dice_loss_heatmap(pred_3d_masks, gt_3d_masks)
+    # dice_loss_heatmap 现在也会在 from_logits=True 时先做 sigmoid，保持一致
+    mask_3d_dice_loss = dice_loss_heatmap(pred_3d_masks, gt_3d_masks, from_logits=from_logits)
     
     mask_3d_loss = bce_loss_weight * mask_3d_bce_loss + dice_loss_weight * mask_3d_dice_loss
     
     return mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss
 
 
-""" -------------------------------------- 虚拟损失 ------------------------------------- """
+def compute_losses(
+    output_dict: Dict,
+    input_dict: Dict,
+    device: torch.device,
+    # ---- 2D (Focal + Dice) ----
+    focal_loss_weight: float = 2.0,
+    dice_loss_weight: float = 0.5,
+    focal_alpha: float = 0.25,
+    focal_gamma: float = 2.0,
+    # ---- 3D (BCE + Dice) ----
+    bce_loss_weight: float = 2.0,
+    pc_dice_loss_weight: Optional[float] = None,
+    # ---- LLM CE ----
+    ce_loss_weight: float = 1.0,
+) -> Dict[str, torch.Tensor]:
+    """
+    统一计算所有损失，返回损失字典。训练与验证共用。
 
-def dummy_loss(model) -> torch.Tensor:
-    """计算虚拟损失（保持参数连接到计算图）"""
-    dummy_loss_val = 0
-    
-    if hasattr(model, 'point_cloud_segmentor'):
-        for param in model.point_cloud_segmentor.parameters():
-            if param.requires_grad:
-                dummy_loss_val = dummy_loss_val + (param ** 2).sum() * 1e-8
+    2D 分支使用 Focal Loss + Dice（解决 affordance ⊂ 物体时的梯度不足问题）；
+    3D 分支使用 BCE + Dice（保持原有方案）。
 
-    if hasattr(model, 'visual_model') and hasattr(model.visual_model, 'mask_decoder'):
-        for param in model.visual_model.mask_decoder.parameters():
-            if param.requires_grad:
-                dummy_loss_val = dummy_loss_val + (param ** 2).sum() * 1e-8
-    
-    return dummy_loss_val
+    Args:
+        output_dict: 模型输出字典，应包含:
+            - "image_logits": [B, H, W] 2D 预测 logits（可选）
+            - "point_logits": [B, N] 3D 预测 logits（可选）
+            - "ce_loss": 语言模型交叉熵损失（可选，由模型内部计算）
+        input_dict: 输入字典，应包含:
+            - "img_gt_tensor": [B, H, W] 2D GT 掩码（可选）
+            - "pc_gt_tensor": [B, N] 3D GT 掩码（可选）
+        focal_loss_weight: 2D Focal Loss 权重
+        dice_loss_weight: 2D / 3D Dice Loss 权重（3D 可单独用 pc_dice_loss_weight 覆盖）
+        focal_alpha: Focal Loss alpha
+        focal_gamma: Focal Loss gamma（0 = 退化为标准 BCE）
+        bce_loss_weight: 3D BCE 权重
+        pc_dice_loss_weight: 3D Dice 权重（None 时复用 dice_loss_weight）
+        ce_loss_weight: 语言模型 CE 权重
+
+    Returns:
+        Dict[str, Tensor]: 统一损失字典，始终包含以下键（缺失的分支为 0）:
+            "loss", "ce_loss",
+            "img_focal_loss", "img_dice_loss", "img_loss",
+            "pc_bce_loss", "pc_dice_loss", "pc_loss"
+    """
+    zero = torch.tensor(0.0, device=device)
+    pc_dice_w = pc_dice_loss_weight if pc_dice_loss_weight is not None else dice_loss_weight
+
+    # ---------- 2D 图像掩码损失（Focal + Dice）----------
+    img_logits = output_dict.get("image_logits")
+    img_gt = input_dict.get("img_gt_tensor")
+    if img_logits is not None and img_gt is not None:
+        img_focal, img_dice, img_total = img_loss(
+            pred_masks=img_logits,
+            gt_masks=img_gt,
+            focal_loss_weight=focal_loss_weight,
+            dice_loss_weight=dice_loss_weight,
+            focal_alpha=focal_alpha,
+            focal_gamma=focal_gamma,
+        )
+    else:
+        img_focal = img_dice = img_total = zero
+
+    # ---------- 3D 点云掩码损失（BCE + Dice）----------
+    pc_logits = output_dict.get("point_logits")
+    pc_gt = input_dict.get("pc_gt_tensor")
+    if pc_logits is not None and pc_gt is not None:
+        pc_bce, pc_dice, pc_total = pc_loss(
+            pred_3d_masks=pc_logits,
+            gt_3d_masks=pc_gt,
+            bce_loss_weight=bce_loss_weight,
+            dice_loss_weight=pc_dice_w,
+        )
+    else:
+        pc_bce = pc_dice = pc_total = zero
+
+    # ---------- 语言模型 CE 损失 ----------
+    ce = output_dict.get("ce_loss", zero)
+    if not isinstance(ce, torch.Tensor):
+        ce = torch.tensor(float(ce), device=device)
+
+    # ---------- 总损失 ----------
+    total_loss = ce_loss_weight * ce + img_total + pc_total
+
+    return {
+        "loss": total_loss,
+        "ce_loss": ce,
+        # 2D 分项（Focal 替代了旧版 BCE）
+        "img_focal_loss": img_focal,
+        "img_dice_loss": img_dice,
+        "img_loss": img_total,
+        # 3D 分项
+        "pc_bce_loss": pc_bce,
+        "pc_dice_loss": pc_dice,
+        "pc_loss": pc_total,
+    }
 
 
 """ -------------------------------------- 3D 评估指标 ------------------------------------- """

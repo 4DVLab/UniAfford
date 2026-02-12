@@ -75,6 +75,16 @@ def setup_logger(log_dir, local_rank=0, max_console_rank=1):
 
 """  ----------------------------------------------- utils functions ----------------------------------------------  """
 
+def get_current_lr(scheduler, optimizer):
+    """优先从 scheduler 读取学习率，回退到 optimizer。"""
+    if scheduler is not None and hasattr(scheduler, "get_last_lr"):
+        lr_list = scheduler.get_last_lr()
+        if len(lr_list) > 0:
+            return float(lr_list[0])
+    if optimizer is not None and hasattr(optimizer, "param_groups") and len(optimizer.param_groups) > 0:
+        return float(optimizer.param_groups[0]["lr"])
+    return None
+
 
 def resolve_dtype(dtype_name):
     """解析 dtype（支持字符串或 torch.dtype）为 torch.dtype。"""
