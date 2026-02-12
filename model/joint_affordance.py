@@ -240,10 +240,6 @@ class PointCloudHiddenStateDecoder(nn.Module):
     ):
         super().__init__()
         self.config = config
-        # 注意：点云分支在 bf16 下数值非常容易溢出为 NaN，
-        # 这里强制使用更稳定的运行精度（fp32），再在输出处转换回主干精度。
-        self.runtime_dtype = torch.float32 if config.compute_dtype == torch.bfloat16 else config.compute_dtype
-
         self.point_encoder = PointCloudEncoder(out_dim=text_hidden_size)
 
         text_fc = nn.Sequential(OrderedDict([
@@ -265,10 +261,9 @@ class PointCloudHiddenStateDecoder(nn.Module):
         for param in self.point_cloud_segmentor.parameters():
             param.requires_grad = True
 
-        # 统一切换到 runtime_dtype（通常为 fp32），提高数值稳定性
-        self.point_encoder = self.point_encoder.to(dtype=self.runtime_dtype)
-        self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.runtime_dtype)
-        self.point_cloud_segmentor = self.point_cloud_segmentor.to(dtype=self.runtime_dtype)
+        self.point_encoder = self.point_encoder.to(dtype=self.config.compute_dtype)
+        self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.config.compute_dtype)
+        self.point_cloud_segmentor = self.point_cloud_segmentor.to(dtype=self.config.compute_dtype)
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
@@ -296,10 +291,8 @@ class PointCloudHiddenStateDecoder(nn.Module):
         if point_clouds.shape[1] != 3:
             point_clouds = point_clouds.permute(0, 2, 1)
 
-        # 在更稳定的 runtime_dtype（通常为 fp32）下进行全部点云计算，
-        # 再在返回时转换回主干 compute_dtype，兼顾稳定性与显存占用。
-        pred_embeddings = pred_embeddings.to(self.runtime_dtype)
-        point_clouds = point_clouds.to(self.runtime_dtype)
+        pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
+        point_clouds = point_clouds.to(self.config.compute_dtype)
 
         # [B, C] → [B, 1, C]，PointCloud3DSegmentor 接受 [B, L, C] 的 text_feat
         text_feat = pred_embeddings.unsqueeze(1)
@@ -308,9 +301,7 @@ class PointCloudHiddenStateDecoder(nn.Module):
             dtype=torch.bool, device=text_feat.device,
         )
 
-        point_logits = self.point_cloud_segmentor(point_clouds, text_feat, text_mask)
-        # 输出仍然转回主干配置的 dtype，方便后续与 bf16 主干统一
-        return point_logits.to(self.config.compute_dtype)
+        return self.point_cloud_segmentor(point_clouds, text_feat, text_mask)
 
 
 class JointAffordanceModel(nn.Module):

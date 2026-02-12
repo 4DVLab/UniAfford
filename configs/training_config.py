@@ -268,7 +268,7 @@ class TrainingConfig(Configs):
             model_config = JointAffordanceConfig(
                 mllm_config=MLLMConfigs(compute_dtype='bf16'),  # Qwen必须使用bf16以使用flash-attn
                 image_decoder=ImageDecoderConfigs(compute_dtype='bf16'),  # 由于deepspeed
-                point_decoder=PointDecoderConfigs(compute_dtype='bf16'),
+                point_decoder=PointDecoderConfigs(compute_dtype='fp32'),
             )
         
         super().__init__(
