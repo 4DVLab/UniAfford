@@ -240,6 +240,10 @@ class PointCloudHiddenStateDecoder(nn.Module):
     ):
         super().__init__()
         self.config = config
+        # 注意：点云分支在 bf16 下数值非常容易溢出为 NaN，
+        # 这里强制使用更稳定的运行精度（fp32），再在输出处转换回主干精度。
+        self.runtime_dtype = torch.float32 if config.compute_dtype == torch.bfloat16 else config.compute_dtype
+
         self.point_encoder = PointCloudEncoder(out_dim=text_hidden_size)
 
         text_fc = nn.Sequential(OrderedDict([
@@ -261,9 +265,10 @@ class PointCloudHiddenStateDecoder(nn.Module):
         for param in self.point_cloud_segmentor.parameters():
             param.requires_grad = True
 
-        self.point_encoder = self.point_encoder.to(dtype=self.config.compute_dtype)
-        self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.config.compute_dtype)
-        self.point_cloud_segmentor = self.point_cloud_segmentor.to(dtype=self.config.compute_dtype)
+        # 统一切换到 runtime_dtype（通常为 fp32），提高数值稳定性
+        self.point_encoder = self.point_encoder.to(dtype=self.runtime_dtype)
+        self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.runtime_dtype)
+        self.point_cloud_segmentor = self.point_cloud_segmentor.to(dtype=self.runtime_dtype)
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
@@ -291,8 +296,10 @@ class PointCloudHiddenStateDecoder(nn.Module):
         if point_clouds.shape[1] != 3:
             point_clouds = point_clouds.permute(0, 2, 1)
 
-        pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
-        point_clouds = point_clouds.to(self.config.compute_dtype)
+        # 在更稳定的 runtime_dtype（通常为 fp32）下进行全部点云计算，
+        # 再在返回时转换回主干 compute_dtype，兼顾稳定性与显存占用。
+        pred_embeddings = pred_embeddings.to(self.runtime_dtype)
+        point_clouds = point_clouds.to(self.runtime_dtype)
 
         # [B, C] → [B, 1, C]，PointCloud3DSegmentor 接受 [B, L, C] 的 text_feat
         text_feat = pred_embeddings.unsqueeze(1)
@@ -301,7 +308,9 @@ class PointCloudHiddenStateDecoder(nn.Module):
             dtype=torch.bool, device=text_feat.device,
         )
 
-        return self.point_cloud_segmentor(point_clouds, text_feat, text_mask)
+        point_logits = self.point_cloud_segmentor(point_clouds, text_feat, text_mask)
+        # 输出仍然转回主干配置的 dtype，方便后续与 bf16 主干统一
+        return point_logits.to(self.config.compute_dtype)
 
 
 class JointAffordanceModel(nn.Module):
@@ -399,8 +408,15 @@ class JointAffordanceModel(nn.Module):
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
         output_obj = mllm_out.get("output")
         token_ids = None
-        if output_obj is not None and getattr(output_obj, "logits", None) is not None:
-            token_ids = output_obj.logits.argmax(dim=-1)
+        ce_loss = None
+        if output_obj is not None:
+            # 1）从 logits 中取出 token_ids，供下游 [SEG] / [AFF] token 提取使用
+            if getattr(output_obj, "logits", None) is not None:
+                token_ids = output_obj.logits.argmax(dim=-1)
+            # 2）若传入了 labels，Qwen 的 output.loss 即为语言模型交叉熵损失
+            if getattr(output_obj, "loss", None) is not None:
+                # 注意：这里不做缩放，交由 calculator.compute_losses 中的 ce_loss_weight 控制
+                ce_loss = output_obj.loss
 
         image_logits = None
         point_logits = None
@@ -449,6 +465,8 @@ class JointAffordanceModel(nn.Module):
             "image_logits": image_logits,
             "point_logits": point_logits,
             "labels": labels,
+            # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
+            "ce_loss": ce_loss,
             "output": mllm_out.get("output"),
         }
 
