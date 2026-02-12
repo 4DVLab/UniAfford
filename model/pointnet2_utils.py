@@ -559,7 +559,7 @@ class PointCloud3DSegmentor(nn.Module):
         # 对文本维度求平均（考虑掩码）
         if text_mask is not None:
             # 只对有效 token 求平均
-            mask_sum = text_mask.float().sum(1, keepdim=True).unsqueeze(-1)  # [B, 1, 1]
+            mask_sum = text_mask.to(decoded_text.dtype).sum(1, keepdim=True).unsqueeze(-1)  # [B, 1, 1]
             pred_mask = point_text_sim.sum(1) / (mask_sum.squeeze(-1) + 1e-8)  # [B, N]
         else:
             pred_mask = point_text_sim.mean(1)  # [B, N]
