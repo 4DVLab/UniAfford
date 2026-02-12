@@ -46,7 +46,7 @@ class MLLMConfigs(Configs):
             # version=version,
             qwen_model_name_or_path=qwen_model_name_or_path,
             qwen_attn_implementation=qwen_attn_implementation,
-            qwen_dtype=resolve_dtype(compute_dtype),
+            compute_dtype=resolve_dtype(compute_dtype),
             model_max_length=model_max_length,
             # conv_type=conv_type,
             vocab_size=vocab_size,

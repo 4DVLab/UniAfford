@@ -253,7 +253,7 @@ def main():
         tokenizer=processor.tokenizer,
         output_image_size=training_configs.image_size,
         output_point_nums=training_configs.num_points,
-        mllm_precision=model_config.mllm.qwen_dtype,
+        mllm_precision=model_config.mllm.compute_dtype,
         image_precision=model_config.image_decoder.compute_dtype,
         point_precision=model_config.point_decoder.compute_dtype,
     )
@@ -289,7 +289,7 @@ def main():
     train_ds_cls = JointAffordanceTrainDataset if training_configs.samples_per_epoch else JointAffordanceTorchDataset
     train_ds_kwargs = dict(
         processor=processor, image_size=training_configs.image_size, num_points=training_configs.num_points,
-        mllm_precision=model_config.mllm.qwen_dtype,
+        mllm_precision=model_config.mllm.compute_dtype,
         image_precision=model_config.image_decoder.compute_dtype,
         point_precision=model_config.point_decoder.compute_dtype,
         use_sample_cache=training_configs.use_sample_cache,
