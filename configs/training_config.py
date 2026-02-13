@@ -195,6 +195,7 @@ class TrainingConfig(Configs):
         dataset_dir="../datasets/merged1-2-3/",
         log_base_dir="../runs",
         exp_name="joint-aff-exp",
+        image_size=(1024,1024),
         num_points=2048,
         train_ratio=0.7,
         val_ratio=0.15,
@@ -273,15 +274,17 @@ class TrainingConfig(Configs):
         super().__init__(
             # 基础配置
             local_rank = local_rank,
-        
 
             model_config = model_config,
+            deepspeed = deepspeed_config,
+            lora = lora_config,
             vis_save_path = vis_save_path,
             
             # 数据配置
             dataset_dir = dataset_dir,
             log_base_dir = log_base_dir,
             exp_name = exp_name,
+            image_size = image_size,
             num_points = num_points,
             train_ratio = train_ratio,
             val_ratio = val_ratio,
@@ -320,9 +323,6 @@ class TrainingConfig(Configs):
             warmup_min_lr = warmup_min_lr,
             warmup_type = warmup_type,
 
-            # DeepSpeed / LoRA 配置对象
-            deepspeed = deepspeed_config,
-            lora = lora_config,
             
             # 其他配置
             num_classes_per_sample = num_classes_per_sample,
