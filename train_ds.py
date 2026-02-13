@@ -214,7 +214,7 @@ def validate_one_epoch(
 
 def main():
     args = parse_args()
-    training_configs = TrainingConfig(deepspeed_config=DeepSpeedConfigs(precision='bf16'))
+    training_configs = TrainingConfig(deepspeed_config=DeepSpeedConfigs(precision='fp32'))
     model_config = training_configs.model_config
 
     # 命令行覆盖配置

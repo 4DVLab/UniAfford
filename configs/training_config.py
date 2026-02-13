@@ -266,8 +266,8 @@ class TrainingConfig(Configs):
 
         if model_config is None:
             model_config = JointAffordanceConfig(
-                mllm_config=MLLMConfigs(compute_dtype='bf16'),  # Qwen必须使用bf16以使用flash-attn
-                image_decoder=ImageDecoderConfigs(compute_dtype='fp32'),  # 由于deepspeed
+                mllm_config=MLLMConfigs(compute_dtype='fp32'),  # Qwen必须使用bf16以使用flash-attn
+                image_decoder=ImageDecoderConfigs(compute_dtype='fp32'),  # 分布式训练要求保持参数精度一致
                 point_decoder=PointDecoderConfigs(compute_dtype='fp32'),
             )
         

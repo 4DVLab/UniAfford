@@ -24,38 +24,30 @@ class MLLMConfigs(Configs):
 
     def __init__(
         self,
-        # version: str = "../pretrained/llava-llama-2-13b-chat-lightning-preview",
         qwen_model_name_or_path: str = "Qwen/Qwen3-VL-8B-Instruct",
         qwen_attn_implementation: str = "flash_attention_2",
         compute_dtype: str = "bf16",
         model_max_length: int = 512,
-        # conv_type: str = "llava_llama_2",
         vocab_size: int = 32000,
         hidden_size: int = 4096,
         num_heads: int = 8,
         tokenizer: Optional[object] = None,
-        # use_mm_start_end: bool = True,
-        # vision_tower: str = "../pretrained/clip-vit-large-patch14",
-        # vision_pretrained: Optional[str] = "../pretrained/sam_vit_h_4b8939.pth",
         train_mask_decoder: bool = True,
         out_dim: int = 256,
         seg_token_idx: Optional[int] = None,
         aff_token_idx: Optional[int] = None,
-    ):
+    ):  
+        # 在fp32的时候禁用 flash_attention_2，因为flash_attention_2只支持bf16，在fp32的时候使用默认的attn_implementation
+        qwen_attn_implementation = qwen_attn_implementation if compute_dtype == 'bf16' else None
         super().__init__(
-            # version=version,
             qwen_model_name_or_path=qwen_model_name_or_path,
             qwen_attn_implementation=qwen_attn_implementation,
             compute_dtype=resolve_dtype(compute_dtype),
             model_max_length=model_max_length,
-            # conv_type=conv_type,
             vocab_size=vocab_size,
             hidden_size=hidden_size,
             num_heads=num_heads,
             tokenizer=tokenizer,
-            # use_mm_start_end=use_mm_start_end,
-            # vision_tower=vision_tower,
-            # vision_pretrained=vision_pretrained,
             train_mask_decoder=train_mask_decoder,
             out_dim=out_dim,
             seg_token_idx=seg_token_idx,
