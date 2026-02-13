@@ -428,8 +428,6 @@ class JointAffordanceModel(nn.Module):
             input_size = (H, W)
             original_size = tuple(original_size_list[0]) if original_size_list else (H, W)
 
-            # 保持 decoder 输出的 logits 不在这里做 sigmoid，交给 loss（Focal/BCE/Dice）内部统一处理
-            # 否则会造成「双重 sigmoid」，预测被压到 ~0.5–0.73，图像损失卡在 ~0.75 不降
             all_image_logits = self.image_decoder(
                 image_pred_emb, image_embeddings, input_size, original_size
             )
