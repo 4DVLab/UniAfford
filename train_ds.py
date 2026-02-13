@@ -10,6 +10,7 @@ Joint Affordance 训练脚本（新版，基于 Qwen MLLM）
 
 import argparse
 import os
+from collections import OrderedDict
 from functools import partial
 from typing import Dict
 
@@ -212,6 +213,48 @@ def validate_one_epoch(
     return val_results
 
 
+def _save_model_state_to_cpu(
+    model_engine,
+    save_path: str,
+    client_state: Dict,
+    local_rank: int,
+    logger,
+    zero_stage: int = 3,
+) -> bool:
+    """
+    将模型 state_dict 逐参数汇聚到 CPU 后保存，避免 ZeRO-3 在 GPU 上全量汇聚导致 OOM。
+    仅 rank 0 写入文件，其他 rank 仅参与 collective。
+    若当前不是 ZeRO-3 或 GatheredParameters 不可用，返回 False，调用方应回退到 save_checkpoint。
+    """
+    module = model_engine.module if hasattr(model_engine, "module") else model_engine
+    if zero_stage != 3:
+        return False
+    try:
+        from deepspeed.zero import GatheredParameters
+    except ImportError:
+        try:
+            from deepspeed.runtime.zero.stage3 import GatheredParameters
+        except ImportError:
+            return False
+
+    state_cpu = OrderedDict()
+    # 逐参数 gather，只在 rank 0 上拷贝到 CPU，避免 GPU 上同时存在完整模型
+    for name, param in module.named_parameters():
+        with GatheredParameters([param]):
+            if local_rank == 0:
+                state_cpu[name] = param.detach().cpu().clone()
+    for name, buf in module.named_buffers():
+        if local_rank == 0:
+            state_cpu[name] = buf.detach().cpu().clone()
+
+    if local_rank == 0:
+        ckpt = {"model_state_dict": state_cpu, **client_state}
+        torch.save(ckpt, save_path)
+        logger.info(f"Best 权重已保存到 CPU 再落盘: {save_path}")
+    dist.barrier()
+    return True
+
+
 def main():
     args = parse_args()
     training_configs = TrainingConfig(deepspeed_config=DeepSpeedConfigs(precision='fp32'))
@@ -304,6 +347,13 @@ def main():
     })
 
     # ---------- DeepSpeed 初始化 ----------
+    # ZeRO-3 时：在 CPU 上保留完整模型，由 DeepSpeed 初始化时再分片到各 GPU，避免每张卡先加载完整模型再分片导致显存峰值
+    zero_stage = getattr(training_configs.deepspeed, "zero_stage", 3)
+    if zero_stage >= 3:
+        logger.info("将模型置于 CPU，由 DeepSpeed 初始化时再分片到 GPU...")
+        model = model.cpu()
+        torch.cuda.empty_cache()
+
     logger.info("初始化 DeepSpeed...")
     params_to_train = create_param_groups(model, training_configs, logger)
     if not params_to_train:
@@ -389,22 +439,35 @@ def main():
             val_loader, model_engine, training_configs, epoch, writer, logger, local_rank,
             loss_kwargs=loss_kwargs,
         )
+        # 验证阶段 torchmetrics 会暂存 pred/target，结束后释放；此处统一释放碎片显存，为保存 checkpoint 腾出空间
+        torch.cuda.empty_cache()
 
         # Checkpoint：以 val_loss 为监控指标，保存 best
+        # 优先「卸载到 CPU 再保存」避免 ZeRO-3 在 GPU 上全量汇聚导致 OOM；否则回退到 save_checkpoint
         monitor = val_results.get("loss", train_results.get("loss", float("inf")))
         if monitor < best_metric:
             best_metric = monitor
             best_epoch = epoch + 1
-            model_engine.save_checkpoint(
-                ckpt_dir, tag="best",
-                client_state={
-                    "epoch": epoch + 1,
-                    "best_epoch": best_epoch,
-                    "best_val_loss": best_metric,
-                },
+            client_state = {
+                "epoch": epoch + 1,
+                "best_epoch": best_epoch,
+                "best_val_loss": best_metric,
+            }
+            zero_stage = getattr(training_configs.deepspeed, "zero_stage", 3)
+            best_cpu_path = os.path.join(ckpt_dir, "best_cpu.pth")
+            saved_to_cpu = _save_model_state_to_cpu(
+                model_engine, best_cpu_path, client_state, local_rank, logger, zero_stage=zero_stage
             )
+            if not saved_to_cpu:
+                logger.warning("Failed to save best checkpoint to CPU, falling back to ZeRO format")
+                model_engine.save_checkpoint(
+                    ckpt_dir, tag="best",
+                    client_state=client_state,
+                    save_latest=False,
+                )
+                if local_rank == 0:
+                    logger.info(f"Best checkpoint (ZeRO 格式) 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
             if local_rank == 0:
-                logger.info(f"Best checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
                 if writer is not None:
                     log_scalar_dict(writer, "checkpoint",
                                     {"best_val_loss": best_metric, "best_epoch": float(best_epoch)},
@@ -412,6 +475,9 @@ def main():
 
     # ---------- 训练结束：保存最新模型（用于断点续训）----------
     final_epoch = training_configs.epochs
+    if dist.is_initialized():
+        dist.barrier()
+    torch.cuda.empty_cache()
     model_engine.save_checkpoint(
         ckpt_dir, tag="latest",
         client_state={
