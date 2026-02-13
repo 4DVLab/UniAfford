@@ -549,25 +549,22 @@ class PointCloud3DSegmentor(nn.Module):
         if text_mask is not None:
             decoded_text = decoded_text * text_mask.unsqueeze(-1).to(decoded_text.dtype)
         
-        # ========== 生成掩码 ==========
+        # ========== 生成掩码（logits）==========
         # 使用点积计算每个点与文本的相关性
         # decoded_text: [B, L, C], up_feat: [B, C, N]
         # 输出: [B, L, N]
         up_feat = up_feat.to(decoded_text.dtype)
         point_text_sim = torch.einsum('blc,bcn->bln', decoded_text, up_feat)
-        
-        # 对文本维度求平均（考虑掩码）
+
+        # 对文本维度求平均（考虑掩码），这里返回 logits，由上游损失函数负责 sigmoid
         if text_mask is not None:
             # 只对有效 token 求平均
             mask_sum = text_mask.to(decoded_text.dtype).sum(1, keepdim=True).unsqueeze(-1)  # [B, 1, 1]
-            pred_mask = point_text_sim.sum(1) / (mask_sum.squeeze(-1) + 1e-8)  # [B, N]
+            pred_logits = point_text_sim.sum(1) / (mask_sum.squeeze(-1) + 1e-8)  # [B, N]
         else:
-            pred_mask = point_text_sim.mean(1)  # [B, N]
-        
-        # 应用 sigmoid 得到概率
-        pred_mask = torch.sigmoid(pred_mask)
-        
-        return pred_mask
+            pred_logits = point_text_sim.mean(1)  # [B, N]
+
+        return pred_logits
 
 # future
 class PointCloudEncoder(nn.Module):
