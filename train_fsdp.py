@@ -1,4 +1,4 @@
--"""
+"""
 Joint Affordance 训练脚本（FSDP 版本，基于 Qwen MLLM）
 
 与现有的 train.py 基本一致，唯一主要区别：
