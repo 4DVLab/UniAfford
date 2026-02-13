@@ -188,9 +188,7 @@ class TrainingConfig(Configs):
         # 基础配置
         local_rank=0,
         model_config: Optional[JointAffordanceConfig] = None,
-        
-        # 模型配置
-        image_size=(1024, 1024), # h,w
+        deepspeed_config: Optional[DeepSpeedConfigs] = None,
         
         # 数据配置
         dataset_dir="../datasets/merged1-2-3/",
@@ -214,7 +212,7 @@ class TrainingConfig(Configs):
         name_of_params_to_train="visual_model, vision_tower, mm_projector, text_hidden_fcs, point_cloud_segmentor",
 
         # 优化器配置
-        lr=1e-5,
+        lr=1e-3,
         beta1=0.9,
         beta2=0.95,
         weight_decay=0.0,
@@ -261,13 +259,13 @@ class TrainingConfig(Configs):
         if samples_per_epoch is not None:
             steps_per_epoch = samples_per_epoch // batch_size
 
-        deepspeed_config = DeepSpeedConfigs(precision='bf16')
-        lora_config = LoRAConfigs()
+        deepspeed_config = deepspeed_config or DeepSpeedConfigs()
+        lora_config = lora_config or LoRAConfigs()
 
         if model_config is None:
             model_config = JointAffordanceConfig(
                 mllm_config=MLLMConfigs(compute_dtype='bf16'),  # Qwen必须使用bf16以使用flash-attn
-                image_decoder=ImageDecoderConfigs(compute_dtype='bf16'),  # 由于deepspeed
+                image_decoder=ImageDecoderConfigs(compute_dtype='fp32'),  # 由于deepspeed
                 point_decoder=PointDecoderConfigs(compute_dtype='fp32'),
             )
         
@@ -278,9 +276,6 @@ class TrainingConfig(Configs):
 
             model_config = model_config,
             vis_save_path = vis_save_path,
-            
-            # 模型配置
-            image_size = image_size,
             
             # 数据配置
             dataset_dir = dataset_dir,

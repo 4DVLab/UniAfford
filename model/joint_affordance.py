@@ -48,12 +48,15 @@ class MLLMBackbone(nn.Module):
                 use_fast=False,
             )
         self.tokenizer = self.config.tokenizer
+
+        self.to(dtype=self.config.compute_dtype)
+
     
 
     def _build_qwen_model(self, config: MLLMConfigs):
         model_name = config.qwen_model_name_or_path
         model_name_lower = model_name.lower()
-        dtype = config.qwen_dtype
+        dtype = config.compute_dtype
 
         # choose QwenVL version
         if "qwen3" in model_name_lower and "a" in Path(model_name.rstrip("/")).name.lower():
@@ -160,10 +163,9 @@ class ImageHiddenStateDecoder(nn.Module):
         for param in self.text_hidden_fcs.parameters():
             param.requires_grad = True
 
-        self.visual_model = self.visual_model.to(dtype=self.config.compute_dtype)
-        self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.config.compute_dtype)
-
         self.image_encoder = self.visual_model.image_encoder
+
+        self.to(dtype=self.config.compute_dtype)
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到 SAM prompt 空间。"""
@@ -260,10 +262,8 @@ class PointCloudHiddenStateDecoder(nn.Module):
         )
         for param in self.point_cloud_segmentor.parameters():
             param.requires_grad = True
-
-        self.point_encoder = self.point_encoder.to(dtype=self.config.compute_dtype)
-        self.text_hidden_fcs = self.text_hidden_fcs.to(dtype=self.config.compute_dtype)
-        self.point_cloud_segmentor = self.point_cloud_segmentor.to(dtype=self.config.compute_dtype)
+        
+        self.to(dtype=self.config.compute_dtype)
 
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
@@ -418,8 +418,8 @@ class JointAffordanceModel(nn.Module):
             seg_hidden = self._extract_token_embeddings(
                 hidden_states, token_ids, self.seg_token_idx
             )  # [B, C]
-            image_pred_emb = self.image_decoder.project_hidden_states(seg_hidden)
-            point_pred_emb = self.point_decoder.project_hidden_states(seg_hidden)
+            image_pred_emb = self.image_decoder.project_hidden_states(seg_hidden).to(self.image_decoder.config.compute_dtype)
+            point_pred_emb = self.point_decoder.project_hidden_states(seg_hidden).to(self.point_decoder.config.compute_dtype)
 
             # ---- 3. 2D 图像分割 ----
             # 默认 images 非空（由数据集与 collate 保证），所有 rank 统一前向。
@@ -428,10 +428,11 @@ class JointAffordanceModel(nn.Module):
             input_size = (H, W)
             original_size = tuple(original_size_list[0]) if original_size_list else (H, W)
 
+            # 保持 decoder 输出的 logits 不在这里做 sigmoid，交给 loss（Focal/BCE/Dice）内部统一处理
+            # 否则会造成「双重 sigmoid」，预测被压到 ~0.5–0.73，图像损失卡在 ~0.75 不降
             all_image_logits = self.image_decoder(
                 image_pred_emb, image_embeddings, input_size, original_size
             )
-            all_image_logits = all_image_logits.sigmoid_()
 
             # 将无效样本的输出置零（不影响 loss 计算）
             if img_valid_mask is not None:

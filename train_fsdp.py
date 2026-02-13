@@ -1,11 +1,13 @@
-"""
-Joint Affordance 训练脚本（新版，基于 Qwen MLLM）
+-"""
+Joint Affordance 训练脚本（FSDP 版本，基于 Qwen MLLM）
 
-主要特性：
-- 使用 calculator.compute_losses 统一计算损失（返回字典）
-- 使用 torchmetrics 进行 epoch 级分割指标追踪
-- 使用 metrics.log_epoch_summary 统一格式化输出
-- 所有指标通过字典传递，避免大量零散变量
+与现有的 train.py 基本一致，唯一主要区别：
+- 使用 PyTorch FSDP 替代 DeepSpeed，用于模型分片（ZeRO-3 等价能力）
+- 不强制统一参数 dtype，允许不同子模块使用不同精度（参数级混合精度）
+
+说明：
+- MixedPrecision 不在 FSDP 里配置 param_dtype，让各子模块在构造/初始化阶段自行决定 dtype
+  （例如 Qwen / 图像分支用 bf16，PointNet++ 用 fp32），FSDP 只负责分片和通信。
 """
 
 import argparse
@@ -13,11 +15,15 @@ import os
 from functools import partial
 from typing import Dict
 
-import deepspeed
-from deepspeed.ops.adam import DeepSpeedCPUAdam
 import torch
 import torch.distributed as dist
+from torch.utils.data import DataLoader, DistributedSampler
 from torch.utils.tensorboard import SummaryWriter
+from torch.distributed.fsdp import (
+    FullyShardedDataParallel as FSDP,
+    StateDictType,
+    FullStateDictConfig,
+)
 from peft import get_peft_model
 from transformers import AutoProcessor, get_cosine_schedule_with_warmup
 from tqdm import tqdm
@@ -46,7 +52,7 @@ ENV_LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="JointAffordance (Qwen) training")
+    parser = argparse.ArgumentParser(description="JointAffordance (Qwen) training with FSDP")
     parser.add_argument("--qwen_model", type=str, default=None, help="Qwen 模型路径或名称")
     parser.add_argument("--vision_pretrained", type=str, default=None, help="SAM 权重路径")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
@@ -79,7 +85,7 @@ def create_param_groups(model, config, logger):
     vis3d_params = _collect(getattr(model, "point_decoder", None))
     used_ids = {id(p) for p in llm_params + vis2d_params + vis3d_params}
     other_params = [
-        p for n, p in model.named_parameters()
+        p for _, p in model.named_parameters()
         if p.requires_grad and p.is_floating_point() and id(p) not in used_ids
     ]
 
@@ -97,23 +103,18 @@ def create_param_groups(model, config, logger):
 
 
 def train_one_epoch(
-    train_loader, model_engine, optimizer, scheduler, config,
+    train_loader, model_fsdp, optimizer, scheduler, config,
     epoch, global_step, writer, logger, local_rank,
     loss_kwargs: Dict,
 ):
     """
     训练一个 epoch。
-
-    Args:
-        loss_kwargs: 传给 calc.compute_losses 的关键字参数字典
-                     （包含 device, focal/bce/dice/ce 权重等）
-    Returns:
-        global_step: 更新后的全局步数
-        train_results: epoch 指标字典
+    与 train.py 基本一致，只是模型包装为 FSDP，反向传播使用标准 .backward()。
     """
-    model_engine.train()
+    device = torch.device("cuda", local_rank)
+    model_fsdp.train()
     metrics = build_torchmetrics_bundle(
-        device=model_engine.device,
+        device=device,
         threshold_2d=max(config.mask_threshold_2d, 0.5),
         threshold_3d=config.mask_threshold_3d,
     )
@@ -125,22 +126,25 @@ def train_one_epoch(
     )
 
     for batch_idx, input_dict in enumerate(loader):
-        input_dict = dict_to_cuda(input_dict, device=model_engine.device)
-        output_dict = model_engine(**input_dict)
+        input_dict = dict_to_cuda(input_dict, device=device)
+
+        # 前向
+        output_dict = model_fsdp(**input_dict)
 
         # 统一计算损失（Focal+Dice for 2D, BCE+Dice for 3D, CE for LLM）
         loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
         loss = loss_dict["loss"] / max(1, config.grad_accumulation_steps)
 
-        model_engine.backward(loss)
-        model_engine.step()
-        model_engine.zero_grad()
+        # 反向 + 更新
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
         global_step += 1
 
-        # 一站式更新全部指标
+        # 指标更新
         update_torchmetrics(metrics, loss_dict, output_dict, input_dict, config.batch_size)
 
-        # 定期打印批次进度
+        # 打印与 TensorBoard
         if (batch_idx + 1) % config.print_freq == 0 or (batch_idx + 1) == len(train_loader):
             lr = get_current_lr(scheduler, optimizer)
             logger.info(
@@ -162,7 +166,7 @@ def train_one_epoch(
                     postfix["lr"] = f"{lr:.2e}"
                 loader.set_postfix(postfix, refresh=False)
 
-    # Epoch 结束：汇总
+    # 汇总指标（FSDP 下 compute() 已自动在进程内同步，需要时可再做 dist.all_reduce）
     train_results = compute_and_reset_torchmetrics(metrics)
     lr = get_current_lr(scheduler, optimizer)
     log_epoch_summary(logger, epoch + 1, config.epochs, "train", train_results, lr)
@@ -176,28 +180,22 @@ def train_one_epoch(
 
 @torch.no_grad()
 def validate_one_epoch(
-    val_loader, model_engine, config,
+    val_loader, model_fsdp, config,
     epoch, writer, logger, local_rank,
     loss_kwargs: Dict,
 ):
-    """
-    验证一个 epoch。
-
-    Args:
-        loss_kwargs: 传给 calc.compute_losses 的关键字参数字典
-    Returns:
-        val_results: epoch 指标字典
-    """
-    model_engine.eval()
+    """验证一个 epoch。"""
+    device = torch.device("cuda", local_rank)
+    model_fsdp.eval()
     metrics = build_torchmetrics_bundle(
-        device=model_engine.device,
+        device=device,
         threshold_2d=max(config.mask_threshold_2d, 0.5),
         threshold_3d=config.mask_threshold_3d,
     )
 
     for val_dict in val_loader:
-        val_dict = dict_to_cuda(val_dict, device=model_engine.device)
-        val_output = model_engine(**val_dict)
+        val_dict = dict_to_cuda(val_dict, device=device)
+        val_output = model_fsdp(**val_dict)
         loss_dict = calc.compute_losses(val_output, val_dict, **loss_kwargs)
         update_torchmetrics(metrics, loss_dict, val_output, val_dict, config.val_batch_size)
 
@@ -207,7 +205,7 @@ def validate_one_epoch(
         if writer is not None:
             log_scalar_dict(writer, "val_epoch", val_results, epoch + 1)
 
-    model_engine.train()
+    model_fsdp.train()
     return val_results
 
 
@@ -216,7 +214,7 @@ def main():
     training_configs = TrainingConfig()
     model_config = training_configs.model_config
 
-    # 命令行覆盖配置
+    # 覆盖配置
     if args.qwen_model:
         model_config.mllm.qwen_model_name_or_path = args.qwen_model
     if args.vision_pretrained:
@@ -228,12 +226,11 @@ def main():
 
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
-    deepspeed.init_distributed()
+    dist.init_process_group(backend="nccl")
 
-    # 日志系统
     logger = setup_logger(training_configs.log_dir, local_rank)
     logger.info("=" * 80)
-    logger.info("Joint Affordance Model - 开始训练")
+    logger.info("Joint Affordance Model - FSDP 训练开始")
     logger.info("=" * 80)
 
     writer = None
@@ -247,6 +244,9 @@ def main():
     # ---------- 初始化模型 ----------
     logger.info("正在初始化模型...")
     model = JointAffordanceModel(model_config)
+    device = torch.device("cuda", local_rank)
+    model.to(device=device)  # 初始迁移到当前 GPU（各子模块内部再自行控制 dtype）
+
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
     data_collator = partial(
         joint_affordance_collate_fn,
@@ -258,23 +258,22 @@ def main():
         point_precision=model_config.point_decoder.compute_dtype,
     )
 
-    # ---------- 冻结 → LoRA → 解冻关键模块 ----------
+    # 冻结 + LoRA + 解冻
     for p in model.parameters():
         p.requires_grad = False
-
     if training_configs.lora.lora_r > 0:
         logger.info(f"应用 LoRA: r={training_configs.lora.lora_r}, alpha={training_configs.lora.lora_alpha}")
         model.mllm.model = get_peft_model(model.mllm.model, training_configs.lora.to_peft_config())
 
     enable_trainable_modules(model, training_configs.name_of_params_to_train)
-    log_param_dtype_stats(model, logger, stage="before_deepspeed")
+    log_param_dtype_stats(model, logger, stage="before_fsdp")
     total_params, trainable_params = count_model_params(model)
     logger.info(
         f"参数统计: total={total_params:,}, trainable={trainable_params:,}, "
         f"ratio={100.0 * trainable_params / max(1, total_params):.2f}%"
     )
 
-    # ---------- 加载数据集（rank 0 读取后广播） ----------
+    # ---------- 加载数据集 ----------
     logger.info("加载数据集...")
     data_objects = [None, None]
     if local_rank == 0:
@@ -285,7 +284,6 @@ def main():
     dist.broadcast_object_list(data_objects, src=0)
     train_samples, val_samples = data_objects
 
-    # 构建 Dataset
     train_ds_cls = JointAffordanceTrainDataset if training_configs.samples_per_epoch else JointAffordanceTorchDataset
     train_ds_kwargs = dict(
         processor=processor, image_size=training_configs.image_size, num_points=training_configs.num_points,
@@ -298,141 +296,158 @@ def main():
         train_ds_kwargs["samples_per_epoch"] = training_configs.samples_per_epoch
     train_dataset = train_ds_cls(train_samples, **train_ds_kwargs)
 
-    val_dataset = JointAffordanceTorchDataset(val_samples, **{
-        k: v for k, v in train_ds_kwargs.items() if k != "samples_per_epoch"
-    })
+    val_dataset = JointAffordanceTorchDataset(
+        val_samples,
+        **{k: v for k, v in train_ds_kwargs.items() if k != "samples_per_epoch"}
+    )
 
-    # ---------- DeepSpeed 初始化 ----------
-    logger.info("初始化 DeepSpeed...")
-    params_to_train = create_param_groups(model, training_configs, logger)
+    # ---------- DataLoader + Sampler ----------
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=dist.get_world_size(),
+        rank=dist.get_rank(),
+        shuffle=True,
+        drop_last=False,
+    )
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=dist.get_world_size(),
+        rank=dist.get_rank(),
+        shuffle=False,
+        drop_last=False,
+    )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=training_configs.batch_size,
+        sampler=train_sampler,
+        num_workers=training_configs.workers,
+        pin_memory=True,
+        collate_fn=data_collator,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=training_configs.val_batch_size,
+        sampler=val_sampler,
+        num_workers=training_configs.workers,
+        pin_memory=True,
+        collate_fn=data_collator,
+    )
+
+    # ---------- FSDP 包装模型 ----------
+    model_fsdp = FSDP(model, device_id=device)
+    log_param_dtype_stats(model_fsdp, logger, stage="after_fsdp_wrap")
+
+    # ---------- 优化器 & 调度器 ----------
+    logger.info("初始化优化器与调度器（支持分层学习率）")
+    params_to_train = create_param_groups(model_fsdp, training_configs, logger)
     if not params_to_train:
         raise RuntimeError("没有可训练参数，请检查配置")
 
-    if training_configs.use_layerwise_lr:
-        # 分层学习率：手动创建 optimizer + scheduler
-        steps_per_epoch = training_configs.steps_per_epoch or max(
-            1, len(train_dataset) // max(1, training_configs.deepspeed.train_micro_batch_size_per_gpu)
-        )
-        optimizer_cls = (DeepSpeedCPUAdam if training_configs.deepspeed.offload_optimizer_device == "cpu"
-                         else torch.optim.AdamW)
-        optimizer = optimizer_cls(
-            params_to_train, weight_decay=training_configs.weight_decay, betas=(training_configs.beta1, training_configs.beta2),
-        )
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=training_configs.warmup_num_steps,
-            num_training_steps=training_configs.epochs * steps_per_epoch,
-        )
-        model_engine, _, train_loader, _ = deepspeed.initialize(
-            model=model, model_parameters=params_to_train, training_data=train_dataset,
-            optimizer=optimizer, lr_scheduler=scheduler, collate_fn=data_collator,
-            config=training_configs.deepspeed.to_dict(),
-        )
-    else:
-        model_engine, optimizer, train_loader, scheduler = deepspeed.initialize(
-            model=model, model_parameters=params_to_train, training_data=train_dataset,
-            collate_fn=data_collator, config=training_configs.deepspeed.to_dict(),
-        )
-
-    # 验证 DataLoader（在循环外创建，避免每个 epoch 重复创建）
-    val_loader = torch.utils.data.DataLoader(
-        val_dataset, batch_size=training_configs.val_batch_size, shuffle=False,
-        num_workers=training_configs.workers, pin_memory=True, collate_fn=data_collator,
+    steps_per_epoch = training_configs.steps_per_epoch or max(
+        1, len(train_dataset) // max(1, training_configs.batch_size)
     )
-    log_param_dtype_stats(
-        model_engine.module if hasattr(model_engine, "module") else model_engine,
-        logger, stage="after_deepspeed",
+    optimizer = torch.optim.AdamW(
+        params_to_train,
+        weight_decay=training_configs.weight_decay,
+        betas=(training_configs.beta1, training_configs.beta2),
+    )
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer,
+        num_warmup_steps=training_configs.warmup_num_steps,
+        num_training_steps=training_configs.epochs * steps_per_epoch,
     )
 
-    # ---------- 提取损失计算参数（避免每次调用重复写） ----------
+    # ---------- 提取损失配置 ----------
     loss_kwargs = dict(
-        device=model_engine.device,
-        # 2D: Focal + Dice
+        device=device,
         focal_loss_weight=getattr(training_configs, "focal_loss_weight", 2.0),
         dice_loss_weight=getattr(training_configs, "dice_loss_weight", 0.5),
         focal_alpha=getattr(training_configs, "focal_alpha", 0.25),
         focal_gamma=getattr(training_configs, "focal_gamma", 2.0),
-        # 3D: BCE + Dice
         bce_loss_weight=getattr(training_configs, "bce_loss_weight", 2.0),
-        # LLM CE
         ce_loss_weight=getattr(training_configs, "ce_loss_weight", 1.0),
     )
-
     logger.info(f"损失配置: {loss_kwargs}")
 
     # ---------- 训练循环 ----------
     logger.info("=" * 80)
-    logger.info("开始训练循环")
+    logger.info("开始 FSDP 训练循环")
     logger.info("=" * 80)
 
     global_step = 0
-    best_metric = float("inf")  # 以 val_loss 越小越好
+    best_metric = float("inf")
     best_epoch = -1
-    ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints")
+    ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints_fsdp")
     os.makedirs(ckpt_dir, exist_ok=True)
 
     for epoch in range(training_configs.epochs):
         logger.info(f"----- Epoch [{epoch + 1}/{training_configs.epochs}] -----")
-        if hasattr(train_dataset, "set_epoch"):
-            train_dataset.set_epoch(epoch)
+        train_sampler.set_epoch(epoch)
+        val_sampler.set_epoch(epoch)
 
-        # 训练
         global_step, train_results = train_one_epoch(
-            train_loader, model_engine, optimizer, scheduler, training_configs,
+            train_loader, model_fsdp, optimizer, scheduler, training_configs,
             epoch, global_step, writer, logger, local_rank,
             loss_kwargs=loss_kwargs,
         )
 
-        # 验证
         val_results = validate_one_epoch(
-            val_loader, model_engine, training_configs, epoch, writer, logger, local_rank,
+            val_loader, model_fsdp, training_configs, epoch, writer, logger, local_rank,
             loss_kwargs=loss_kwargs,
         )
 
-        # Checkpoint：以 val_loss 为监控指标，保存 best
         monitor = val_results.get("loss", train_results.get("loss", float("inf")))
         if monitor < best_metric:
             best_metric = monitor
             best_epoch = epoch + 1
-            model_engine.save_checkpoint(
-                ckpt_dir, tag="best",
-                client_state={
-                    "epoch": epoch + 1,
-                    "best_epoch": best_epoch,
-                    "best_val_loss": best_metric,
-                },
-            )
+            # 使用 FullStateDict 保存单卡完整权重（仅 rank0）
             if local_rank == 0:
-                logger.info(f"Best checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
-                if writer is not None:
-                    log_scalar_dict(writer, "checkpoint",
-                                    {"best_val_loss": best_metric, "best_epoch": float(best_epoch)},
-                                    epoch + 1)
+                with FSDP.state_dict_type(
+                    model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True)
+                ):
+                    state_dict = model_fsdp.state_dict()
+                torch.save(
+                    {
+                        "epoch": best_epoch,
+                        "model_state_dict": state_dict,
+                        "best_val_loss": best_metric,
+                    },
+                    os.path.join(ckpt_dir, "best_fsdp.pth"),
+                )
+                logger.info(f"Best FSDP checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
 
-    # ---------- 训练结束：保存最新模型（用于断点续训）----------
-    final_epoch = training_configs.epochs
-    model_engine.save_checkpoint(
-        ckpt_dir, tag="latest",
-        client_state={
-            "epoch": final_epoch,
-            "best_epoch": best_epoch,
-            "best_val_loss": best_metric,
-            "global_step": global_step,
-        },
-    )
+    # 训练结束，保存 latest
     if local_rank == 0:
-        logger.info(f"Latest checkpoint 已保存: epoch={final_epoch}, path={ckpt_dir}/latest")
+        with FSDP.state_dict_type(
+            model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True)
+        ):
+            final_state = model_fsdp.state_dict()
+        torch.save(
+            {
+                "epoch": training_configs.epochs,
+                "global_step": global_step,
+                "best_epoch": best_epoch,
+                "best_val_loss": best_metric,
+                "model_state_dict": final_state,
+            },
+            os.path.join(ckpt_dir, "latest_fsdp.pth"),
+        )
+        logger.info(
+            f"Latest FSDP checkpoint 已保存: "
+            f"epoch={training_configs.epochs}, best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
+        )
 
     logger.info("=" * 80)
-    logger.info(
-        f"训练完成! epochs={final_epoch}, "
-        f"best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
-    )
+    logger.info("FSDP 训练结束")
     logger.info("=" * 80)
     if local_rank == 0 and writer is not None:
         writer.flush()
         writer.close()
 
+    dist.destroy_process_group()
+
 
 if __name__ == "__main__":
     main()
+
