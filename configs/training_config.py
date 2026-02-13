@@ -189,6 +189,7 @@ class TrainingConfig(Configs):
         local_rank=0,
         model_config: Optional[JointAffordanceConfig] = None,
         deepspeed_config: Optional[DeepSpeedConfigs] = None,
+        lora_config: Optional[LoRAConfigs] = None,
         
         # 数据配置
         dataset_dir="../datasets/merged1-2-3/",
