@@ -1,6 +1,8 @@
 #!/bin/bash
 # 在仓库根目录运行
-# 用法: ./scripts/run_train.sh [fsdp|ds]  默认 ds
+# 用法: ./scripts/run_train.sh fsdp
+#    或 bash ./scripts/run_train.sh ds
+# 不指定则默认ds
 
 # ================================ 环境配置 ================================
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
