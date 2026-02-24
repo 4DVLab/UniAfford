@@ -102,6 +102,42 @@ def create_param_groups(model, config, logger):
     return groups
 
 
+def _collect_batch_runtime_stats(input_dict: Dict, device: torch.device) -> Dict[str, float]:
+    """收集用于排查显存峰值的轻量运行时统计信息。"""
+    stats = {}
+    if device.type != "cuda":
+        return stats
+
+    allocated_gb = torch.cuda.memory_allocated(device) / (1024 ** 3)
+    reserved_gb = torch.cuda.memory_reserved(device) / (1024 ** 3)
+    peak_allocated_gb = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+    stats.update(
+        mem_allocated_gb=allocated_gb,
+        mem_reserved_gb=reserved_gb,
+        mem_peak_allocated_gb=peak_allocated_gb,
+    )
+
+    attention_mask = input_dict.get("attention_mask")
+    if isinstance(attention_mask, torch.Tensor) and attention_mask.dim() >= 2:
+        seq_lens = attention_mask.sum(dim=1).float()
+        stats["seq_len_max"] = float(seq_lens.max().item())
+        stats["seq_len_mean"] = float(seq_lens.mean().item())
+
+    grid_thw = input_dict.get("image_grid_thw")
+    if isinstance(grid_thw, torch.Tensor) and grid_thw.dim() == 2 and grid_thw.shape[1] == 3:
+        grid_tokens = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).float()
+        stats["vision_tokens_max"] = float(grid_tokens.max().item())
+        stats["vision_tokens_mean"] = float(grid_tokens.mean().item())
+
+    valid_lengths = input_dict.get("pc_valid_lengths")
+    if isinstance(valid_lengths, torch.Tensor) and valid_lengths.numel() > 0:
+        lengths = valid_lengths.float()
+        stats["pc_points_max"] = float(lengths.max().item())
+        stats["pc_points_mean"] = float(lengths.mean().item())
+
+    return stats
+
+
 def train_one_epoch(
     train_loader, model_fsdp, optimizer, scheduler, config,
     epoch, global_step, writer, logger, local_rank,
@@ -124,6 +160,11 @@ def train_one_epoch(
              desc=f"Epoch {epoch + 1}/{config.epochs}")
         if local_rank == 0 else train_loader
     )
+    if device.type == "cuda":
+        torch.cuda.reset_peak_memory_stats(device)
+    accum_steps = max(1, config.grad_accumulation_steps)
+    monitor_freq = max(1, getattr(config, "monitor_freq", config.print_freq))
+    optimizer.zero_grad(set_to_none=True)
 
     for batch_idx, input_dict in enumerate(loader):
         input_dict = dict_to_cuda(input_dict, device=device)
@@ -133,13 +174,17 @@ def train_one_epoch(
 
         # 统一计算损失（Focal+Dice for 2D, BCE+Dice for 3D, CE for LLM）
         loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
-        loss = loss_dict["loss"] / max(1, config.grad_accumulation_steps)
+        loss = loss_dict["loss"] / accum_steps
 
-        # 反向 + 更新
+        # 反向 + 梯度累积更新
         loss.backward()
-        optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
-        global_step += 1
+        should_step = ((batch_idx + 1) % accum_steps == 0) or ((batch_idx + 1) == len(train_loader))
+        if should_step:
+            optimizer.step()
+            if scheduler is not None:
+                scheduler.step()
+            optimizer.zero_grad(set_to_none=True)
+            global_step += 1
 
         # 指标更新
         update_torchmetrics(metrics, loss_dict, output_dict, input_dict, config.batch_size)
@@ -153,12 +198,27 @@ def train_one_epoch(
                 f"(ce={loss_dict['ce_loss'].item():.6f}, "
                 f"img={loss_dict['img_loss'].item():.6f}, "
                 f"pc={loss_dict['pc_loss'].item():.6f})"
-                + (f" lr={lr:.2e}" if lr else "")
+                + (f" lr={lr:.2e}" if lr is not None else "")
             )
+            if (batch_idx + 1) % monitor_freq == 0 or (batch_idx + 1) == len(train_loader):
+                runtime_stats = _collect_batch_runtime_stats(input_dict, device)
+                if runtime_stats:
+                    logger.info(
+                        "  runtime: "
+                        f"mem={runtime_stats.get('mem_allocated_gb', 0.0):.2f}G "
+                        f"reserved={runtime_stats.get('mem_reserved_gb', 0.0):.2f}G "
+                        f"peak={runtime_stats.get('mem_peak_allocated_gb', 0.0):.2f}G "
+                        f"seq(max/mean)={runtime_stats.get('seq_len_max', 0.0):.0f}/{runtime_stats.get('seq_len_mean', 0.0):.1f} "
+                        f"vtok(max/mean)={runtime_stats.get('vision_tokens_max', 0.0):.0f}/{runtime_stats.get('vision_tokens_mean', 0.0):.1f} "
+                        f"pc(max/mean)={runtime_stats.get('pc_points_max', 0.0):.0f}/{runtime_stats.get('pc_points_mean', 0.0):.1f}"
+                    )
             if local_rank == 0 and writer is not None:
                 batch_log = {k: loss_dict[k].item() for k in loss_dict}
                 if lr is not None:
                     batch_log["lr"] = lr
+                runtime_stats = _collect_batch_runtime_stats(input_dict, device)
+                for k, v in runtime_stats.items():
+                    batch_log[k] = v
                 log_scalar_dict(writer, "train_batch", batch_log, global_step)
             if local_rank == 0 and hasattr(loader, "set_postfix"):
                 postfix = {"loss": f"{loss_dict['loss'].item():.4f}"}
@@ -246,6 +306,19 @@ def main():
     model = JointAffordanceModel(model_config)
     device = torch.device("cuda", local_rank)
     model.to(device=device)  # 初始迁移到当前 GPU（各子模块内部再自行控制 dtype）
+    if getattr(training_configs, "gradient_checkpointing", False):
+        mllm_core = getattr(getattr(model, "mllm", None), "model", None)
+        if mllm_core is not None and hasattr(mllm_core, "gradient_checkpointing_enable"):
+            try:
+                mllm_core.gradient_checkpointing_enable(
+                    gradient_checkpointing_kwargs={"use_reentrant": False}
+                )
+            except TypeError:
+                # 兼容旧版 transformers：不支持 gradient_checkpointing_kwargs
+                mllm_core.gradient_checkpointing_enable()
+            if hasattr(mllm_core, "enable_input_require_grads"):
+                mllm_core.enable_input_require_grads()
+            logger.info("已启用 MLLM gradient checkpointing")
 
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
     data_collator = partial(
@@ -322,7 +395,7 @@ def main():
         batch_size=training_configs.batch_size,
         sampler=train_sampler,
         num_workers=training_configs.workers,
-        pin_memory=True,
+        pin_memory=False,
         collate_fn=data_collator,
     )
     val_loader = DataLoader(
@@ -330,7 +403,7 @@ def main():
         batch_size=training_configs.val_batch_size,
         sampler=val_sampler,
         num_workers=training_configs.workers,
-        pin_memory=True,
+        pin_memory=False,
         collate_fn=data_collator,
     )
 
@@ -344,9 +417,6 @@ def main():
     if not params_to_train:
         raise RuntimeError("没有可训练参数，请检查配置")
 
-    steps_per_epoch = training_configs.steps_per_epoch or max(
-        1, len(train_dataset) // max(1, training_configs.batch_size)
-    )
     optimizer = torch.optim.AdamW(
         params_to_train,
         weight_decay=training_configs.weight_decay,
@@ -355,7 +425,7 @@ def main():
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=training_configs.warmup_num_steps,
-        num_training_steps=training_configs.epochs * steps_per_epoch,
+        num_training_steps=training_configs.epochs *  training_configs.steps_per_epoch,
     )
 
     # ---------- 提取损失配置 ----------
@@ -404,7 +474,7 @@ def main():
             # 使用 FullStateDict 保存单卡完整权重（仅 rank0）
             if local_rank == 0:
                 with FSDP.state_dict_type(
-                    model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True)
+                    model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
                 ):
                     state_dict = model_fsdp.state_dict()
                 torch.save(
@@ -420,7 +490,7 @@ def main():
     # 训练结束，保存 latest
     if local_rank == 0:
         with FSDP.state_dict_type(
-            model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True)
+            model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
         ):
             final_state = model_fsdp.state_dict()
         torch.save(

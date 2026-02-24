@@ -28,6 +28,7 @@ from utils.dataset import (
     joint_affordance_collate_fn,
 )
 from utils.common import dict_to_cuda
+from utils import calculator as calc
 from utils.metrics import (
     build_torchmetrics_bundle,
     update_torchmetrics,
@@ -340,6 +341,10 @@ def main():
                     infer_cfg.output_dir,
                     dataset=torch_dataset,
                 )
+            # 释放当前 batch 的 GPU 张量引用，避免长验证阶段显存碎片累积
+            del output_dict, loss_dict, input_dict
+            if device.type == "cuda" and (batch_idx + 1) % 100 == 0:
+                torch.cuda.empty_cache()
 
     results = compute_and_reset_torchmetrics(metrics)
 

@@ -311,6 +311,7 @@ def build_torchmetrics_bundle(
     device,
     threshold_2d: float = 0.5,
     threshold_3d: float = 0.5,
+    auroc_num_thresholds: int = 256,
 ) -> Dict[str, torch.nn.Module]:
     """
     构建一组 epoch 级 torchmetrics 指标（支持多卡 compute 时自动同步）。
@@ -329,7 +330,9 @@ def build_torchmetrics_bundle(
     # ---- 3D 分割（标准 torchmetrics）----
     bundle["iou_3d"] = BinaryJaccardIndex(threshold=threshold_3d).to(device)
     bundle["mae_3d"] = MeanAbsoluteError().to(device)
-    bundle["auroc_3d"] = BinaryAUROC().to(device)
+    # BinaryAUROC 默认会缓存整轮所有预测/标签，数据集大时显存线性增长。
+    # 指定 thresholds 后改为分桶统计，显存占用与样本数解耦（固定上界）。
+    bundle["auroc_3d"] = BinaryAUROC(thresholds=auroc_num_thresholds).to(device)
     # ---- 3D 分割（自定义指标，用 MeanMetric 包装）----
     bundle["auc_3d"] = MeanMetric(sync_on_compute=True).to(device)   # calc.pc_AUC 的多阈值 AUC
     bundle["sim_3d"] = MeanMetric(sync_on_compute=True).to(device)   # calc.pc_SIM 相似度
@@ -404,10 +407,10 @@ def update_torchmetrics(
         # 标准 torchmetrics
         metrics["iou_3d"].update(preds_3d, target_3d.int())
         metrics["mae_3d"].update(preds_3d, target_3d)
-        metrics["auroc_3d"].update(preds_3d.reshape(-1), target_3d.reshape(-1).int())
         # 自定义指标：需要概率值 [0,1]（logits → sigmoid）
         preds_prob = preds_3d.sigmoid()
         target_01 = target_3d.clamp(0, 1)
+        metrics["auroc_3d"].update(preds_prob.reshape(-1), target_01.reshape(-1).int())
         try:
             auc_val = calc.pc_AUC(preds_prob, target_01, num_thresholds=50)
             metrics["auc_3d"].update(auc_val.item(), weight=bs)

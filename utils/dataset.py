@@ -206,7 +206,12 @@ class JointAffordanceTorchDataset(Dataset):
 
         # ZeRO-3 兼容：始终给 Qwen 提供一张图片
         if has_image:
-            qwen_img_rgb = cv2.cvtColor(data["img"], cv2.COLOR_BGR2RGB)
+            # 为了抑制 Qwen 视觉 token 的批间波动，Qwen 输入也统一到固定尺寸。
+            # 否则原图分辨率差异过大时，某些 batch 会触发显存峰值。
+            qwen_img = data["img"]
+            if qwen_img.shape[:2] != (self.image_size[0], self.image_size[1]):
+                qwen_img = cv2.resize(qwen_img, (self.image_size[0], self.image_size[1]))
+            qwen_img_rgb = cv2.cvtColor(qwen_img, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(qwen_img_rgb)
         else:
             pil_img = Image.new("RGB", (28, 28), color=(0, 0, 0))
