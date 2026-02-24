@@ -258,8 +258,9 @@ class TrainingConfig(Configs):
         vis_save_path="./vis_output",
         **kwargs,
     ):  
-        if samples_per_epoch is not None:
-            steps_per_epoch = samples_per_epoch // batch_size
+        if samples_per_epoch is not None and steps_per_epoch is None:
+            # 仅作为初始化兜底；train_fsdp.py 会在构建 DataLoader 后用真实值覆盖。
+            steps_per_epoch = max(1, (samples_per_epoch + batch_size - 1) // max(1, batch_size))
 
         deepspeed_config = deepspeed_config or DeepSpeedConfigs()
         lora_config = lora_config or LoRAConfigs()

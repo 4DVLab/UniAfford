@@ -407,8 +407,22 @@ def main():
         collate_fn=data_collator,
     )
 
+    # ---------- 根据实际 DataLoader 回填 steps_per_epoch ----------
+    # 以每个 rank 的优化器更新步数为准（考虑梯度累积）。
+    accum_steps = max(1, training_configs.grad_accumulation_steps)
+    computed_steps_per_epoch = max(1, (len(train_loader) + accum_steps - 1) // accum_steps)
+    configured_steps = getattr(training_configs, "steps_per_epoch", None)
+    training_configs.steps_per_epoch = computed_steps_per_epoch
+    if configured_steps is not None and configured_steps != computed_steps_per_epoch:
+        logger.warning(
+            f"steps_per_epoch 配置值({configured_steps})与实际值({computed_steps_per_epoch})不一致，"
+            f"已自动覆盖为实际值。"
+        )
+    else:
+        logger.info(f"steps_per_epoch 已设置为 {computed_steps_per_epoch}（基于当前 DataLoader 自动计算）")
+
     # ---------- FSDP 包装模型 ----------
-    model_fsdp = FSDP(model, device_id=device)
+    model_fsdp = FSDP(model, device_id=device, use_orig_params=True)
     log_param_dtype_stats(model_fsdp, logger, stage="after_fsdp_wrap")
 
     # ---------- 优化器 & 调度器 ----------
@@ -425,7 +439,7 @@ def main():
     scheduler = get_cosine_schedule_with_warmup(
         optimizer,
         num_warmup_steps=training_configs.warmup_num_steps,
-        num_training_steps=training_configs.epochs *  training_configs.steps_per_epoch,
+        num_training_steps=training_configs.epochs * training_configs.steps_per_epoch,
     )
 
     # ---------- 提取损失配置 ----------
