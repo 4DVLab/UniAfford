@@ -45,7 +45,7 @@ from utils.metrics import (
     log_scalar_dict,
     log_epoch_summary,
 )
-from utils.debug import log_param_dtype_stats, count_model_params
+from utils.debug import log_param_dtype_stats, count_model_params, _collect_batch_runtime_stats
 
 
 ENV_LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
@@ -100,42 +100,6 @@ def create_param_groups(model, config, logger):
             groups.append({"params": params, "lr": lr, "name": name})
             logger.info(f"  {name}: {len(params)} tensors, lr={lr}")
     return groups
-
-
-def _collect_batch_runtime_stats(input_dict: Dict, device: torch.device) -> Dict[str, float]:
-    """收集用于排查显存峰值的轻量运行时统计信息。"""
-    stats = {}
-    if device.type != "cuda":
-        return stats
-
-    allocated_gb = torch.cuda.memory_allocated(device) / (1024 ** 3)
-    reserved_gb = torch.cuda.memory_reserved(device) / (1024 ** 3)
-    peak_allocated_gb = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
-    stats.update(
-        mem_allocated_gb=allocated_gb,
-        mem_reserved_gb=reserved_gb,
-        mem_peak_allocated_gb=peak_allocated_gb,
-    )
-
-    attention_mask = input_dict.get("attention_mask")
-    if isinstance(attention_mask, torch.Tensor) and attention_mask.dim() >= 2:
-        seq_lens = attention_mask.sum(dim=1).float()
-        stats["seq_len_max"] = float(seq_lens.max().item())
-        stats["seq_len_mean"] = float(seq_lens.mean().item())
-
-    grid_thw = input_dict.get("image_grid_thw")
-    if isinstance(grid_thw, torch.Tensor) and grid_thw.dim() == 2 and grid_thw.shape[1] == 3:
-        grid_tokens = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).float()
-        stats["vision_tokens_max"] = float(grid_tokens.max().item())
-        stats["vision_tokens_mean"] = float(grid_tokens.mean().item())
-
-    valid_lengths = input_dict.get("pc_valid_lengths")
-    if isinstance(valid_lengths, torch.Tensor) and valid_lengths.numel() > 0:
-        lengths = valid_lengths.float()
-        stats["pc_points_max"] = float(lengths.max().item())
-        stats["pc_points_mean"] = float(lengths.mean().item())
-
-    return stats
 
 
 def train_one_epoch(
@@ -200,25 +164,25 @@ def train_one_epoch(
                 f"pc={loss_dict['pc_loss'].item():.6f})"
                 + (f" lr={lr:.2e}" if lr is not None else "")
             )
-            if (batch_idx + 1) % monitor_freq == 0 or (batch_idx + 1) == len(train_loader):
-                runtime_stats = _collect_batch_runtime_stats(input_dict, device)
-                if runtime_stats:
-                    logger.info(
-                        "  runtime: "
-                        f"mem={runtime_stats.get('mem_allocated_gb', 0.0):.2f}G "
-                        f"reserved={runtime_stats.get('mem_reserved_gb', 0.0):.2f}G "
-                        f"peak={runtime_stats.get('mem_peak_allocated_gb', 0.0):.2f}G "
-                        f"seq(max/mean)={runtime_stats.get('seq_len_max', 0.0):.0f}/{runtime_stats.get('seq_len_mean', 0.0):.1f} "
-                        f"vtok(max/mean)={runtime_stats.get('vision_tokens_max', 0.0):.0f}/{runtime_stats.get('vision_tokens_mean', 0.0):.1f} "
-                        f"pc(max/mean)={runtime_stats.get('pc_points_max', 0.0):.0f}/{runtime_stats.get('pc_points_mean', 0.0):.1f}"
-                    )
+            # if (batch_idx + 1) % monitor_freq == 0 or (batch_idx + 1) == len(train_loader):
+            #     runtime_stats = _collect_batch_runtime_stats(input_dict, device)
+            #     if runtime_stats:
+            #         logger.info(
+            #             "  runtime: "
+            #             f"mem={runtime_stats.get('mem_allocated_gb', 0.0):.2f}G "
+            #             f"reserved={runtime_stats.get('mem_reserved_gb', 0.0):.2f}G "
+            #             f"peak={runtime_stats.get('mem_peak_allocated_gb', 0.0):.2f}G "
+            #             f"seq(max/mean)={runtime_stats.get('seq_len_max', 0.0):.0f}/{runtime_stats.get('seq_len_mean', 0.0):.1f} "
+            #             f"vtok(max/mean)={runtime_stats.get('vision_tokens_max', 0.0):.0f}/{runtime_stats.get('vision_tokens_mean', 0.0):.1f} "
+            #             f"pc(max/mean)={runtime_stats.get('pc_points_max', 0.0):.0f}/{runtime_stats.get('pc_points_mean', 0.0):.1f}"
+            #         )
             if local_rank == 0 and writer is not None:
                 batch_log = {k: loss_dict[k].item() for k in loss_dict}
                 if lr is not None:
                     batch_log["lr"] = lr
-                runtime_stats = _collect_batch_runtime_stats(input_dict, device)
-                for k, v in runtime_stats.items():
-                    batch_log[k] = v
+                # runtime_stats = _collect_batch_runtime_stats(input_dict, device)
+                # for k, v in runtime_stats.items():
+                #     batch_log[k] = v
                 log_scalar_dict(writer, "train_batch", batch_log, global_step)
             if local_rank == 0 and hasattr(loader, "set_postfix"):
                 postfix = {"loss": f"{loss_dict['loss'].item():.4f}"}

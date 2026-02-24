@@ -1,3 +1,6 @@
+from typing import Dict
+import torch
+
 def log_param_dtype_stats(model, logger, stage):
     """打印全部参数 dtype 分布（含冻结参数）。"""
     module_refs = {
@@ -53,8 +56,43 @@ def align_mllm_trainable_dtypes(model, target_dtype, logger):
     )
 
 
-
 def count_model_params(model):
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total_params, trainable_params
+
+
+def _collect_batch_runtime_stats(input_dict: Dict, device: torch.device) -> Dict[str, float]:
+    """收集用于排查显存峰值的轻量运行时统计信息。"""
+    stats = {}
+    if device.type != "cuda":
+        return stats
+
+    allocated_gb = torch.cuda.memory_allocated(device) / (1024 ** 3)
+    reserved_gb = torch.cuda.memory_reserved(device) / (1024 ** 3)
+    peak_allocated_gb = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+    stats.update(
+        mem_allocated_gb=allocated_gb,
+        mem_reserved_gb=reserved_gb,
+        mem_peak_allocated_gb=peak_allocated_gb,
+    )
+
+    attention_mask = input_dict.get("attention_mask")
+    if isinstance(attention_mask, torch.Tensor) and attention_mask.dim() >= 2:
+        seq_lens = attention_mask.sum(dim=1).float()
+        stats["seq_len_max"] = float(seq_lens.max().item())
+        stats["seq_len_mean"] = float(seq_lens.mean().item())
+
+    grid_thw = input_dict.get("image_grid_thw")
+    if isinstance(grid_thw, torch.Tensor) and grid_thw.dim() == 2 and grid_thw.shape[1] == 3:
+        grid_tokens = (grid_thw[:, 0] * grid_thw[:, 1] * grid_thw[:, 2]).float()
+        stats["vision_tokens_max"] = float(grid_tokens.max().item())
+        stats["vision_tokens_mean"] = float(grid_tokens.mean().item())
+
+    valid_lengths = input_dict.get("pc_valid_lengths")
+    if isinstance(valid_lengths, torch.Tensor) and valid_lengths.numel() > 0:
+        lengths = valid_lengths.float()
+        stats["pc_points_max"] = float(lengths.max().item())
+        stats["pc_points_mean"] = float(lengths.mean().item())
+
+    return stats
