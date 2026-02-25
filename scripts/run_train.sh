@@ -18,14 +18,14 @@ export TORCHINDUCTOR_NO_PARALLEL_COMPILE=1
 
 COMMON_ARGS=(
   --vision_pretrained ../pretrained/sam_vit_h_4b8939.pth
-  --log_dir ../runs/joint-aff-exp-01/
+  --log_dir ../runs/joint-aff-debug/
   --dataset_dir ../datasets/merged1-2-3/
-  --qwen_model ../pretrained/Qwen/Qwen3-VL-8B-Instruct
+  --qwen_model ../pretrained/Qwen/Qwen3-VL-2B-Instruct
 )
 
 # ================================ 选择 fsdp?ds ================================
 
-BACKEND="${1:-ds}"
+BACKEND="${1:-fsdp}"
 NGPU=$(echo "$CUDA_VISIBLE_DEVICES" | tr ',' '\n' | wc -l)
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MASTER_PORT="${MASTER_PORT:-29501}"
