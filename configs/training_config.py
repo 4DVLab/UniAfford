@@ -177,10 +177,6 @@ class LoRAConfigs(Configs):
             target_modules=list(self.lora_target_modules),
             bias=self.bias,
             task_type=TaskType.CAUSAL_LM,
-            modules_to_save=["embed_tokens", "lm_head"],
-            trainable_token_indices={
-                "embed_tokens": [self.seg_token_idx, self.aff_token_idx]  # 从模型初始化自动获取，不提前设定确保其存在
-            },
         )
 
 class TrainingConfig(Configs):
@@ -216,7 +212,8 @@ class TrainingConfig(Configs):
         val_batch_size=10,  # 验证时每卡 batch 大小
         workers=4,
         print_freq=1,
-        name_of_params_to_train="visual_model, vision_tower, mm_projector, text_hidden_fcs, point_cloud_segmentor",
+        # 微调 mllm，其他全部需要训练
+        name_of_params_to_train="lm_head, embed_tokens, image_decoder, point_decoder, text_hidden_fcs",
 
         # 优化器配置
         lr=1e-3,
@@ -229,9 +226,6 @@ class TrainingConfig(Configs):
         llm_lr=None,        # 默认为 lr * 0.01
         vision_2d_lr=None,  # 默认为 lr
         vision_3d_lr=None,  # 默认为 lr
-        llm_param_keywords="lora_, base_layer",
-        vision_2d_param_keywords="mask_decoder, text_hidden_fcs",
-        vision_3d_param_keywords="point_cloud_segmentor",
         
         # 学习率调度器配置
         warmup_num_steps=100,
@@ -320,9 +314,6 @@ class TrainingConfig(Configs):
             llm_lr = llm_lr if llm_lr is not None else lr * 0.01,
             vision_2d_lr = vision_2d_lr if vision_2d_lr is not None else lr,
             vision_3d_lr = vision_3d_lr if vision_3d_lr is not None else lr,
-            llm_param_keywords = [m.strip() for m in llm_param_keywords.split(",") if m.strip()],
-            vision_2d_param_keywords = [m.strip() for m in vision_2d_param_keywords.split(",") if m.strip()],
-            vision_3d_param_keywords = [m.strip() for m in vision_3d_param_keywords.split(",") if m.strip()],
             
             # 学习率调度器配置
             warmup_num_steps = warmup_num_steps,

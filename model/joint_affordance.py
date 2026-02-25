@@ -349,9 +349,9 @@ class JointAffordanceModel(nn.Module):
         # 以 mllm 初始化后的 token 索引为准。
         self.seg_token_idx = self.mllm.seg_token_idx
         self.aff_token_idx = self.mllm.aff_token_idx
-        # 确保lora能够微调这两个token
-        self.config.lora.seg_token_idx = self.seg_token_idx
-        self.config.lora.aff_token_idx = self.aff_token_idx
+        # 确保lora能够调用这两个token
+        self.config.seg_token_idx = self.seg_token_idx
+        self.config.aff_token_idx = self.aff_token_idx
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
         self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
