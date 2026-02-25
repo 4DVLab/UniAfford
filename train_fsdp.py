@@ -488,7 +488,7 @@ def main():
                         "model_state_dict": state_dict,
                         "best_val_loss": best_metric,
                     },
-                    os.path.join(ckpt_dir, f"best_fsdp_epoch={best_epoch}.pth"),
+                    os.path.join(ckpt_dir, f"best_fsdp.pth"),
                 )
                 training_configs.save_json(config_json_path)
                 logger.info(f"Best FSDP checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
