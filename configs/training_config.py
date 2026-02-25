@@ -177,6 +177,10 @@ class LoRAConfigs(Configs):
             target_modules=list(self.lora_target_modules),
             bias=self.bias,
             task_type=TaskType.CAUSAL_LM,
+            modules_to_save=["embed_tokens", "lm_head"],
+            trainable_token_indices={
+                "embed_tokens": [self.seg_token_idx, self.aff_token_idx]  # 从模型初始化自动获取，不提前设定确保其存在
+            },
         )
 
 class TrainingConfig(Configs):

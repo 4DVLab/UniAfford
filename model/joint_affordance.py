@@ -36,10 +36,6 @@ class MLLMBackbone(nn.Module):
             print(f"Warning: hidden_size mismatch, config={self.config.hidden_size}, model={self.hidden_size}")
             self.config.hidden_size = self.hidden_size
 
-        if self.config.vocab_size != self.vocab_size:
-            print(f"Warning: vocab_size mismatch, config={self.config.vocab_size}, model={self.vocab_size}")
-            self.config.vocab_size = self.vocab_size
-
         if self.config.tokenizer is None:
             self.config.tokenizer = AutoTokenizer.from_pretrained(
                 self.config.qwen_model_name_or_path,
@@ -48,10 +44,48 @@ class MLLMBackbone(nn.Module):
                 use_fast=False,
             )
         self.tokenizer = self.config.tokenizer
+        self.seg_token = self.config.seg_token
+        self.aff_token = self.config.aff_token
+        self.seg_token_idx, self.aff_token_idx = self._ensure_special_tokens()
+
+        # 特殊 token 注入后，词表大小可能变化，这里以模型实际词表为准回写配置。
+        self.vocab_size = int(self.model.get_input_embeddings().num_embeddings)
+        if self.config.vocab_size != self.vocab_size:
+            print(f"Warning: vocab_size mismatch, config={self.config.vocab_size}, model={self.vocab_size}")
+            self.config.vocab_size = self.vocab_size
 
         self.to(dtype=self.config.compute_dtype)
 
-    
+    def _ensure_special_tokens(self):
+        """
+        确保配置中的分割 token 已加入 tokenizer，并与 MLLM embedding 对齐。
+        若 special token 已被占用（如已预训练好的模型、继续微调），则直接使用其现有 id，无需重复添加。
+        """
+        candidate_tokens = [self.seg_token, self.aff_token]
+        tokens_to_add = []
+
+        # Qwen tokenizer unknown token id
+        unk_id = self.tokenizer.unk_token_id
+
+        for token in candidate_tokens:
+            token_id = self.tokenizer.convert_tokens_to_ids(token)
+            # token 不存在或被识别为 unk，视为需要添加
+            if token_id is None or (unk_id is not None and token_id == unk_id):
+                tokens_to_add.append(token)
+            # 如果token已存在，认为是兼容已预训练好的模型，无需报错也无需重新添加，兼容性处理
+            # 否则直接复用存在的token
+
+        # 只有需要添加时才扩充tokenizer和embedding
+        if len(tokens_to_add) > 0:
+            self.tokenizer.add_special_tokens({"additional_special_tokens": tokens_to_add})
+            self.model.resize_token_embeddings(len(self.tokenizer))
+            # NOTE: embedding resize 可能会导致新 token embedding 随机初始化。
+            # 若继续微调，建议加入相关 embedding warmup 策略。
+
+        # 无论 token 是新加的还是已存在的，都返回其 id
+        seg_token_idx = self.tokenizer.convert_tokens_to_ids(self.seg_token)
+        aff_token_idx = self.tokenizer.convert_tokens_to_ids(self.aff_token)
+        return seg_token_idx, aff_token_idx
 
     def _build_qwen_model(self, config: MLLMConfigs):
         model_name = config.qwen_model_name_or_path
@@ -310,10 +344,15 @@ class JointAffordanceModel(nn.Module):
     def __init__(self, config: Optional[JointAffordanceConfig] = None):
         super().__init__()
         self.config = config or JointAffordanceConfig()
-        self.seg_token_idx = self.config.seg_token_idx
-        self.aff_token_idx = self.config.aff_token_idx
 
         self.mllm = MLLMBackbone(self.config.mllm)
+        # 以 mllm 初始化后的 token 索引为准。
+        self.seg_token_idx = self.mllm.seg_token_idx
+        self.aff_token_idx = self.mllm.aff_token_idx
+        # 确保lora能够微调这两个token
+        self.config.lora.seg_token_idx = self.seg_token_idx
+        self.config.lora.aff_token_idx = self.aff_token_idx
+
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
         self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
 
@@ -346,7 +385,8 @@ class JointAffordanceModel(nn.Module):
         B, _, C = last_hidden_state.shape
         if token_ids is None or token_idx is None:
             return last_hidden_state.new_zeros(B, C)
-        token_mask = (token_ids == token_idx)
+
+        token_mask = (token_ids == int(token_idx))
 
         # 若长度不一致，截断到较短的公共长度
         if last_hidden_state.shape[1] != token_mask.shape[1]:
@@ -398,12 +438,12 @@ class JointAffordanceModel(nn.Module):
         )
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
         output_obj = mllm_out.get("output")
-        token_ids = None
+        logits_token_ids = None
         ce_loss = None
         if output_obj is not None:
             # 1）从 logits 中取出 token_ids，供下游 [SEG] / [AFF] token 提取使用
             if getattr(output_obj, "logits", None) is not None:
-                token_ids = output_obj.logits.argmax(dim=-1)
+                logits_token_ids = output_obj.logits.argmax(dim=-1)
             # 2）若传入了 labels，Qwen 的 output.loss 即为语言模型交叉熵损失
             if getattr(output_obj, "loss", None) is not None:
                 # 注意：这里不做缩放，交由 calculator.compute_losses 中的 ce_loss_weight 控制
@@ -416,7 +456,7 @@ class JointAffordanceModel(nn.Module):
             # ---- 2. 先提取 SEG token 的单 token hidden_state，再分别做投影 ----
             # HACK: 目前先共用语义空间，看看会不会有相互增强的效果
             seg_hidden = self._extract_token_embeddings(
-                hidden_states, token_ids, self.seg_token_idx
+                hidden_states, logits_token_ids, self.seg_token_idx
             )  # [B, C]
             image_pred_emb = self.image_decoder.project_hidden_states(seg_hidden).to(self.image_decoder.config.compute_dtype)
             point_pred_emb = self.point_decoder.project_hidden_states(seg_hidden).to(self.point_decoder.config.compute_dtype)

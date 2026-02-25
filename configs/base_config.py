@@ -65,9 +65,11 @@ class MLLMConfigs(Configs):
         tokenizer: Optional[object] = None,
         train_mask_decoder: bool = True,
         out_dim: int = 256,
-        seg_token_idx: Optional[int] = None,
-        aff_token_idx: Optional[int] = None,
-    ):  
+        seg_token: str = "[SEG]",
+        aff_token: str = "[AFF]",
+        **kwargs,
+    ):
+
         # 在fp32的时候禁用 flash_attention_2，因为flash_attention_2只支持bf16，在fp32的时候使用默认的attn_implementation
         qwen_attn_implementation = qwen_attn_implementation if compute_dtype == 'bf16' else None
         super().__init__(
@@ -81,8 +83,9 @@ class MLLMConfigs(Configs):
             tokenizer=tokenizer,
             train_mask_decoder=train_mask_decoder,
             out_dim=out_dim,
-            seg_token_idx=seg_token_idx,
-            aff_token_idx=aff_token_idx,
+            seg_token=seg_token,
+            aff_token=aff_token,
+            **kwargs,
         )
 
 
