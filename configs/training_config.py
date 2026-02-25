@@ -2,6 +2,7 @@
 NOTE: 所有的相对目录都是基于项目（仓库）根目录而言
 """
 import os
+import json
 from re import S
 from typing import Optional
 
@@ -353,4 +354,53 @@ class TrainingConfig(Configs):
             distributed = False,
             **kwargs,
         )
+
+    @classmethod
+    def from_json_dict(cls, data: dict) -> "TrainingConfig":
+        """从 JSON 字典恢复 TrainingConfig。"""
+        payload = dict(data)
+
+        model_data = payload.pop("model_config", {}) or {}
+        # 兼容不同命名（mllm / mllm_config）
+        mllm_data = model_data.pop("mllm", None)
+        if mllm_data is None:
+            mllm_data = model_data.pop("mllm_config", {}) or {}
+        image_data = model_data.pop("image_decoder", {}) or {}
+        point_data = model_data.pop("point_decoder", {}) or {}
+
+        # tokenizer 句柄不可从 JSON 恢复，统一置空并在运行时重建
+        mllm_data["tokenizer"] = None
+
+        model_cfg = JointAffordanceConfig(
+            mllm_config=MLLMConfigs(**mllm_data),
+            image_decoder=ImageDecoderConfigs(**image_data),
+            point_decoder=PointDecoderConfigs(**point_data),
+            **model_data,
+        )
+
+        ds_data = payload.pop("deepspeed", {}) or {}
+        lora_data = payload.pop("lora", {}) or {}
+        ds_cfg = DeepSpeedConfigs(**ds_data)
+        lora_cfg = LoRAConfigs(**lora_data)
+
+        # 这两个字段由构造逻辑推导得到，不参与反序列化输入
+        payload.pop("log_dir", None)
+        payload.pop("distributed", None)
+        # JSON 中 tuple 会变 list，这里恢复常用结构
+        if isinstance(payload.get("image_size"), list):
+            payload["image_size"] = tuple(payload["image_size"])
+
+        return cls(
+            model_config=model_cfg,
+            deepspeed_config=ds_cfg,
+            lora_config=lora_cfg,
+            **payload,
+        )
+
+    @classmethod
+    def from_json(cls, path: str) -> "TrainingConfig":
+        """从 JSON 文件恢复 TrainingConfig。"""
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls.from_json_dict(data)
     

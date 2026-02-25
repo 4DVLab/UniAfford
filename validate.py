@@ -12,12 +12,11 @@ import argparse
 import os
 from functools import partial
 from typing import Dict, Optional, Tuple
-from collections import OrderedDict
-
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
+from peft import get_peft_model
 import cv2
 
 from configs import TrainingConfig
@@ -29,6 +28,7 @@ from utils.dataset import (
     joint_affordance_collate_fn,
 )
 from utils.common import dict_to_cuda
+from utils.checkpoint_utils import load_checkpoint_to_model
 from utils import calculator as calc
 from utils.metrics import (
     build_torchmetrics_bundle,
@@ -43,6 +43,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="验证 JointAffordance 模型（新版）")
     parser.add_argument("--checkpoint_path", type=str, required=True,
                         help="训练好的模型 checkpoint 路径（包含 model_state_dict 或直接为 state_dict）")
+    parser.add_argument("--config_json", type=str, default=None,
+                        help="训练配置 JSON 路径（默认自动在 checkpoint 同目录查找 training_config.json）")
     parser.add_argument("--dataset_dir", type=str, default=None,
                         help="数据集目录（默认使用 TrainingConfig 中的设置）")
     parser.add_argument("--batch_size", type=int, default=1,
@@ -66,92 +68,15 @@ def parse_args():
     return parser.parse_args()
 
 
-def _extract_state_dict(ckpt_obj) -> Dict[str, torch.Tensor]:
-    """从多种 checkpoint 结构中提取 state_dict。"""
-    if isinstance(ckpt_obj, dict):
-        for key in ("model_state_dict", "state_dict", "module"):
-            val = ckpt_obj.get(key, None)
-            if isinstance(val, dict):
-                return val
-    if isinstance(ckpt_obj, dict):
-        return ckpt_obj
-    raise TypeError(f"不支持的 checkpoint 结构: {type(ckpt_obj)}")
-
-
-def _strip_prefix(state_dict: Dict[str, torch.Tensor], prefix: str) -> Dict[str, torch.Tensor]:
-    """若 key 以 prefix 开头则移除前缀。"""
-    out = OrderedDict()
-    for k, v in state_dict.items():
-        out[k[len(prefix):] if k.startswith(prefix) else k] = v
-    return out
-
-
-def _detect_best_state_dict(
-    model: JointAffordanceModel, raw_state_dict: Dict[str, torch.Tensor]
-) -> Tuple[Dict[str, torch.Tensor], str]:
-    """
-    自动选择最匹配的 state_dict 版本：
-    - 原始 key
-    - 去除常见并行训练前缀（module / _orig_mod / _fsdp_wrapped_module）
-    """
-    candidates = [
-        ("raw", raw_state_dict),
-        ("strip:module.", _strip_prefix(raw_state_dict, "module.")),
-        ("strip:_orig_mod.", _strip_prefix(raw_state_dict, "_orig_mod.")),
-        ("strip:_fsdp_wrapped_module.", _strip_prefix(raw_state_dict, "_fsdp_wrapped_module.")),
-        ("strip:module._orig_mod.", _strip_prefix(raw_state_dict, "module._orig_mod.")),
-        ("strip:module._fsdp_wrapped_module.", _strip_prefix(raw_state_dict, "module._fsdp_wrapped_module.")),
-    ]
-
-    model_keys = set(model.state_dict().keys())
-    best_name = "raw"
-    best_state = raw_state_dict
-    # 优先最大 key 交集，其次最小差异
-    best_score = (-1, float("inf"))
-    for name, sd in candidates:
-        keys = set(sd.keys())
-        matched = len(keys & model_keys)
-        mismatch = len(keys - model_keys) + len(model_keys - keys)
-        score = (matched, -mismatch)
-        if score > best_score:
-            best_score = score
-            best_name = name
-            best_state = sd
-    return best_state, best_name
-
-
-def load_checkpoint_to_model(model: JointAffordanceModel, ckpt_path: str, map_location="cpu"):
-    """通用 checkpoint 加载逻辑：自动识别 DS/FSDP 的 .pth 并适配键名前缀。"""
-    if not os.path.exists(ckpt_path):
-        raise FileNotFoundError(f"找不到 checkpoint: {ckpt_path}")
-    if os.path.isdir(ckpt_path):
-        raise ValueError(
-            f"给定路径是目录：{ckpt_path}。\n"
-            "validate.py 仅支持 .pth 权重文件；若是 DeepSpeed ZeRO 目录，请先导出为 .pth。"
-        )
-
-    ckpt = torch.load(ckpt_path, map_location=map_location)
-    state_dict = _extract_state_dict(ckpt)
-    state_dict, adapt_rule = _detect_best_state_dict(model, state_dict)
-
-    # 简单格式识别：主要用于日志提示，不影响加载
-    all_keys = list(state_dict.keys())
-    if (
-        "fsdp" in adapt_rule
-        or any("fsdp_wrapped_module" in k for k in all_keys)
-        or "fsdp" in os.path.basename(ckpt_path).lower()
-    ):
-        ckpt_type = "fsdp"
-    else:
-        ckpt_type = "deepspeed_or_plain"
-
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    print(f"已加载 checkpoint: {ckpt_path}")
-    print(f"自动识别格式: {ckpt_type}，键名适配规则: {adapt_rule}")
-    if missing:
-        print(f"[Warning] Missing keys: {len(missing)}，例如：{missing[:10]}")
-    if unexpected:
-        print(f"[Warning] Unexpected keys: {len(unexpected)}，例如：{unexpected[:10]}")
+def _resolve_config_json_path(checkpoint_path: str, config_json_arg: Optional[str]) -> Optional[str]:
+    """优先使用显式参数，否则自动在 checkpoint 同目录查找 training_config.json。"""
+    if config_json_arg:
+        if not os.path.exists(config_json_arg):
+            raise FileNotFoundError(f"指定的配置 JSON 不存在: {config_json_arg}")
+        return config_json_arg
+    ckpt_dir = checkpoint_path if os.path.isdir(checkpoint_path) else os.path.dirname(checkpoint_path)
+    candidate = os.path.join(ckpt_dir, "training_config.json")
+    return candidate if os.path.exists(candidate) else None
 
 
 def build_dataloader_for_split(
@@ -337,7 +262,13 @@ def main():
     args = parse_args()
 
     # 训练 & 推理配置
-    training_cfg = TrainingConfig()
+    cfg_json_path = _resolve_config_json_path(args.checkpoint_path, args.config_json)
+    if cfg_json_path is not None and os.path.exists(cfg_json_path):
+        training_cfg = TrainingConfig.from_json(cfg_json_path)
+        print(f"已加载训练配置: {cfg_json_path}")
+    else:
+        training_cfg = TrainingConfig()
+        print("未找到训练配置 JSON，使用 TrainingConfig 默认值。")
     infer_cfg = InferenceConfig(
         device=args.device,
         batch_size=args.batch_size,
@@ -363,6 +294,10 @@ def main():
         model_cfg.image_decoder.vision_pretrained = args.vision_pretrained
 
     model = JointAffordanceModel(model_cfg).to(device)
+    # 应用lora
+    if training_cfg.lora.lora_r > 0:
+        model.mllm.model = get_peft_model(model.mllm.model, training_cfg.lora.to_peft_config())
+
     load_checkpoint_to_model(model, args.checkpoint_path, map_location="cpu")
     model.to(device)
     model.eval()

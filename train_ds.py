@@ -421,6 +421,10 @@ def main():
     best_epoch = -1
     ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
+    config_json_path = os.path.join(ckpt_dir, "training_config.json")
+    if local_rank == 0:
+        training_configs.save_json(config_json_path)
+        logger.info(f"配置已导出: {config_json_path}")
 
     for epoch in range(training_configs.epochs):
         logger.info(f"----- Epoch [{epoch + 1}/{training_configs.epochs}] -----")
@@ -468,6 +472,8 @@ def main():
                 if local_rank == 0:
                     logger.info(f"Best checkpoint (ZeRO 格式) 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
             if local_rank == 0:
+                training_configs.save_json(config_json_path)
+            if local_rank == 0:
                 if writer is not None:
                     log_scalar_dict(writer, "checkpoint",
                                     {"best_val_loss": best_metric, "best_epoch": float(best_epoch)},
@@ -488,6 +494,7 @@ def main():
         },
     )
     if local_rank == 0:
+        training_configs.save_json(config_json_path)
         logger.info(f"Latest checkpoint 已保存: epoch={final_epoch}, path={ckpt_dir}/latest")
 
     logger.info("=" * 80)

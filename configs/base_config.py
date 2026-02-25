@@ -1,6 +1,7 @@
 """
 联合可供性模型配置，集中管理模型所需的全部配置项。
 """
+import json
 import torch
 from typing import Optional
 from utils.common import resolve_dtype
@@ -17,6 +18,36 @@ class Configs:
 
     def to_dict(self):
         return dict(self.__dict__)
+
+    @staticmethod
+    def _serialize_value(value):
+        """递归转成 JSON 友好的结构。"""
+        if isinstance(value, Configs):
+            return value.to_json_dict()
+        if isinstance(value, torch.dtype):
+            if value == torch.bfloat16:
+                return "bf16"
+            if value == torch.float16:
+                return "fp16"
+            if value == torch.float32:
+                return "fp32"
+            return str(value).replace("torch.", "")
+        if isinstance(value, dict):
+            return {str(k): Configs._serialize_value(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [Configs._serialize_value(v) for v in value]
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            return value
+        # 兜底：保持可序列化，不让导出失败（例如 tokenizer 句柄）
+        return str(value)
+
+    def to_json_dict(self):
+        """用于配置落盘的字典（区别于训练时 to_dict 语义）。"""
+        return {k: self._serialize_value(v) for k, v in self.__dict__.items()}
+
+    def save_json(self, path: str):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_json_dict(), f, ensure_ascii=False, indent=2)
 
 
 class MLLMConfigs(Configs):

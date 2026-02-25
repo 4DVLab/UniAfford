@@ -428,6 +428,10 @@ def main():
     best_epoch = -1
     ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints_fsdp")
     os.makedirs(ckpt_dir, exist_ok=True)
+    config_json_path = os.path.join(ckpt_dir, "training_config.json")
+    if local_rank == 0:
+        training_configs.save_json(config_json_path)
+        logger.info(f"配置已导出: {config_json_path}")
 
     for epoch in range(training_configs.epochs):
         logger.info(f"----- Epoch [{epoch + 1}/{training_configs.epochs}] -----")
@@ -461,8 +465,9 @@ def main():
                         "model_state_dict": state_dict,
                         "best_val_loss": best_metric,
                     },
-                    os.path.join(ckpt_dir, "best_fsdp.pth"),
+                    os.path.join(ckpt_dir, f"best_fsdp_epoch={best_epoch}.pth"),
                 )
+                training_configs.save_json(config_json_path)
                 logger.info(f"Best FSDP checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
 
     # 训练结束，保存 latest
@@ -481,6 +486,7 @@ def main():
             },
             os.path.join(ckpt_dir, "latest_fsdp.pth"),
         )
+        training_configs.save_json(config_json_path)
         logger.info(
             f"Latest FSDP checkpoint 已保存: "
             f"epoch={training_configs.epochs}, best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
