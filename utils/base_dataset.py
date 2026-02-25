@@ -12,7 +12,7 @@ from collections import defaultdict
 import numpy as np
 import cv2
 import csv
-from common import resolve_path
+from utils.common import resolve_path
 
 
 """ ------------------------------------ Info 信息管理工具 ----------------------------------- """
