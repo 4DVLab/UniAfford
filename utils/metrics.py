@@ -493,4 +493,4 @@ def log_epoch_summary(
     logger.info(f"{pfx} 3D - {seg3d_str}")
     if lr_dict is not None:
         lr_text = ", ".join([f"{k}={v:.2e}" for k, v in lr_dict.items()])
-        logger.info(f"当前学习率: {lr_text:.2e}")
+        logger.info(f"当前学习率: {lr_text}")
