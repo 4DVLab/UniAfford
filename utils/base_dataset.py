@@ -1821,55 +1821,104 @@ class JointDataset:
 
 
 def main():
-    """示例用法"""
+    """示例用法；支持 -s/--show 作为渲染工具，自动识别 2D/3D 并依次渲染。"""
     import argparse
-    
-    parser = argparse.ArgumentParser(description="加载并分割联合数据集")
-    parser.add_argument('-d', '--dataset-root', type=str, required=True,
-                       help='数据集根目录')
-    parser.add_argument('-o', '--obj-type', type=str, nargs='+', default=None,
-                       help='物体类型列表，默认加载所有')
-    parser.add_argument('-a', '--aff-type', type=str, nargs='+', default=None,
-                       help='Affordance 类型列表，默认加载所有')
-    parser.add_argument('--train-ratio', type=float, default=0.7,
-                       help='训练集比例')
-    parser.add_argument('--val-ratio', type=float, default=0.15,
-                       help='验证集比例')
-    parser.add_argument('--test-ratio', type=float, default=0.15,
-                       help='测试集比例')
-    parser.add_argument('--seed', type=int, default=42,
-                       help='随机种子')
-    parser.add_argument('--no-balance', action='store_true',
-                       help='禁用数据平衡（默认启用）')
-    parser.add_argument('--save-split', action='store_true',
-                       help='保存数据集分割结果为JSON文件')
-    parser.add_argument('--save-split-path', type=str, default=None,
-                       help='保存分割结果的JSON文件路径（默认为 dataset_root/dataset_split.json）')
-    parser.add_argument('--keep-id', action='store_true', default=True,
-                       help='保持原有的ID（默认启用）')
-    
-    args = parser.parse_args()
-    
-    # 创建数据集并加载
-    dataset = JointDataset(
-        dataset_root=args.dataset_root,
-        obj_type=args.obj_type,
-        aff_type=args.aff_type,
-        keep_id=args.keep_id,
-        balance_data=not args.no_balance,
-        dtype=None,
-    ).load_all_data()
-    
-    # 保存分割结果
-    if args.save_split:
-        dataset.split_dataset(
-            train_ratio=args.train_ratio,
-            val_ratio=args.val_ratio,
-            test_ratio=args.test_ratio,
-            random_seed=args.seed,
-        )
-    
+    parser = argparse.ArgumentParser(description="加载并分割联合数据集；或使用 -s/--show 渲染指定 2D/3D 数据")
 
-    
+    # 数据集分割参数
+    parser.add_argument('-d', '--dataset-root', type=str, default=None,
+                        help='数据集根目录（非 show 模式时必填）')
+    parser.add_argument('-o', '--obj-type', type=str, nargs='+', default=None,
+                        help='物体类型列表，默认加载所有')
+    parser.add_argument('-a', '--aff-type', type=str, nargs='+', default=None,
+                        help='Affordance 类型列表，默认加载所有')
+    parser.add_argument('--train-ratio', type=float, default=0.7,
+                        help='训练集比例')
+    parser.add_argument('--val-ratio', type=float, default=0.15,
+                        help='验证集比例')
+    parser.add_argument('--test-ratio', type=float, default=0.15,
+                        help='测试集比例')
+    parser.add_argument('--seed', type=int, default=42,
+                        help='随机种子')
+    parser.add_argument('--no-balance', action='store_true',
+                        help='禁用数据平衡（默认启用）')
+    parser.add_argument('--save-split', action='store_true',
+                        help='保存数据集分割结果为JSON文件')
+    parser.add_argument('--keep-id', action='store_true', default=True,
+                        help='保持原有的ID（默认启用）')
+
+    # 渲染参数，和上述参数不共存
+    parser.add_argument('-s', '--show', type=str, nargs='+', default=None,
+                        help='渲染模式：指定一个或多个文件/目录路径，自动识别 2D 图像或 3D 点云并依次调用 show()')
+    args = parser.parse_args()
+
+    # 渲染模式：-s/--show 时仅作渲染工具，不加载完整数据集
+    if args.show:
+        from utils.common import resolve_path
+        PC_EXTS = {'.csv'}
+        IMG_EXTS = {'.png', '.jpg', '.jpeg'}
+
+        def _collect_paths(paths):
+            """将输入路径展开为文件列表；若为目录则递归收集支持的扩展名。"""
+            collected = []
+            for p in paths:
+                resolved = resolve_path(p)
+                if not os.path.exists(resolved):
+                    warnings.warn(f"路径不存在，已跳过: {resolved}")
+                    continue
+                if os.path.isfile(resolved):
+                    collected.append(resolved)
+                else:
+                    for root, _, files in os.walk(resolved):
+                        for f in files:
+                            ext = os.path.splitext(f)[1].lower()
+                            if ext in PC_EXTS or ext in IMG_EXTS:
+                                collected.append(os.path.join(root, f))
+            return collected
+
+        def _is_point_cloud_path(filepath):
+            return os.path.splitext(filepath)[1].lower() in PC_EXTS
+
+        file_paths = _collect_paths(args.show)
+        if not file_paths:
+            print("未找到可渲染的文件（支持 2D: .png/.jpg/.jpeg，3D 点云: .csv）")
+            return
+
+        for file_path in file_paths:
+            file_path = resolve_path(file_path)
+            try:
+                if _is_point_cloud_path(file_path):
+                    obj = PointCloud.load_file(file_path)
+                    obj.show()
+                else:
+                    obj = Image.load_file(file_path)
+                    obj.show()
+            except Exception as e:
+                warnings.warn(f"渲染失败 {file_path}: {e}")
+        return
+
+    elif args.dataset_root is not None:
+        # 创建数据集并加载
+        dataset = JointDataset(
+            dataset_root=args.dataset_root,
+            obj_type=args.obj_type,
+            aff_type=args.aff_type,
+            keep_id=args.keep_id,
+            balance_data=not args.no_balance,
+            dtype=None,
+        ).load_all_data()
+
+        # 保存分割结果
+        if args.save_split:
+            dataset.split_dataset(
+                train_ratio=args.train_ratio,
+                val_ratio=args.val_ratio,
+                test_ratio=args.test_ratio,
+                random_seed=args.seed,
+            )
+    else:
+        parser.error("未使用 -s/--show 时需指定 -d/--dataset-root")
+
+
 if __name__ == "__main__":
     main()

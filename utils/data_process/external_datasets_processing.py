@@ -3,15 +3,14 @@
     注意所有的'Note'注释。
 """
 
-
+import sys
 import os
-import json
-import warnings
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import cv2
 from collections import defaultdict
-from utils.base_dataset import Instruction, Image, PointCloud, load_info, save_info, create_info_dict
-from utils.common import resolve_path
+from base_dataset import Instruction, Image, PointCloud, load_info, save_info, create_info_dict
+from common import resolve_path
 
 # 全局参数
 DEFAULT_OUTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 输出的数据集位置（用于数据转换，训练推理时可忽略）
