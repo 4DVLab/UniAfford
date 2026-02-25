@@ -424,6 +424,7 @@ class JointAffordanceModel(nn.Module):
         point_clouds: Optional[torch.Tensor] = None,
         pc_valid_lengths: Optional[torch.Tensor] = None,
         pc_gt_tensor: Optional[torch.Tensor] = None,  # 后续可能支持，暂且保留
+        **kwargs,
     ) -> Dict[str, Optional[torch.Tensor]]:
         B = input_ids.shape[0] if input_ids is not None else 1
 
