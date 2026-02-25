@@ -208,10 +208,27 @@ def save_batch_predictions(
         aff_type = sample.aff_type
         sample_id = sample.id
 
-        # 2D mask 保存
+        # 2D mask 保存（在保存前还原到原始图像尺寸）
         pred_mask_2d = _extract_pred_mask("image_logits", i)
         if pred_mask_2d is not None and sample.img is not None and sample.img.img is not None:
             mask_2d = _to_uint8_mask(pred_mask_2d)
+
+            # 根据原始 RGB 图的尺寸调整 mask 尺寸
+            orig_img = sample.img.img
+            orig_h, orig_w = orig_img.shape[:2]
+            if mask_2d.ndim == 3:
+                # 如果是 (C, H, W) 或 (H, W, C)，先取单通道
+                if mask_2d.shape[0] in (1, 3) and mask_2d.shape[1] == orig_h and mask_2d.shape[2] == orig_w:
+                    mask_2d = mask_2d[0]
+                elif mask_2d.shape[-1] in (1, 3) and mask_2d.shape[0] == orig_h and mask_2d.shape[1] == orig_w:
+                    mask_2d = mask_2d[..., 0]
+                else:
+                    # 退化为取第一个通道再缩放
+                    mask_2d = mask_2d[0] if mask_2d.shape[0] in (1, 3) else mask_2d[..., 0]
+
+            if mask_2d.shape[:2] != (orig_h, orig_w):
+                mask_2d = cv2.resize(mask_2d, (orig_w, orig_h), interpolation=cv2.INTER_NEAREST)
+
             img_dir = os.path.join(output_dir, obj_type, "Image")
             rgb_dir = os.path.join(img_dir, "rgb")
             mask_dir = os.path.join(img_dir, "mask", aff_type)
@@ -219,7 +236,7 @@ def save_batch_predictions(
             os.makedirs(mask_dir, exist_ok=True)
             img_path = os.path.join(rgb_dir, f"{obj_type}_{sample_id}.png")
             if not os.path.exists(img_path):
-                cv2.imwrite(img_path, sample.img.img)
+                cv2.imwrite(img_path, orig_img)
             mask_path = os.path.join(mask_dir, f"{obj_type}_{sample_id}_{aff_type}.png")
             cv2.imwrite(mask_path, mask_2d)
 

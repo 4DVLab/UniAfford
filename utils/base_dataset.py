@@ -4,7 +4,6 @@
 """
 import os
 import random
-import re
 import warnings
 from tqdm import tqdm
 import json
@@ -13,6 +12,7 @@ from collections import defaultdict
 import numpy as np
 import cv2
 import csv
+from common import resolve_path
 
 
 """ ------------------------------------ Info 信息管理工具 ----------------------------------- """
@@ -1854,7 +1854,6 @@ def main():
 
     # 渲染模式：-s/--show 时仅作渲染工具，不加载完整数据集
     if args.show:
-        from utils.common import resolve_path
         PC_EXTS = {'.csv'}
         IMG_EXTS = {'.png', '.jpg', '.jpeg'}
 
@@ -1885,7 +1884,6 @@ def main():
             return
 
         for file_path in file_paths:
-            file_path = resolve_path(file_path)
             try:
                 if _is_point_cloud_path(file_path):
                     obj = PointCloud.load_file(file_path)
