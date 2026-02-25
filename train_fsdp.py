@@ -36,7 +36,7 @@ from utils.dataset import (
     JointAffordanceTrainDataset,
     joint_affordance_collate_fn,
 )
-from utils.common import dict_to_cuda, setup_logger, get_current_lr
+from utils.common import dict_to_cuda, setup_logger
 from utils import calculator as calc
 from utils.metrics import (
     build_torchmetrics_bundle,
@@ -102,6 +102,18 @@ def create_param_groups(model, config, logger):
     return groups
 
 
+def get_current_lr(scheduler, optimizer):
+    """返回当前学习率字典，兼容分层/非分层学习率。"""
+    lr_list = scheduler.get_last_lr()
+    lr_dict = {}
+    for idx, group in enumerate(optimizer.param_groups):
+        group_name = group.get("name")
+        if not group_name:
+            group_name = "lr" if len(optimizer.param_groups) == 1 else f"group_{idx}"
+        lr_dict[group_name] = float(lr_list[idx])
+    return lr_dict
+
+
 def train_one_epoch(
     train_loader, model_fsdp, optimizer, scheduler, config,
     epoch, global_step, writer, logger, local_rank,
@@ -155,15 +167,19 @@ def train_one_epoch(
 
         # 打印与 TensorBoard
         if (batch_idx + 1) % config.print_freq == 0 or (batch_idx + 1) == len(train_loader):
-            lr = get_current_lr(scheduler, optimizer)
-            logger.info(
+            lr_dict = get_current_lr(scheduler, optimizer)
+            lr_text = ", ".join([f"{k}={v:.2e}" for k, v in lr_dict.items()])
+            log_msg = (
                 f"  [{batch_idx + 1}/{len(train_loader)}] "
                 f"loss={loss_dict['loss'].item():.6f} "
                 f"(ce={loss_dict['ce_loss'].item():.6f}, "
                 f"img={loss_dict['img_loss'].item():.6f}, "
                 f"pc={loss_dict['pc_loss'].item():.6f})"
-                + (f" lr={lr:.2e}" if lr is not None else "")
+                + (f" lr=({lr_text})" if lr_text else "")
             )
+            logger.info(log_msg)
+            if local_rank == 0:
+                print(log_msg)
             # if (batch_idx + 1) % monitor_freq == 0 or (batch_idx + 1) == len(train_loader):
             #     runtime_stats = _collect_batch_runtime_stats(input_dict, device)
             #     if runtime_stats:
@@ -178,26 +194,33 @@ def train_one_epoch(
             #         )
             if local_rank == 0 and writer is not None:
                 batch_log = {k: loss_dict[k].item() for k in loss_dict}
-                if lr is not None:
-                    batch_log["lr"] = lr
+                for k, v in lr_dict.items():
+                    batch_log[f"lr/{k}"] = v
+                if lr_dict:
+                    batch_log["lr"] = next(iter(lr_dict.values()))
                 # runtime_stats = _collect_batch_runtime_stats(input_dict, device)
                 # for k, v in runtime_stats.items():
                 #     batch_log[k] = v
                 log_scalar_dict(writer, "train_batch", batch_log, global_step)
             if local_rank == 0 and hasattr(loader, "set_postfix"):
                 postfix = {"loss": f"{loss_dict['loss'].item():.4f}"}
-                if lr is not None:
-                    postfix["lr"] = f"{lr:.2e}"
+                if lr_dict:
+                    postfix["lr"] = f"{next(iter(lr_dict.values())):.2e}"
                 loader.set_postfix(postfix, refresh=False)
 
     # 汇总指标（FSDP 下 compute() 已自动在进程内同步，需要时可再做 dist.all_reduce）
     train_results = compute_and_reset_torchmetrics(metrics)
-    lr = get_current_lr(scheduler, optimizer)
+    lr_dict = get_current_lr(scheduler, optimizer)
+    if lr_dict:
+        lr_text = ", ".join([f"{k}={v:.2e}" for k, v in lr_dict.items()])
+        logger.info(f"Epoch {epoch + 1} 分层学习率: {lr_text}")
+        if local_rank == 0:
+            print(f"Epoch {epoch + 1} 分层学习率: {lr_text}")
     log_epoch_summary(logger, epoch + 1, config.epochs, "train", train_results, lr)
     if local_rank == 0 and writer is not None:
         log_scalar_dict(writer, "train_epoch", train_results, epoch + 1)
-        if lr is not None:
-            log_scalar_dict(writer, "train_epoch", {"lr": lr}, epoch + 1)
+        for k, v in lr_dict.items():
+            log_scalar_dict(writer, "train_epoch", {f"lr/{k}": v}, epoch + 1)
 
     return global_step, train_results
 
