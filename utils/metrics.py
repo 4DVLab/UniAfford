@@ -455,7 +455,7 @@ def log_epoch_summary(
     total_epochs: int,
     phase: str,
     results: Dict[str, float],
-    lr: Optional[float] = None,
+    lr_dict: Optional[float] = None,
 ):
     """
     格式化打印一个阶段（训练/验证）的 epoch 摘要，输出所有已计算的指标。
@@ -491,5 +491,6 @@ def log_epoch_summary(
     logger.info(f"{pfx} - {loss_str}")
     logger.info(f"{pfx} 2D - {seg2d_str}")
     logger.info(f"{pfx} 3D - {seg3d_str}")
-    if lr is not None:
-        logger.info(f"当前学习率: {lr:.2e}")
+    if lr_dict is not None:
+        lr_text = ", ".join([f"{k}={v:.2e}" for k, v in lr_dict.items()])
+        logger.info(f"当前学习率: {lr_text:.2e}")

@@ -211,12 +211,7 @@ def train_one_epoch(
     # 汇总指标（FSDP 下 compute() 已自动在进程内同步，需要时可再做 dist.all_reduce）
     train_results = compute_and_reset_torchmetrics(metrics)
     lr_dict = get_current_lr(scheduler, optimizer)
-    if lr_dict:
-        lr_text = ", ".join([f"{k}={v:.2e}" for k, v in lr_dict.items()])
-        logger.info(f"Epoch {epoch + 1} 分层学习率: {lr_text}")
-        if local_rank == 0:
-            print(f"Epoch {epoch + 1} 分层学习率: {lr_text}")
-    log_epoch_summary(logger, epoch + 1, config.epochs, "train", train_results, lr)
+    log_epoch_summary(logger, epoch + 1, config.epochs, "train", train_results, lr_dict)
     if local_rank == 0 and writer is not None:
         log_scalar_dict(writer, "train_epoch", train_results, epoch + 1)
         for k, v in lr_dict.items():
