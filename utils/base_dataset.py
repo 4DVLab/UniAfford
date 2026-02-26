@@ -632,83 +632,72 @@ class Image(Modality):
             vis_mask_path = os.path.join(obj_mask_dir, f'{self.obj_type}_{save_id}_visible_mask.png')
             cv2.imwrite(vis_mask_path, self.visible_mask)
 
-    def show(self, selected_labels:list=None, overlay=True, wait_key=True):
-        """
-        使用OpenCV显示图片和mask信息
-        
+    @staticmethod
+    def _blend_bright_dark(
+        img: np.ndarray,
+        mask: np.ndarray,
+        bright: float = 1.4,
+        dark: float = 0.3,
+    ) -> np.ndarray:
+        """在单张图上混合显示 mask：提亮 mask 区域、压暗其余区域。
+
         Args:
-            selected_labels: 只显示指定的标签，如果为None则显示所有标签
-            overlay: 是否在原图上叠加显示mask（彩色叠加），否则单独显示mask
-            wait_key: 是否等待按键（True则按任意键关闭，False则显示1秒后自动关闭）
+            img:    uint8 BGR 原图 (H, W, 3)
+            mask:   单通道 mask，值域 [0, 255] uint8 或 [0, 1] float
+            bright: mask 区域的亮度增益（>1 提亮）
+            dark:   非 mask 区域的亮度系数（<1 压暗）
+        """
+        alpha = mask.astype(np.float32)
+        if alpha.max() > 1.0:
+            alpha /= 255.0
+        weight = dark + (bright - dark) * alpha
+        result = img.astype(np.float32) * weight[..., np.newaxis]
+        return np.clip(result, 0, 255).astype(np.uint8)
+
+    def show(self, selected_labels: list = None, wait_key=0,
+             bright: float = 1.4, dark: float = 0.3):
+        """
+        在单张图上渲染 RGB 原图与 mask：提亮 mask 区域，压暗其余区域。
+
+        Args:
+            selected_labels: 只显示指定的标签，如果为 None 则显示所有标签
+            wait_key: 等待按键的时间，同 cv2.waitKey()；0 表示等待按任意键
+            bright: mask 区域亮度增益（默认 1.4）
+            dark: 非 mask 区域亮度系数（默认 0.3）
         """
         # 确保图片是uint8格式
         img_display = self.img.copy()
         if img_display.dtype != np.uint8:
             img_display = np.clip(img_display, 0, 255).astype(np.uint8)
-       
-        # 显示原图
-        cv2.imshow(f'Original - {self.obj_type}_{self.id}', img_display)
-       
-        # 显示affordance masks
+
+        # affordance masks
         if len(self.mask) > 0:
             for idx, mask in enumerate(self.mask):
                 label = self.labels[idx] if idx < len(self.labels) else f'mask_{idx}'
-               
-                # 如果指定了selected_labels，跳过不在列表中的
                 if selected_labels is not None and label not in selected_labels:
                     continue
-               
-                # 确保mask是uint8格式
-                mask_display = mask.copy()
-                if mask_display.dtype != np.uint8:
-                    mask_display = (mask_display * 255).clip(0, 255).astype(np.uint8)
-               
-                if overlay:
-                    # 在原图上叠加显示mask（使用红色半透明叠加）
-                    mask_colored = cv2.applyColorMap(mask_display, cv2.COLORMAP_JET)
-                    overlay_img = cv2.addWeighted(img_display, 0.7, mask_colored, 0.3, 0)
-                    cv2.imshow(f'Overlay - {self.obj_type}_{self.id}_{label}', overlay_img)
-                else:
-                    # 单独显示mask
-                    cv2.imshow(f'Mask - {self.obj_type}_{self.id}_{label}', mask_display)
-       
-        # 显示obj_mask
-        if self.obj_mask is not None and self.obj_mask.size != 0:
-            obj_mask_display = self.obj_mask.copy()
-            if obj_mask_display.dtype != np.uint8:
-                obj_mask_display = (obj_mask_display * 255).clip(0, 255).astype(np.uint8)
-           
-            if overlay:
-                # 在原图上叠加显示（使用绿色）
-                mask_colored = np.zeros_like(img_display)
-                mask_colored[:, :, 1] = obj_mask_display  # 绿色通道
-                overlay_img = cv2.addWeighted(img_display, 0.7, mask_colored, 0.3, 0)
-                cv2.imshow(f'Overlay - {self.obj_type}_{self.id}_obj_mask', overlay_img)
-            else:
-                cv2.imshow(f'Obj Mask - {self.obj_type}_{self.id}', obj_mask_display)
-       
-        # 显示visible_mask
-        if self.visible_mask is not None and self.visible_mask.size != 0:
-            vis_mask_display = self.visible_mask.copy()
-            if vis_mask_display.dtype != np.uint8:
-                vis_mask_display = (vis_mask_display * 255).clip(0, 255).astype(np.uint8)
-           
-            if overlay:
-                # 在原图上叠加显示（使用蓝色）
-                mask_colored = np.zeros_like(img_display)
-                mask_colored[:, :, 0] = vis_mask_display  # 蓝色通道
-                overlay_img = cv2.addWeighted(img_display, 0.7, mask_colored, 0.3, 0)
-                cv2.imshow(f'Overlay - {self.obj_type}_{self.id}_visible_mask', overlay_img)
-            else:
-                cv2.imshow(f'Visible Mask - {self.obj_type}_{self.id}', vis_mask_display)
-       
-        # 等待按键或自动关闭
-        if wait_key:
+                mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).clip(0, 255).astype(np.uint8)
+                blended = self._blend_bright_dark(img_display, mask_u8, bright, dark)
+                cv2.imshow(f'{self.obj_type}_{self.id}_{label}', blended)
+
+        # # obj_mask
+        # if self.obj_mask is not None and self.obj_mask.size != 0:
+        #     m = self.obj_mask
+        #     mask_u8 = m if m.dtype == np.uint8 else (m * 255).clip(0, 255).astype(np.uint8)
+        #     blended = self._blend_bright_dark(img_display, mask_u8, bright, dark)
+        #     cv2.imshow(f'{self.obj_type}_{self.id}_obj_mask', blended)
+
+        # # visible_mask
+        # if self.visible_mask is not None and self.visible_mask.size != 0:
+        #     m = self.visible_mask
+        #     mask_u8 = m if m.dtype == np.uint8 else (m * 255).clip(0, 255).astype(np.uint8)
+        #     blended = self._blend_bright_dark(img_display, mask_u8, bright, dark)
+        #     cv2.imshow(f'{self.obj_type}_{self.id}_visible_mask', blended)
+
+        if wait_key == 0:
             print(f"显示图片: {self.obj_type}_{self.id} - 按任意键关闭所有窗口")
-            cv2.waitKey(0)
-        else:
-            cv2.waitKey(1000)  # 显示1秒
-       
+        cv2.waitKey(wait_key)
+
         cv2.destroyAllWindows()
 
     def resize(self, size, interpolation=cv2.INTER_LINEAR):
