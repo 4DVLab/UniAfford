@@ -19,7 +19,6 @@ from collections import OrderedDict
 from configs import JointAffordanceConfig, ImageDecoderConfigs, PointDecoderConfigs, MLLMConfigs
 from model.segment_anything import build_sam_vit_h
 from model.pointnet2_utils import PointCloud3DSegmentor, PointCloudEncoder
-from utils.common import resolve_dtype
 
 
 class MLLMBackbone(nn.Module):
@@ -41,7 +40,6 @@ class MLLMBackbone(nn.Module):
         self.processor = AutoProcessor.from_pretrained(
             self.config.qwen_model_name_or_path,
         )
-        self.processor.tokenizer.model_max_length = self.config.model_max_length
         self.processor.tokenizer.padding_side = "right"
         self.tokenizer = self.processor.tokenizer
 
