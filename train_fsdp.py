@@ -125,11 +125,7 @@ def train_one_epoch(
     """
     device = torch.device("cuda", local_rank)
     model_fsdp.train()
-    metrics = build_torchmetrics_bundle(
-        device=device,
-        threshold_2d=max(config.mask_threshold_2d, 0.5),
-        threshold_3d=config.mask_threshold_3d,
-    )
+    metrics = build_torchmetrics_bundle(device=torch.device("cpu"))
 
     loader = (
         tqdm(train_loader, total=len(train_loader), dynamic_ncols=True,
@@ -163,7 +159,11 @@ def train_one_epoch(
             global_step += 1
 
         # 指标更新
-        update_torchmetrics(metrics, loss_dict, output_dict, input_dict, config.batch_size)
+        update_torchmetrics(
+            metrics, loss_dict, output_dict, input_dict, config.batch_size,
+            threshold_2d=max(config.mask_threshold_2d, 0.5),
+            threshold_3d=config.mask_threshold_3d,
+        )
 
         # 打印与 TensorBoard
         if (batch_idx + 1) % config.print_freq == 0 or (batch_idx + 1) == len(train_loader):
@@ -229,11 +229,7 @@ def validate_one_epoch(
     """验证一个 epoch。"""
     device = torch.device("cuda", local_rank)
     model_fsdp.eval()
-    metrics = build_torchmetrics_bundle(
-        device=device,
-        threshold_2d=max(config.mask_threshold_2d, 0.5),
-        threshold_3d=config.mask_threshold_3d,
-    )
+    metrics = build_torchmetrics_bundle(device=torch.device("cpu"))
 
     val_iter = (
         tqdm(val_loader, total=len(val_loader), dynamic_ncols=True,
@@ -244,7 +240,11 @@ def validate_one_epoch(
         val_dict = dict_to_cuda(val_dict, device=device)
         val_output = model_fsdp(**val_dict, return_hidden_states=False, return_mllm_output=False)
         loss_dict = calc.compute_losses(val_output, val_dict, **loss_kwargs)
-        update_torchmetrics(metrics, loss_dict, val_output, val_dict, config.val_batch_size)
+        update_torchmetrics(
+            metrics, loss_dict, val_output, val_dict, config.val_batch_size,
+            threshold_2d=max(config.mask_threshold_2d, 0.5),
+            threshold_3d=config.mask_threshold_3d,
+        )
 
     val_results = compute_and_reset_torchmetrics(metrics)
     if local_rank == 0:

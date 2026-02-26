@@ -36,6 +36,7 @@ from utils.metrics import (
     build_torchmetrics_bundle,
     update_torchmetrics,
     compute_and_reset_torchmetrics,
+    compute_sample_metrics,
     log_epoch_summary,
 )
 
@@ -328,11 +329,7 @@ def main():
     IGNORE_INDEX = -100
 
     # 指标 & 验证循环
-    metrics = build_torchmetrics_bundle(
-        device=device,
-        threshold_2d=max(training_cfg.mask_threshold_2d, 0.5),
-        threshold_3d=training_cfg.mask_threshold_3d,
-    )
+    metrics = build_torchmetrics_bundle(device=torch.device("cpu"))
 
     # 用于构造 loss_dict 时的配置（与 train.py 保持一致）
     loss_kwargs = dict(
@@ -362,7 +359,10 @@ def main():
 
             # 计算损失 + 更新指标（包括 IoU/MAE/AUROC/AUC/SIM）
             loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
-            update_torchmetrics(metrics, loss_dict, output_dict, input_dict, infer_cfg.batch_size)
+            update_torchmetrics(
+                metrics, loss_dict, output_dict, input_dict, infer_cfg.batch_size,
+                threshold_2d=threshold_2d, threshold_3d=threshold_3d,
+            )
 
             # ---- 提取 MLLM 预测 token ids（立即计算并释放大张量）----
             mllm_output = output_dict.get("output")
@@ -407,40 +407,13 @@ def main():
                     record["pred_token_ids"] = "[]"
                     record["pred_text"] = ""
 
-                # ---- 逐样本 2D 指标 ----
-                img_logits = output_dict.get("image_logits")
-                img_gt = input_dict.get("img_gt_tensor")
-                img_valid = input_dict.get("img_valid_mask")
-                if (img_logits is not None and img_gt is not None
-                        and (img_valid is None or img_valid[i].bool())):
-                    pred_2d = (img_logits[i].detach().sigmoid() > threshold_2d).float()
-                    gt_2d = img_gt[i].float()
-                    inter = (pred_2d * gt_2d).sum()
-                    union = pred_2d.sum() + gt_2d.sum() - inter
-                    record["iou_2d"] = round((inter / (union + 1e-8)).item(), 6)
-                else:
-                    record["iou_2d"] = ""
-
-                # ---- 逐样本 3D 指标 ----
-                pt_logits = output_dict.get("point_logits")
-                pc_gt = input_dict.get("pc_gt_tensor")
-                pc_valid = input_dict.get("pc_valid_lengths")
-                if (pt_logits is not None and pc_gt is not None
-                        and (pc_valid is None or pc_valid[i] > 0)):
-                    pred_prob = pt_logits[i].detach().sigmoid()
-                    pred_bin = (pred_prob > threshold_3d).float()
-                    gt_3d = pc_gt[i].float()
-                    inter = (pred_bin * gt_3d).sum()
-                    union = pred_bin.sum() + gt_3d.sum() - inter
-                    record["iou_3d"] = round((inter / (union + 1e-8)).item(), 6)
-                    record["mae_3d"] = round((pred_prob - gt_3d).abs().mean().item(), 6)
-                    record["sim_3d"] = round(
-                        calc.pc_SIM(pred_prob.unsqueeze(0), gt_3d.unsqueeze(0))[0].item(), 6
-                    )
-                else:
-                    record["iou_3d"] = ""
-                    record["mae_3d"] = ""
-                    record["sim_3d"] = ""
+                # ---- 逐样本 2D/3D 指标（统一调用 calculator.py）----
+                sample_metrics = compute_sample_metrics(
+                    output_dict, input_dict, i,
+                    threshold_2d=threshold_2d, threshold_3d=threshold_3d,
+                )
+                for mk in ("iou_2d", "iou_3d", "mae_3d", "sim_3d"):
+                    record[mk] = sample_metrics[mk] if sample_metrics[mk] is not None else ""
 
                 sample_records.append(record)
 

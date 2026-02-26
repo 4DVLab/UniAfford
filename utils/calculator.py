@@ -432,23 +432,32 @@ def pc_aIOU(
     return torch.stack(aiou_list).mean()
 
 
-def pc_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor) -> torch.Tensor:
+def pc_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
     """
-    批量计算点云预测的相似度（SIM）
+    批量计算点云预测的相似度（SIM / Histogram Intersection Similarity）。
+
+    标准做法：先将 pred 和 gt 各自 L1 归一化为概率分布，再计算直方图交集。
+    若某样本的 pred 或 gt 全零，SIM 定义为 0。
+
+    Args:
+        pred_mask: [Batch, N] 预测概率，值域 [0, 1]
+        gt_mask: [Batch, N] GT 概率/标签，值域 [0, 1]
     Returns:
-        sim: [Batch] 每个样本的SIM
+        sim: [Batch] 每个样本的 SIM
     """
-    pred_flat = pred_mask.flatten(1)  # [Batch, N]
-    gt_flat = gt_mask.flatten(1)  # [Batch, N]
-    
-    min_mask = torch.min(pred_flat, gt_flat)  # [Batch, N]
-    numerator = min_mask.sum(dim=1)  # [Batch]
-    
-    pred_sum = pred_flat.sum(dim=1)  # [Batch]
-    gt_sum = gt_flat.sum(dim=1)  # [Batch]
-    denominator = torch.min(pred_sum, gt_sum)  # [Batch]
-    
-    sim = numerator / (denominator + 1e-8)  # [Batch]
+    pred_flat = pred_mask.flatten(1).clamp(min=0)  # [Batch, N]
+    gt_flat = gt_mask.flatten(1).clamp(min=0)
+
+    pred_sum = pred_flat.sum(dim=1, keepdim=True)  # [Batch, 1]
+    gt_sum = gt_flat.sum(dim=1, keepdim=True)
+
+    pred_norm = pred_flat / (pred_sum + eps)
+    gt_norm = gt_flat / (gt_sum + eps)
+
+    sim = torch.min(pred_norm, gt_norm).sum(dim=1)  # [Batch]
+
+    both_nonzero = (pred_sum.squeeze(-1) > eps) & (gt_sum.squeeze(-1) > eps)
+    sim = sim * both_nonzero.float()
     return sim
 
 
@@ -478,25 +487,37 @@ def pc_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.
 
 """ -------------------------------------- 2D 评估指标 ------------------------------------- """
 
+def img_I_and_U(
+    pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.5,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    批量计算 2D 图像的交集和并集（用于累积后计算 cIoU）。
+
+    Args:
+        pred_mask: [Batch, H, W] 预测概率，值域 [0, 1]
+        gt_mask: [Batch, H, W] GT 掩码，值域 {0, 1}
+        threshold: 二值化阈值
+    Returns:
+        intersection: [Batch]
+        union: [Batch]
+    """
+    pred_bool = (pred_mask.flatten(1) >= threshold)
+    gt_bool = gt_mask.flatten(1).bool()
+    intersection = (pred_bool & gt_bool).sum(dim=1).float()
+    union = (pred_bool | gt_bool).sum(dim=1).float()
+    return intersection, union
+
+
 def img_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
     """
-    批量计算2D图像IoU
-    
+    批量计算 2D 图像 IoU（逐样本，gIoU = mean(img_IoU)）。
+
     Args:
-        pred_mask: [Batch, H, W] 预测掩码，值域 [0, 1]
-        gt_mask: [Batch, H, W] 真实掩码，值域 {0, 1}
+        pred_mask: [Batch, H, W] 预测概率，值域 [0, 1]
+        gt_mask: [Batch, H, W] GT 掩码，值域 {0, 1}
         threshold: 二值化阈值
-        
     Returns:
-        iou: [Batch] 每个样本的IoU
+        iou: [Batch] 每个样本的 IoU
     """
-    pred_flat = pred_mask.flatten(1)  # [Batch, H*W]
-    gt_flat = gt_mask.flatten(1).bool()  # [Batch, H*W]
-    
-    pred_bool = pred_flat >= threshold  # [Batch, H*W]
-    
-    intersection = (pred_bool & gt_flat).sum(dim=1).float()  # [Batch]
-    union = (pred_bool | gt_flat).sum(dim=1).float()  # [Batch]
-    
-    iou = intersection / (union + 1e-8)  # [Batch]
-    return iou
+    intersection, union = img_I_and_U(pred_mask, gt_mask, threshold)
+    return intersection / (union + 1e-8)
