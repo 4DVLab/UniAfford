@@ -101,8 +101,8 @@ def update_torchmetrics(
             iou_2d = calc.img_IoU(preds_2d, target_2d, threshold=threshold_2d)  # [B']
             metrics["giou_2d"].update(iou_2d.mean().item(), weight=bs_2d)
             inter_2d, union_2d = calc.img_I_and_U(preds_2d, target_2d, threshold=threshold_2d)
-            metrics["_ciou_2d_intersection"].update(inter_2d.sum().item(), weight=1)
-            metrics["_ciou_2d_union"].update(union_2d.sum().item(), weight=1)
+            metrics["_ciou_2d_intersection"].update(inter_2d.sum().item())
+            metrics["_ciou_2d_union"].update(union_2d.sum().item())
 
     # ---- 3D 分割指标 ----
     point_logits = output_dict.get("point_logits")
