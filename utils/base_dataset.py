@@ -2,7 +2,10 @@
 聚合 Instruction、Image、PointCloud 三元组的数据集类
 支持训练集、测试集、验证集的比例分割
 """
+import sys
 import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import random
 import warnings
 from tqdm import tqdm

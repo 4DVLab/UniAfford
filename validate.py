@@ -9,9 +9,11 @@ Joint Affordance 验证脚本（新版，适配 Qwen + JointAffordanceModel）
 """
 
 import argparse
+import csv
+import json
 import os
 from functools import partial
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -119,7 +121,7 @@ def build_dataloader_for_split(
         pin_memory=True,
         collate_fn=collator,
     )
-    return loader, torch_dataset
+    return loader, torch_dataset, processor
 
 
 def _normalize_mask(mask_tensor: torch.Tensor) -> torch.Tensor:
@@ -320,7 +322,9 @@ def main():
     model.eval()
 
     # DataLoader
-    val_loader, torch_dataset = build_dataloader_for_split(training_cfg, model_cfg, infer_cfg)
+    val_loader, torch_dataset, processor = build_dataloader_for_split(training_cfg, model_cfg, infer_cfg)
+    tokenizer = processor.tokenizer
+    IGNORE_INDEX = -100
 
     # 指标 & 验证循环
     metrics = build_torchmetrics_bundle(
@@ -340,19 +344,104 @@ def main():
         ce_loss_weight=getattr(training_cfg, "ce_loss_weight", 1.0),
     )
 
+    threshold_2d = max(training_cfg.mask_threshold_2d, 0.5)
+    threshold_3d = training_cfg.mask_threshold_3d
+
     if infer_cfg.save_predictions and infer_cfg.output_dir:
         os.makedirs(infer_cfg.output_dir, exist_ok=True)
         print(f"预测结果将保存到: {infer_cfg.output_dir}")
+
+    sample_records: List[Dict] = []
 
     print("开始验证...")
     with torch.no_grad():
         for batch_idx, input_dict in enumerate(tqdm(val_loader, desc="验证中")):
             input_dict = dict_to_cuda(input_dict, device=device)
-            output_dict = model(**input_dict)
+            output_dict = model(**input_dict, return_mllm_output=True)
 
             # 计算损失 + 更新指标（包括 IoU/MAE/AUROC/AUC/SIM）
             loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
             update_torchmetrics(metrics, loss_dict, output_dict, input_dict, infer_cfg.batch_size)
+
+            # ---- 提取 MLLM 预测 token ids（立即计算并释放大张量）----
+            mllm_output = output_dict.get("output")
+            pred_token_ids_batch = None
+            if mllm_output is not None and getattr(mllm_output, "logits", None) is not None:
+                pred_token_ids_batch = mllm_output.logits.argmax(dim=-1).cpu()  # [B, L]
+                del mllm_output.logits
+            output_dict["output"] = None
+
+            # ---- 逐样本记录 ----
+            batch_size = input_dict["input_ids"].shape[0]
+            for i in range(batch_size):
+                sample_idx = batch_idx * infer_cfg.batch_size + i
+                if sample_idx >= len(torch_dataset.samples):
+                    break
+                sample = torch_dataset.samples[sample_idx]
+                src_ids = sample.data_source_id or {}
+
+                record: Dict = {
+                    "sample_id": sample.id,
+                    "obj_type": sample.obj_type,
+                    "aff_type": sample.aff_type,
+                    "text_id": src_ids.get("ins_id", ""),
+                    "img_id": src_ids.get("img_id", ""),
+                    "pc_id": src_ids.get("pc_id", ""),
+                }
+
+                # GT 文本：从 labels 中提取非 IGNORE 的 token ids 解码
+                labels_i = input_dict["labels"][i].cpu()
+                answer_mask = labels_i != IGNORE_INDEX
+                gt_ids = labels_i[answer_mask].tolist()
+                record["gt_text"] = tokenizer.decode(gt_ids, skip_special_tokens=True)
+
+                # 预测文本：从模型 logits argmax 中提取对应位置
+                if pred_token_ids_batch is not None:
+                    pred_ids_i = pred_token_ids_batch[i]
+                    min_len = min(pred_ids_i.shape[0], answer_mask.shape[0])
+                    pred_answer_ids = pred_ids_i[:min_len][answer_mask[:min_len]].tolist()
+                    record["pred_token_ids"] = json.dumps(pred_answer_ids)
+                    record["pred_text"] = tokenizer.decode(pred_answer_ids, skip_special_tokens=True)
+                else:
+                    record["pred_token_ids"] = "[]"
+                    record["pred_text"] = ""
+
+                # ---- 逐样本 2D 指标 ----
+                img_logits = output_dict.get("image_logits")
+                img_gt = input_dict.get("img_gt_tensor")
+                img_valid = input_dict.get("img_valid_mask")
+                if (img_logits is not None and img_gt is not None
+                        and (img_valid is None or img_valid[i].bool())):
+                    pred_2d = (img_logits[i].detach().sigmoid() > threshold_2d).float()
+                    gt_2d = img_gt[i].float()
+                    inter = (pred_2d * gt_2d).sum()
+                    union = pred_2d.sum() + gt_2d.sum() - inter
+                    record["iou_2d"] = round((inter / (union + 1e-8)).item(), 6)
+                else:
+                    record["iou_2d"] = ""
+
+                # ---- 逐样本 3D 指标 ----
+                pt_logits = output_dict.get("point_logits")
+                pc_gt = input_dict.get("pc_gt_tensor")
+                pc_valid = input_dict.get("pc_valid_lengths")
+                if (pt_logits is not None and pc_gt is not None
+                        and (pc_valid is None or pc_valid[i] > 0)):
+                    pred_prob = pt_logits[i].detach().sigmoid()
+                    pred_bin = (pred_prob > threshold_3d).float()
+                    gt_3d = pc_gt[i].float()
+                    inter = (pred_bin * gt_3d).sum()
+                    union = pred_bin.sum() + gt_3d.sum() - inter
+                    record["iou_3d"] = round((inter / (union + 1e-8)).item(), 6)
+                    record["mae_3d"] = round((pred_prob - gt_3d).abs().mean().item(), 6)
+                    record["sim_3d"] = round(
+                        calc.pc_SIM(pred_prob.unsqueeze(0), gt_3d.unsqueeze(0))[0].item(), 6
+                    )
+                else:
+                    record["iou_3d"] = ""
+                    record["mae_3d"] = ""
+                    record["sim_3d"] = ""
+
+                sample_records.append(record)
 
             # 保存预测（可选）
             if infer_cfg.save_predictions and infer_cfg.output_dir:
@@ -364,7 +453,7 @@ def main():
                     dataset=torch_dataset,
                 )
             # 释放当前 batch 的 GPU 张量引用，避免长验证阶段显存碎片累积
-            del output_dict, loss_dict, input_dict
+            del output_dict, loss_dict, input_dict, pred_token_ids_batch
             if device.type == "cuda" and (batch_idx + 1) % 100 == 0:
                 torch.cuda.empty_cache()
 
@@ -377,15 +466,33 @@ def main():
         total_epochs=1,
         phase="val",
         results=results,
-        lr=None,
+        lr_dict=None,
     )
 
-    # 保存评估结果
+    # ---- 保存评估结果（人类可读格式）----
     out_dir = infer_cfg.output_dir if infer_cfg.save_predictions else "."
     os.makedirs(out_dir, exist_ok=True)
-    save_path = os.path.join(out_dir, "validation_results.pt")
-    torch.save(results, save_path)
-    print(f"\n评估结果已保存到: {save_path}")
+
+    # 1) 逐样本 CSV（按 sample_id 升序）
+    sample_records.sort(key=lambda r: r["sample_id"])
+    csv_fields = [
+        "sample_id", "obj_type", "aff_type",
+        "text_id", "img_id", "pc_id",
+        "pred_token_ids", "pred_text", "gt_text",
+        "iou_2d", "iou_3d", "mae_3d", "sim_3d",
+    ]
+    csv_path = os.path.join(out_dir, "validation_samples.csv")
+    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=csv_fields)
+        writer.writeheader()
+        writer.writerows(sample_records)
+    print(f"\n逐样本评估结果已保存到: {csv_path}")
+
+    # 2) 汇总指标 JSON
+    json_path = os.path.join(out_dir, "validation_results.json")
+    with open(json_path, "w", encoding="utf-8") as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    print(f"汇总评估指标已保存到: {json_path}")
 
 
 if __name__ == "__main__":
