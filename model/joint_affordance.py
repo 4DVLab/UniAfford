@@ -13,7 +13,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
-from transformers import AutoTokenizer
+from transformers import AutoProcessor
 from collections import OrderedDict
 
 from configs import JointAffordanceConfig, ImageDecoderConfigs, PointDecoderConfigs, MLLMConfigs
@@ -36,14 +36,15 @@ class MLLMBackbone(nn.Module):
             print(f"Warning: hidden_size mismatch, config={self.config.hidden_size}, model={self.hidden_size}")
             self.config.hidden_size = self.hidden_size
 
-        if self.config.tokenizer is None:
-            self.config.tokenizer = AutoTokenizer.from_pretrained(
-                self.config.qwen_model_name_or_path,
-                model_max_length=self.config.model_max_length,
-                padding_side="right",
-                use_fast=False,
-            )
-        self.tokenizer = self.config.tokenizer
+        # 统一使用 AutoProcessor（包含 tokenizer + image_processor），
+        # 避免 tokenizer 和 processor 分开创建导致 special token 不同步。
+        self.processor = AutoProcessor.from_pretrained(
+            self.config.qwen_model_name_or_path,
+        )
+        self.processor.tokenizer.model_max_length = self.config.model_max_length
+        self.processor.tokenizer.padding_side = "right"
+        self.tokenizer = self.processor.tokenizer
+
         self.seg_token = self.config.seg_token
         self.aff_token = self.config.aff_token
         self.seg_token_idx, self.aff_token_idx = self._ensure_special_tokens()
@@ -359,6 +360,9 @@ class JointAffordanceModel(nn.Module):
 
     @property
     def tokenizer(self): return self.mllm.tokenizer
+
+    @property
+    def processor(self): return self.mllm.processor
 
     def _extract_token_embeddings(
         self,

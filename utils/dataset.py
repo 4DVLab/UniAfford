@@ -13,7 +13,7 @@ from torch.utils.data import Dataset
 from model.qwenvl.data.data_processor import IGNORE_INDEX as QWEN_IGNORE_INDEX
 from model.qwenvl.data.rope2d import get_rope_index_3
 from utils.base_dataset import JointDataSample
-from utils.common import resolve_dtype
+from utils.common import resolve_dtype, SEG_TOKEN, AFF_TOKEN
 
 
 def _pad_and_cat_position_ids(position_ids_list: List[torch.Tensor]) -> torch.Tensor:
@@ -71,22 +71,22 @@ class JointAffordanceTorchDataset(Dataset):
         answer_parts = []
         if has_image:
             image_templates = [
-                f"The {aff_type} affordance region of the {obj_type} is [SEG].",
-                f"Here is the {aff_type} region: [SEG].",
-                f"The {aff_type} area for the {obj_type} is highlighted as [SEG].",
-                f"I've identified the {aff_type} affordance: [SEG].",
-                f"The region for {aff_type} interaction is [SEG].",
-                f"[SEG] shows the {aff_type} affordance of the {obj_type}.",
+                f"The {aff_type} affordance region of the {obj_type} is {SEG_TOKEN}.",
+                f"Here is the {aff_type} region: {SEG_TOKEN}.",
+                f"The {aff_type} area for the {obj_type} is highlighted as {SEG_TOKEN}.",
+                f"I've identified the {aff_type} affordance: {SEG_TOKEN}.",
+                f"The region for {aff_type} interaction is {SEG_TOKEN}.",
+                f"{SEG_TOKEN} shows the {aff_type} affordance of the {obj_type}.",
             ]
             answer_parts.append(random.choice(image_templates))
         if has_pc:
             pc_templates = [
-                f"The 3D {aff_type} affordance region is [SEG].",
-                f"In 3D space, the {aff_type} region is [SEG].",
-                f"The point cloud shows the {aff_type} area as [SEG].",
-                f"[SEG] represents the 3D {aff_type} affordance.",
-                f"The {aff_type} region in the point cloud is [SEG].",
-                f"For 3D interaction, the {aff_type} area is [SEG].",
+                f"The 3D {aff_type} affordance region is {SEG_TOKEN}.",
+                f"In 3D space, the {aff_type} region is {SEG_TOKEN}.",
+                f"The point cloud shows the {aff_type} area as {SEG_TOKEN}.",
+                f"{SEG_TOKEN} represents the 3D {aff_type} affordance.",
+                f"The {aff_type} region in the point cloud is {SEG_TOKEN}.",
+                f"For 3D interaction, the {aff_type} area is {SEG_TOKEN}.",
             ]
             answer_parts.append(random.choice(pc_templates))
         if not answer_parts:

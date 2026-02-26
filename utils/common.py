@@ -120,6 +120,8 @@ DEFAULT_PC_TOKEN = "<point_cloud>"
 DEFAULT_PC_START_TOKEN = "<pc_start>"
 DEFAULT_PC_END_TOKEN = "<pc_end>"
 
+SEG_TOKEN = "[SEG]"
+AFF_TOKEN = "[AFF]"
 
 
 class ProgressMeter:

@@ -38,7 +38,6 @@ from utils.metrics import (
     compute_and_reset_torchmetrics,
     log_epoch_summary,
 )
-from transformers import AutoProcessor
 
 
 def parse_args():
@@ -85,9 +84,9 @@ def build_dataloader_for_split(
     training_cfg: TrainingConfig,
     model_cfg,
     infer_cfg: InferenceConfig,
+    processor,
 ):
     """根据 split（train/val/test）构建对应的 DataLoader。"""
-    processor = AutoProcessor.from_pretrained(model_cfg.mllm.qwen_model_name_or_path)
     collator = partial(
         joint_affordance_collate_fn,
         tokenizer=processor.tokenizer,
@@ -322,7 +321,9 @@ def main():
     model.eval()
 
     # DataLoader
-    val_loader, torch_dataset, processor = build_dataloader_for_split(training_cfg, model_cfg, infer_cfg)
+    val_loader, torch_dataset, processor = build_dataloader_for_split(
+        training_cfg, model_cfg, infer_cfg, processor=model.mllm.processor
+    )
     tokenizer = processor.tokenizer
     IGNORE_INDEX = -100
 

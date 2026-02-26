@@ -25,7 +25,7 @@ from torch.distributed.fsdp import (
     FullStateDictConfig,
 )
 from peft import get_peft_model
-from transformers import AutoProcessor, get_cosine_schedule_with_warmup
+from transformers import get_cosine_schedule_with_warmup
 from tqdm import tqdm
 
 from configs import TrainingConfig
@@ -307,10 +307,11 @@ def main():
                 mllm_core.enable_input_require_grads()
             logger.info("已启用 MLLM gradient checkpointing")
 
-    processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
+    # 直接复用模型内部的 processor（已含注入 [SEG]/[AFF] 的 tokenizer + image_processor），
+    processor = model.processor
     data_collator = partial(
         joint_affordance_collate_fn,
-        tokenizer=processor.tokenizer,
+        tokenizer=model.tokenizer,
         output_image_size=training_configs.image_size,
         output_point_nums=training_configs.num_points,
         mllm_precision=model_config.mllm.compute_dtype,

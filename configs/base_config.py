@@ -4,7 +4,7 @@
 import json
 import torch
 from typing import Optional
-from utils.common import resolve_dtype
+from utils.common import resolve_dtype, SEG_TOKEN, AFF_TOKEN
 
 class Configs:
     """基础配置类，提供快速属性更新能力。"""
@@ -65,8 +65,8 @@ class MLLMConfigs(Configs):
         tokenizer: Optional[object] = None,
         train_mask_decoder: bool = True,
         out_dim: int = 256,
-        seg_token: str = "[SEG]",
-        aff_token: str = "[AFF]",
+        seg_token: str = SEG_TOKEN,
+        aff_token: str = AFF_TOKEN,
         **kwargs,
     ):
 
