@@ -4,7 +4,7 @@ NOTE: 所有的相对目录都是基于项目（仓库）根目录而言
 import os
 import json
 from re import S
-from typing import Optional
+from typing import List, Optional, Union
 
 import torch
 from utils.common import resolve_dtype
@@ -141,7 +141,7 @@ class LoRAConfigs(Configs):
         lora_r: int = 8,
         lora_alpha: int = 16,
         lora_dropout: float = 0.05,
-        lora_target_modules: str = "q_proj, k_proj, v_proj, o_proj",
+        lora_target_modules: Union[str, List[str]] = "q_proj, k_proj, v_proj, o_proj",
         bias: str = "none",
         task_type: str = "CAUSAL_LM",
         **kwargs,
@@ -150,7 +150,7 @@ class LoRAConfigs(Configs):
             lora_r=lora_r,
             lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
-            lora_target_modules=[m.strip() for m in lora_target_modules.split(",") if m.strip()],
+            lora_target_modules=lora_target_modules if isinstance(lora_target_modules, list) else [m.strip() for m in lora_target_modules.split(",") if m.strip()],
             bias=bias,
             task_type=task_type,
             **kwargs,
@@ -162,7 +162,7 @@ class LoRAConfigs(Configs):
             "lora_r": self.lora_r,
             "lora_alpha": self.lora_alpha,
             "lora_dropout": self.lora_dropout,
-            "lora_target_modules": list(self.lora_target_modules),
+            "lora_target_modules": self.lora_target_modules,
             "bias": self.bias,
             "task_type": self.task_type,
         }
@@ -174,7 +174,7 @@ class LoRAConfigs(Configs):
             r=self.lora_r,
             lora_alpha=self.lora_alpha,
             lora_dropout=self.lora_dropout,
-            target_modules=list(self.lora_target_modules),
+            target_modules=self.lora_target_modules,
             bias=self.bias,
             task_type=TaskType.CAUSAL_LM,
         )
@@ -213,7 +213,7 @@ class TrainingConfig(Configs):
         workers=4,
         print_freq=1,
         # 微调 mllm，其他全部需要训练
-        name_of_params_to_train="lm_head, embed_tokens, image_decoder, point_decoder, text_hidden_fcs",
+        name_of_params_to_train: Union[str, List[str]] = "lm_head, embed_tokens, image_decoder, point_decoder, text_hidden_fcs",
 
         # 优化器配置
         lr=1e-3,
@@ -301,7 +301,7 @@ class TrainingConfig(Configs):
             val_batch_size = val_batch_size,
             workers = workers,
             print_freq = print_freq,
-            name_of_params_to_train = [m.strip() for m in name_of_params_to_train.split(",") if m.strip()],
+            name_of_params_to_train = name_of_params_to_train if isinstance(name_of_params_to_train, list) else [m.strip() for m in name_of_params_to_train.split(",") if m.strip()],
             
             # 优化器配置
             lr = lr,
