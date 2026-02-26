@@ -424,6 +424,9 @@ class JointAffordanceModel(nn.Module):
         point_clouds: Optional[torch.Tensor] = None,
         pc_valid_lengths: Optional[torch.Tensor] = None,
         pc_gt_tensor: Optional[torch.Tensor] = None,  # 后续可能支持，暂且保留
+
+        return_hidden_states: bool = False,
+        return_mllm_output: bool = False,
         **kwargs,
     ) -> Dict[str, Optional[torch.Tensor]]:
         B = input_ids.shape[0] if input_ids is not None else 1
@@ -491,15 +494,23 @@ class JointAffordanceModel(nn.Module):
             else:
                 point_logits = all_point_logits
 
-        return {
-            "hidden_states": hidden_states,
+
+        output_dict = {
+            "hidden_states": None,
             "image_logits": image_logits,
             "point_logits": point_logits,
             "labels": labels,
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
             "ce_loss": ce_loss,
-            "output": mllm_out.get("output"),
+            "output": None,
         }
+
+        if return_hidden_states:
+            output_dict["hidden_states"] = hidden_states
+        if return_mllm_output:
+            output_dict["output"] = mllm_out.get("output")
+
+        return output_dict
 
 
 __all__ = [

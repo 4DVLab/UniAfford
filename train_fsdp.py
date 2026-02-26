@@ -235,9 +235,14 @@ def validate_one_epoch(
         threshold_3d=config.mask_threshold_3d,
     )
 
-    for val_dict in val_loader:
+    val_iter = (
+        tqdm(val_loader, total=len(val_loader), dynamic_ncols=True,
+             desc=f"Val {epoch + 1}/{config.epochs}")
+        if local_rank == 0 else val_loader
+    )
+    for val_dict in val_iter:
         val_dict = dict_to_cuda(val_dict, device=device)
-        val_output = model_fsdp(**val_dict)
+        val_output = model_fsdp(**val_dict, return_hidden_states=False, return_mllm_output=False)
         loss_dict = calc.compute_losses(val_output, val_dict, **loss_kwargs)
         update_torchmetrics(metrics, loss_dict, val_output, val_dict, config.val_batch_size)
 
