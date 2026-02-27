@@ -125,7 +125,7 @@ def train_one_epoch(
     """
     device = torch.device("cuda", local_rank)
     model_fsdp.train()
-    metrics = build_torchmetrics_bundle(device=torch.device("cpu"))
+    metrics = build_torchmetrics_bundle(device=device)
 
     loader = (
         tqdm(train_loader, total=len(train_loader), dynamic_ncols=True,
@@ -229,7 +229,7 @@ def validate_one_epoch(
     """验证一个 epoch。"""
     device = torch.device("cuda", local_rank)
     model_fsdp.eval()
-    metrics = build_torchmetrics_bundle(device=torch.device("cpu"))
+    metrics = build_torchmetrics_bundle(device=device)
 
     val_iter = (
         tqdm(val_loader, total=len(val_loader), dynamic_ncols=True,

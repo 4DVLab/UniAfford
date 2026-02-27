@@ -329,7 +329,7 @@ def main():
     IGNORE_INDEX = -100
 
     # 指标 & 验证循环
-    metrics = build_torchmetrics_bundle(device=torch.device("cpu"))
+    metrics = build_torchmetrics_bundle(device=device)
 
     # 用于构造 loss_dict 时的配置（与 train.py 保持一致）
     loss_kwargs = dict(

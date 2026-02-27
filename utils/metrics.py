@@ -188,12 +188,9 @@ def compute_and_reset_torchmetrics(metrics: Dict[str, MeanMetric]) -> Dict[str, 
     """汇总并重置所有指标，返回 {name: float} 字典。cIoU 从累积的 I/U 中计算。"""
     results = {}
     for name, metric in metrics.items():
-        try:
-            value = metric.compute()
-            value = value.detach().float().cpu().item() if isinstance(value, torch.Tensor) else float(value)
-            if value != value:
-                value = 0.0
-        except Exception:
+        value = metric.compute()
+        value = value.detach().float().cpu().item() if isinstance(value, torch.Tensor) else float(value)
+        if value != value:
             value = 0.0
         results[name] = value
         metric.reset()
