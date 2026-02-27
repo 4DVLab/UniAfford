@@ -128,16 +128,32 @@ class JointAffordanceTorchDataset(Dataset):
             tokenize=True,
             return_dict=True,
             return_tensors="pt",
-            return_assistant_tokens_mask=True,
         )
 
         input_ids = full_result["input_ids"]
         if isinstance(input_ids, list):
             input_ids = torch.tensor(input_ids).unsqueeze(0)
+
         labels = torch.full_like(input_ids, IGNORE_INDEX)
 
-        assistant_mask = full_result["assistant_tokens_mask"].to(dtype=torch.bool)
-        labels[assistant_mask] = input_ids[assistant_mask]
+        input_ids_flat = input_ids[0].tolist()
+        L = len(input_ids_flat)
+        pos = 0
+        while pos < L:
+            if input_ids_flat[pos] == 77091:
+                ans_start = pos + 2
+                ans_end = ans_start
+                while ans_end < L and input_ids_flat[ans_end] != 151645:
+                    ans_end += 1
+                if ans_end < L:
+                    labels[0, ans_start : ans_end + 2] = input_ids[
+                        0, ans_start : ans_end + 2
+                    ]
+                    pos = ans_end
+            pos += 1
+
+        full_result["labels"] = labels
+        full_result["input_ids"] = input_ids
 
         grid_thw = full_result.get("image_grid_thw")
         if grid_thw is None:
@@ -147,19 +163,19 @@ class JointAffordanceTorchDataset(Dataset):
         else:
             cat_grid_thw = grid_thw
 
-        position_ids, _ = get_rope_index_3(
-            self.merge_size,
-            input_ids,
-            image_grid_thw=cat_grid_thw,
-            video_grid_thw=None,
-            second_per_grid_ts=None,
-        )
+        # position_ids, _ = get_rope_index_3(
+        #     self.merge_size,
+        #     input_ids,
+        #     image_grid_thw=cat_grid_thw,
+        #     video_grid_thw=None,
+        #     second_per_grid_ts=None,
+        # )
 
         # 固定输出：文本 token、监督标签、RoPE 位置编码
         out = {
             "input_ids": input_ids.cpu(),
             "labels": labels.cpu(),
-            "position_ids": position_ids.cpu(),
+            # "position_ids": position_ids.cpu(),
         }
         # 可选输出：视觉分支输入（由 processor 决定是否返回）
         if "pixel_values" in full_result:

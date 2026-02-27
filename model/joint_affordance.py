@@ -136,7 +136,6 @@ class MLLMBackbone(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
     ) -> dict:
         # 构建 Qwen 模型输入，自动过滤 None 值
         model_inputs = {
@@ -145,7 +144,6 @@ class MLLMBackbone(nn.Module):
             "labels": labels,
             "pixel_values": pixel_values,
             "image_grid_thw": image_grid_thw,
-            "position_ids": position_ids,
         }
         model_inputs = {k: v for k, v in model_inputs.items() if v is not None}
         model_inputs["output_hidden_states"] = True
@@ -414,7 +412,6 @@ class JointAffordanceModel(nn.Module):
         input_ids: Optional[torch.Tensor] = None,
         labels: Optional[torch.Tensor] = None,
         attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
         # 图像分割所需
@@ -440,7 +437,6 @@ class JointAffordanceModel(nn.Module):
             attention_mask=attention_mask,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
-            position_ids=position_ids,
         )
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
         output_obj = mllm_out.get("output")
