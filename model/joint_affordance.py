@@ -450,6 +450,22 @@ class JointAffordanceModel(nn.Module):
             if getattr(output_obj, "loss", None) is not None:
                 # 注意：这里不做缩放，交由 calculator.compute_losses 中的 ce_loss_weight 控制
                 ce_loss = output_obj.loss
+        
+        
+        # 训练稳定性保底：
+        # 若某样本在 logits_token_ids 中未命中 [SEG]，则回退该样本到 input_ids 进行 [SEG] hidden 提取。
+        token_ids_for_seg = logits_token_ids
+        if input_ids is not None:
+            if token_ids_for_seg is None:
+                token_ids_for_seg = input_ids
+            else:
+                token_ids_for_seg = token_ids_for_seg.clone()
+                min_len = min(token_ids_for_seg.shape[1], input_ids.shape[1])
+                pred_has_seg = (token_ids_for_seg[:, :min_len] == int(self.seg_token_idx)).any(dim=1)
+                input_has_seg = (input_ids[:, :min_len] == int(self.seg_token_idx)).any(dim=1)
+                fallback_rows = (~pred_has_seg) & input_has_seg
+                if fallback_rows.any():
+                    token_ids_for_seg[fallback_rows, :min_len] = input_ids[fallback_rows, :min_len]
 
         image_logits = None
         point_logits = None
@@ -458,7 +474,7 @@ class JointAffordanceModel(nn.Module):
             # ---- 2. 先提取 SEG token 的单 token hidden_state，再分别做投影 ----
             # HACK: 目前先共用语义空间，看看会不会有相互增强的效果
             seg_hidden = self._extract_token_embeddings(
-                hidden_states, logits_token_ids, self.seg_token_idx
+                hidden_states, token_ids_for_seg, self.seg_token_idx
             )  # [B, C]
             image_pred_emb = self.image_decoder.project_hidden_states(seg_hidden).to(self.image_decoder.config.compute_dtype)
             point_pred_emb = self.point_decoder.project_hidden_states(seg_hidden).to(self.point_decoder.config.compute_dtype)
