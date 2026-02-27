@@ -501,6 +501,7 @@ class JointAffordanceModel(nn.Module):
             "hidden_states": None,
             "image_logits": image_logits,
             "point_logits": point_logits,
+            "token_ids": logits_token_ids,
             "labels": labels,
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
             "ce_loss": ce_loss,

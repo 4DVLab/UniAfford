@@ -355,7 +355,7 @@ def main():
     with torch.no_grad():
         for batch_idx, input_dict in enumerate(tqdm(val_loader, desc="验证中")):
             input_dict = dict_to_cuda(input_dict, device=device)
-            output_dict = model(**input_dict, return_mllm_output=True)
+            output_dict = model(**input_dict)
 
             # 计算损失 + 更新指标（包括 IoU/MAE/AUROC/AUC/SIM）
             loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
@@ -364,13 +364,9 @@ def main():
                 threshold_2d=threshold_2d, threshold_3d=threshold_3d,
             )
 
-            # ---- 提取 MLLM 预测 token ids（立即计算并释放大张量）----
-            mllm_output = output_dict.get("output")
-            pred_token_ids_batch = None
-            if mllm_output is not None and getattr(mllm_output, "logits", None) is not None:
-                pred_token_ids_batch = mllm_output.logits.argmax(dim=-1).cpu()  # [B, L]
-                del mllm_output.logits
-            output_dict["output"] = None
+            pred_token_ids_batch = output_dict.get("token_ids")
+            if pred_token_ids_batch is not None:
+                pred_token_ids_batch = pred_token_ids_batch.detach().cpu()
 
             # ---- 逐样本记录 ----
             batch_size = input_dict["input_ids"].shape[0]
