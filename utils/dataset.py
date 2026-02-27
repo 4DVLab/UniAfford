@@ -359,7 +359,7 @@ def joint_affordance_collate_fn(
     # -------- 1) 收集 batch 内各模态原始数据 --------
     batch_size = len(batch)
 
-    input_ids_list, labels_list, position_ids_list = [], [], []
+    input_ids_list, labels_list = [], []
     pixel_values_list, image_grid_thw_list = [], []
     pixel_values_valid_flags = []
 
@@ -369,7 +369,7 @@ def joint_affordance_collate_fn(
         # 文本与 Qwen3-VL 位置编码
         input_ids_list.append(sample["input_ids"].squeeze(0))
         labels_list.append(sample["labels"].squeeze(0))
-        position_ids_list.append(sample["position_ids"])
+        # position_ids_list.append(sample["position_ids"])
 
         # Qwen3-VL 视觉输入（可能缺失，后续统一回填）
         pixel_values = sample.get("pixel_values")
@@ -391,14 +391,12 @@ def joint_affordance_collate_fn(
     labels = torch.nn.utils.rnn.pad_sequence(
         labels_list, batch_first=True, padding_value=IGNORE_INDEX
     )
-    position_ids = _pad_and_cat_position_ids(position_ids_list)
     attention_mask = input_ids.ne(tokenizer.pad_token_id)
 
     batch_out = {
         "input_ids": input_ids,
         "labels": labels,
         "attention_mask": attention_mask,
-        "position_ids": position_ids,
     }
 
     # -------- 3) Qwen3-VL 视觉输入补齐（保证 ZeRO-3 各 rank 统一前向）--------
