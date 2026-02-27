@@ -390,7 +390,7 @@ def main():
                 labels_i = input_dict["labels"][i].cpu()
                 answer_mask = labels_i != IGNORE_INDEX
                 gt_ids = labels_i[answer_mask].tolist()
-                record["gt_text"] = tokenizer.decode(gt_ids, skip_special_tokens=True)
+                record["gt_text"] = tokenizer.decode(gt_ids, skip_special_tokens=False)
 
                 # 预测文本：从模型 logits argmax 中提取对应位置
                 if pred_token_ids_batch is not None:
@@ -398,7 +398,7 @@ def main():
                     min_len = min(pred_ids_i.shape[0], answer_mask.shape[0])
                     pred_answer_ids = pred_ids_i[:min_len][answer_mask[:min_len]].tolist()
                     record["pred_token_ids"] = json.dumps(pred_answer_ids)
-                    record["pred_text"] = tokenizer.decode(pred_answer_ids, skip_special_tokens=True)
+                    record["pred_text"] = tokenizer.decode(pred_answer_ids, skip_special_tokens=False)
                 else:
                     record["pred_token_ids"] = "[]"
                     record["pred_text"] = ""

@@ -10,10 +10,9 @@ import torch
 from PIL import Image
 from torch.utils.data import Dataset
 
-from model.qwenvl.data.data_processor import IGNORE_INDEX as QWEN_IGNORE_INDEX
 from model.qwenvl.data.rope2d import get_rope_index_3
 from utils.base_dataset import JointDataSample
-from utils.common import resolve_dtype, SEG_TOKEN, AFF_TOKEN
+from utils.common import resolve_dtype, SEG_TOKEN, AFF_TOKEN, IGNORE_INDEX
 
 
 def _pad_and_cat_position_ids(position_ids_list: List[torch.Tensor]) -> torch.Tensor:
@@ -125,27 +124,20 @@ class JointAffordanceTorchDataset(Dataset):
             {"role": "assistant", "content": [{"type": "text", "text": answer}]},
         ]
         full_result = self.processor.apply_chat_template(
-            messages, tokenize=True, return_dict=True, return_tensors="pt"
+            messages,
+            tokenize=True,
+            return_dict=True,
+            return_tensors="pt",
+            return_assistant_tokens_mask=True,
         )
 
         input_ids = full_result["input_ids"]
         if isinstance(input_ids, list):
             input_ids = torch.tensor(input_ids).unsqueeze(0)
-        labels = torch.full_like(input_ids, QWEN_IGNORE_INDEX)
+        labels = torch.full_like(input_ids, IGNORE_INDEX)
 
-        # assistant 起始 token: 77091，结束 token: 151645
-        input_ids_flat = input_ids[0].tolist()
-        pos = 0
-        while pos < len(input_ids_flat):
-            if input_ids_flat[pos] == 77091:
-                ans_start = pos + 2
-                ans_end = ans_start
-                while ans_end < len(input_ids_flat) and input_ids_flat[ans_end] != 151645:
-                    ans_end += 1
-                if ans_end < len(input_ids_flat):
-                    labels[0, ans_start: ans_end + 2] = input_ids[0, ans_start: ans_end + 2]
-                    pos = ans_end
-            pos += 1
+        assistant_mask = full_result["assistant_tokens_mask"].to(dtype=torch.bool)
+        labels[assistant_mask] = input_ids[assistant_mask]
 
         grid_thw = full_result.get("image_grid_thw")
         if grid_thw is None:
@@ -381,7 +373,7 @@ def joint_affordance_collate_fn(
         input_ids_list, batch_first=True, padding_value=tokenizer.pad_token_id
     )
     labels = torch.nn.utils.rnn.pad_sequence(
-        labels_list, batch_first=True, padding_value=QWEN_IGNORE_INDEX
+        labels_list, batch_first=True, padding_value=IGNORE_INDEX
     )
     position_ids = _pad_and_cat_position_ids(position_ids_list)
     attention_mask = input_ids.ne(tokenizer.pad_token_id)
