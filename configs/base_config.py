@@ -3,7 +3,7 @@
 """
 import json
 import torch
-from typing import Optional
+from typing import Optional, Dict
 from utils.common import resolve_dtype, SEG_TOKEN, AFF_TOKEN
 
 class Configs:
@@ -131,15 +131,52 @@ class PointDecoderConfigs(Configs):
     def __init__(
         self,
         compute_dtype: Optional[torch.dtype] = 'fp32',
-        hidden_size: int = 128,
+        hidden_size: int = 256,
         num_heads: int = 8,
+        grid_size: float = 0.02,
+        backbone_out_channels: int = 64,
+        backbone_kwargs: Optional[Dict] = None,
         # point_out_dim: int = None, # 为空则可以适配任意点数的输入输出
         **kwargs,
     ):
+        if backbone_kwargs is None:
+            backbone_kwargs = dict(
+                in_channels=3,
+                order=("z", "z-trans"),
+                stride=(2, 2, 2, 2),
+                enc_depths=(2, 2, 2, 6, 2),
+                enc_channels=(32, 64, 128, 256, 512),
+                enc_num_head=(2, 4, 8, 16, 32),
+                enc_patch_size=(128, 128, 128, 128, 128),
+                dec_depths=(2, 2, 2, 2),
+                dec_channels=(64, 64, 128, 256),
+                dec_num_head=(4, 4, 8, 16),
+                dec_patch_size=(128, 128, 128, 128),
+                mlp_ratio=4,
+                qkv_bias=True,
+                qk_scale=None,
+                attn_drop=0.0,
+                proj_drop=0.0,
+                drop_path=0.1,
+                layer_scale=None,
+                pre_norm=True,
+                shuffle_orders=True,
+                enable_rpe=False,
+                enable_flash=False,
+                upcast_attention=False,
+                upcast_softmax=False,
+                traceable=False,
+                mask_token=False,
+                enc_mode=False,
+                freeze_encoder=False,
+            )
         super().__init__(
             compute_dtype=resolve_dtype(compute_dtype),
             hidden_size=hidden_size,
             num_heads=num_heads,
+            grid_size=grid_size,
+            backbone_out_channels=backbone_out_channels,
+            backbone_kwargs=backbone_kwargs,
             # point_out_dim=point_out_dim,
             **kwargs,
         )
