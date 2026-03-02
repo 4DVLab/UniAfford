@@ -18,7 +18,6 @@ try:
 except ImportError:
     flash_attn = None
 
-from model.pointcept.models.builder import MODELS
 from model.pointcept.models.utils.misc import offset2bincount
 from model.pointcept.models.utils.structure import Point
 from model.pointcept.models.modules import PointModule, PointSequential
@@ -539,7 +538,6 @@ class Embedding(PointModule):
         return point
 
 
-@MODELS.register_module("PT-v3m2")
 class PointTransformerV3(PointModule):
     def __init__(
         self,

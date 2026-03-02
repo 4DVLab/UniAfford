@@ -9,7 +9,6 @@ except ImportError:
 
 from collections import OrderedDict
 from model.pointcept.models.utils.structure import Point
-from model.pointcept.engines.hooks import HookBase
 
 
 def is_ocnn_module(module):
@@ -111,9 +110,9 @@ class PointSequential(PointModule):
         return input
 
 
-class PointModel(PointModule, HookBase):
+class PointModel(PointModule):
     r"""PointModel
-    placeholder, PointModel can be customized as a Pointcept hook.
+    Lightweight placeholder kept for compatibility without Pointcept hook system.
     """
 
     def __init__(self, *args, **kwargs):
