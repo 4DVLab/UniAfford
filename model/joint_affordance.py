@@ -437,7 +437,8 @@ class PointCloudHiddenStateDecoder(nn.Module):
 
         # v1m3-style point projection + normalized similarity scoring.
         self.point_proj = nn.Linear(config.backbone_out_channels, config.hidden_size)
-        self.logit_scale = nn.Parameter(torch.tensor(1.0))
+        # FSDP requires parameter tensors to be at least 1D.
+        self.logit_scale = nn.Parameter(torch.ones(1))
 
         for param in self.point_backbone.parameters():
             param.requires_grad = True
