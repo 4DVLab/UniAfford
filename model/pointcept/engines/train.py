@@ -24,7 +24,7 @@ from tensorboardX import SummaryWriter
 
 from .defaults import create_ddp_model, worker_init_fn
 from .hooks import HookBase, build_hooks
-import pointcept.utils.comm as comm
+import model.pointcept.utils.comm as comm
 from model.pointcept.datasets import build_dataset, point_collate_fn, collate_fn
 from model.pointcept.models import build_model
 from model.pointcept.utils.logger import get_root_logger

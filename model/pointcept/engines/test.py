@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import torch.utils.data
 
 from .defaults import create_ddp_model
-import pointcept.utils.comm as comm
+import model.pointcept.utils.comm as comm
 from model.pointcept.datasets import build_dataset, collate_fn
 from model.pointcept.models import build_model
 from model.pointcept.utils.logger import get_root_logger

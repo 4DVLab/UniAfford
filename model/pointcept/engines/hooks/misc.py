@@ -24,7 +24,7 @@ from model.pointcept.utils.timer import Timer
 from model.pointcept.utils.comm import is_main_process, synchronize
 from model.pointcept.utils.cache import shared_dict
 from model.pointcept.utils.scheduler import CosineScheduler
-import pointcept.utils.comm as comm
+import model.pointcept.utils.comm as comm
 
 from .default import HookBase
 from .builder import HOOKS

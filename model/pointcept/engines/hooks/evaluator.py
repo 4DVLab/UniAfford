@@ -12,7 +12,7 @@ import torch.distributed as dist
 import pointops
 from uuid import uuid4
 
-import pointcept.utils.comm as comm
+import model.pointcept.utils.comm as comm
 from model.pointcept.utils.misc import intersection_and_union_gpu
 
 from .default import HookBase

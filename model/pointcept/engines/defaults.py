@@ -14,7 +14,7 @@ import multiprocessing as mp
 from torch.nn.parallel import DistributedDataParallel
 
 
-import pointcept.utils.comm as comm
+import model.pointcept.utils.comm as comm
 from model.pointcept.utils.env import get_random_seed, set_seed
 from model.pointcept.utils.config import Config, DictAction
 
