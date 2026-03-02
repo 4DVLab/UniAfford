@@ -7,8 +7,8 @@ Please cite our work if the code is helpful to you.
 
 import copy
 import torch
-from pointcept.utils.logger import get_root_logger
-from pointcept.utils.registry import Registry
+from model.pointcept.utils.logger import get_root_logger
+from model.pointcept.utils.registry import Registry
 
 OPTIMIZERS = Registry("optimizers")
 

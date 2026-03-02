@@ -18,10 +18,10 @@ try:
 except ImportError:
     flash_attn = None
 
-from pointcept.models.builder import MODELS
-from pointcept.models.utils.misc import offset2bincount
-from pointcept.models.utils.structure import Point
-from pointcept.models.modules import PointModule, PointSequential
+from model.pointcept.models.builder import MODELS
+from model.pointcept.models.utils.misc import offset2bincount
+from model.pointcept.models.utils.structure import Point
+from model.pointcept.models.modules import PointModule, PointSequential
 
 
 class LayerScale(nn.Module):

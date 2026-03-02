@@ -8,8 +8,8 @@ except ImportError:
 from addict import Dict
 from typing import List
 
-from pointcept.models.utils.serialization import encode
-from pointcept.models.utils import (
+from model.pointcept.models.utils.serialization import encode
+from model.pointcept.models.utils import (
     offset2batch,
     batch2offset,
     offset2bincount,
