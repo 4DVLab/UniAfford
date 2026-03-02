@@ -519,8 +519,7 @@ class PointCloudHiddenStateDecoder(nn.Module):
         pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
         point_clouds = point_clouds.to(self.config.compute_dtype)
 
-        text_feat = self.project_hidden_states(pred_embeddings)  # [B, H]
-        text_feat = F.normalize(text_feat, p=2, dim=-1)
+        text_feat = F.normalize(pred_embeddings, p=2, dim=-1)
 
         data_dict = self._build_pointcept_batch(point_clouds, self.config.grid_size)
         point = self.point_backbone(data_dict)
