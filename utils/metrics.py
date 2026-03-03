@@ -119,8 +119,9 @@ def update_torchmetrics(
             target_3d = target_3d[valid]
         bs = preds_3d.shape[0]
 
-        iou_3d = calc.pc_IoU(preds_3d, target_3d, threshold=threshold_3d)  # [B']
-        metrics["iou_3d"].update(iou_3d.mean().item(), weight=bs)
+        # 使用多阈值平均 IoU（aIoU-20）作为 3D IoU 指标
+        iou_3d = calc.pc_aIOU(preds_3d, target_3d, num_thresholds=20)
+        metrics["iou_3d"].update(iou_3d.item(), weight=bs)
 
         mae_3d = calc.pc_MAE(preds_3d, target_3d)
         metrics["mae_3d"].update(mae_3d.item(), weight=bs)
@@ -173,7 +174,8 @@ def compute_sample_metrics(
             and (pc_valid is None or pc_valid[i] > 0)):
         pred_3d = pt_logits[i].detach().sigmoid().unsqueeze(0)
         gt_3d = pc_gt[i].float().unsqueeze(0)
-        record["iou_3d"] = round(calc.pc_IoU(pred_3d, gt_3d, threshold=threshold_3d)[0].item(), 6)
+        # 单样本也使用 aIoU-20 作为 IoU3D
+        record["iou_3d"] = round(calc.pc_aIOU(pred_3d, gt_3d, num_thresholds=20).item(), 6)
         record["mae_3d"] = round(calc.pc_MAE(pred_3d, gt_3d).item(), 6)
         record["sim_3d"] = round(calc.pc_SIM(pred_3d, gt_3d)[0].item(), 6)
     else:

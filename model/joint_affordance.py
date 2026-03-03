@@ -530,8 +530,8 @@ class PointCloudHiddenStateDecoder(nn.Module):
         # v1m3-style similarity, now single-target text per sample.
         logits = (point_feat * text_feat.unsqueeze(1)).sum(dim=-1)
         logits = logits * self.logit_scale.exp().clamp(min=1e-4, max=100.0)
-        pred_masks = torch.sigmoid(logits)
-        return pred_masks
+        # pred_masks = torch.sigmoid(logits)
+        return logits
 
     def forward_with_loss(
         self,
