@@ -209,6 +209,10 @@ class JointAffordanceTorchDataset(Dataset):
         has_pc = data["pc"] is not None
 
         result = {}
+        # 供验证/可视化阶段直接使用的样本级元信息
+        result["sample_id"] = sample.id
+        result["obj_type"] = sample.obj_type
+        result["aff_type"] = sample.aff_type
 
         question, answer = self._build_text(sample, has_image, has_pc, data.get("ins") or "")
 
@@ -364,6 +368,7 @@ def joint_affordance_collate_fn(
 
     images_list, img_gt_masks = [], []
     point_clouds_list, pc_gt_masks = [], []
+    sample_ids, obj_types, aff_types = [], [], []
     for sample in batch:
         # 文本与 Qwen3-VL 位置编码
         input_ids_list.append(sample["input_ids"].squeeze(0))
@@ -382,6 +387,9 @@ def joint_affordance_collate_fn(
         img_gt_masks.append(sample.get("img_gt"))
         point_clouds_list.append(sample.get("point_clouds"))
         pc_gt_masks.append(sample.get("pc_gt"))
+        sample_ids.append(sample.get("sample_id"))
+        obj_types.append(sample.get("obj_type"))
+        aff_types.append(sample.get("aff_type"))
 
     # -------- 2) 文本输入 padding --------
     input_ids = torch.nn.utils.rnn.pad_sequence(
@@ -396,6 +404,9 @@ def joint_affordance_collate_fn(
         "input_ids": input_ids,
         "labels": labels,
         "attention_mask": attention_mask,
+        "sample_id": sample_ids,
+        "obj_type": obj_types,
+        "aff_type": aff_types,
     }
 
     # -------- 3) Qwen3-VL 视觉输入补齐（保证 ZeRO-3 各 rank 统一前向）--------

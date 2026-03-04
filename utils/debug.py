@@ -86,42 +86,37 @@ def decode_token_ids(
           用于对比“监督区间”的输入 token 与输出 token，排查移位问题。
           - 单条：list[str]；批量：list[list[str]]
     """
-    if torch.is_tensor(token_ids):
-        token_ids = token_ids.cpu().tolist()
-    if not token_ids:
-        return {"decoded": [], "filtered": []} if labels is not None else {"decoded": []}
-    single = isinstance(token_ids[0], int)
-    if single:
-        token_ids = [token_ids]
+    token_ids = token_ids.detach().cpu()
+
+    return_dict = {"decoded": None, "filtered": None}
+    if token_ids.numel() == 0:
+        return_dict['decoded'] = []
+        return return_dict
+
+    # 以 batch 为单位直接解码 token id
+    decoded_batch: List[List[str]] = []
+    for seq in token_ids.tolist():
+        decoded_batch.append(tokenizer.convert_ids_to_tokens(seq))
+    return_dict['decoded'] = decoded_batch
+
     if labels is not None:
-        if torch.is_tensor(labels):
-            labels = labels.cpu().tolist()
-        if isinstance(labels[0], (int, float)):
-            labels = [labels]
-        assert len(labels) == len(token_ids), "labels 与 token_ids  batch 维长度一致"
-
-    decoded_list: List[List[str]] = []
-    for seq in token_ids:
-        decoded_list.append([
-            tokenizer.decode([tid], skip_special_tokens=False)
-            for tid in seq
-        ])
-
-    decoded = decoded_list[0] if single else decoded_list
-    if labels is None:
-        return {"decoded": decoded}
-
-    filtered_list: List[List[str]] = []
-    for b in range(len(decoded_list)):
-        lab = labels[b]
-        filtered_list.append([
-            decoded_list[b][i]
-            for i in range(min(len(decoded_list[b]), len(lab)))
-            if lab[i] != ignore_index
-        ])
-    filtered = filtered_list[0] if single else filtered_list
-    return {"decoded": decoded, "filtered": filtered}
-
+        labels = labels.detach().cpu()
+        if labels.numel() == 0:
+            return_dict['filtered'] = []
+        else:
+            if labels.dim() == 1:
+                labels = labels.unsqueeze(0)
+            assert labels.shape[0] == token_ids.shape[0], "labels 与 token_ids 的 batch 维必须一致"
+            
+            filtered_batch: List[List[str]] = []
+            for b in range(token_ids.shape[0]):
+                valid_mask = labels[b] != ignore_index
+                valid_len = min(valid_mask.shape[0], len(decoded_batch[b]))
+                filtered_batch.append([
+                    decoded_batch[b][i] for i in range(valid_len) if bool(valid_mask[i].item())
+                ])
+            return_dict['filtered'] = filtered_batch
+    return return_dict
 
 def _collect_batch_runtime_stats(input_dict: Dict, device: torch.device) -> Dict[str, float]:
     """收集用于排查显存峰值的轻量运行时统计信息。"""

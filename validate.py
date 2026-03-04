@@ -196,21 +196,9 @@ def save_batch_predictions(
 
     for i in range(batch_size):
         sample_index = batch_start + i
-        obj_types = input_dict.get("obj_type")
-        aff_types = input_dict.get("aff_type")
-        sample_ids = input_dict.get("sample_id")
-        obj_type = (
-            str(obj_types[i]) if isinstance(obj_types, (list, tuple)) and i < len(obj_types)
-            else "unknown_obj"
-        )
-        aff_type = (
-            str(aff_types[i]) if isinstance(aff_types, (list, tuple)) and i < len(aff_types)
-            else "unknown_aff"
-        )
-        sample_id = (
-            str(sample_ids[i]) if isinstance(sample_ids, (list, tuple)) and i < len(sample_ids)
-            else str(sample_index)
-        )
+        obj_type = input_dict.get("obj_type")[i]
+        aff_type = input_dict.get("aff_type")[i]
+        sample_id = input_dict.get("sample_id")[i]
 
         # 2D mask 保存（在保存前还原到原始图像尺寸）
         pred_mask_2d = _extract_pred_mask("image_logits", i)
