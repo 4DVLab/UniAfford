@@ -654,21 +654,59 @@ class Image(Modality):
         result = img.astype(np.float32) * weight[..., np.newaxis]
         return np.clip(result, 0, 255).astype(np.uint8)
 
+    @staticmethod
+    def _resize_letterbox(
+        img: np.ndarray,
+        max_width: int = 1920,
+        max_height: int = 1080,
+        fill_value: int = 0,
+    ) -> np.ndarray:
+        """将图像等比例缩放并填充黑边至固定尺寸，用于显示。
+
+        Args:
+            img: BGR 图像 (H, W, 3)，uint8
+            max_width: 目标宽度（默认 1920）
+            max_height: 目标高度（默认 1080）
+            fill_value: 填充像素值（默认 0，黑色）
+        Returns:
+            尺寸为 (max_height, max_width, 3) 的图像
+        """
+        h, w = img.shape[:2]
+        if w <= 0 or h <= 0:
+            return img
+        scale = min(max_width / w, max_height / h)
+        new_w = int(round(w * scale))
+        new_h = int(round(h * scale))
+        resized = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        canvas = np.full((max_height, max_width, 3), fill_value, dtype=img.dtype)
+        y0 = (max_height - new_h) // 2
+        x0 = (max_width - new_w) // 2
+        canvas[y0 : y0 + new_h, x0 : x0 + new_w] = resized
+        return canvas
+
     def show(self, selected_labels: list = None, wait_key=0,
-             bright: float = 1.4, dark: float = 0.3):
+             bright: float = 1.4, dark: float = 0.3,
+             display_size: Optional[Tuple[int, int]] = (1080, 720)):
         """
         在单张图上渲染 RGB 原图与 mask：提亮 mask 区域，压暗其余区域。
+        显示时固定为 display_size，等比例缩放并黑边填充。
 
         Args:
             selected_labels: 只显示指定的标签，如果为 None 则显示所有标签
             wait_key: 等待按键的时间，同 cv2.waitKey()；0 表示等待按任意键
             bright: mask 区域亮度增益（默认 1.4）
             dark: 非 mask 区域亮度系数（默认 0.3）
+            display_size: 显示窗口固定尺寸 (宽, 高)，等比例缩放并黑边填充，None 表示不缩放
         """
         # 确保图片是uint8格式
         img_display = self.img.copy()
         if img_display.dtype != np.uint8:
             img_display = np.clip(img_display, 0, 255).astype(np.uint8)
+
+        if display_size is not None:
+            max_width, max_height = display_size[0], display_size[1]
+        else:
+            max_width = max_height = None
 
         # affordance masks
         if len(self.mask) > 0:
@@ -678,6 +716,8 @@ class Image(Modality):
                     continue
                 mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).clip(0, 255).astype(np.uint8)
                 blended = self._blend_bright_dark(img_display, mask_u8, bright, dark)
+                if max_width is not None and max_height is not None:
+                    blended = self._resize_letterbox(blended, max_width, max_height)
                 cv2.imshow(f'{self.obj_type}_{self.id}_{label}', blended)
 
         # # obj_mask
@@ -1878,10 +1918,10 @@ def main():
         for file_path in file_paths:
             try:
                 if _is_point_cloud_path(file_path):
-                    obj = PointCloud.load_file(file_path)
+                    obj = PointCloud.load_file(file_path, keep_id=True)
                     obj.show()
                 else:
-                    obj = Image.load_file(file_path)
+                    obj = Image.load_file(file_path, keep_id=True)
                     obj.show()
             except Exception as e:
                 warnings.warn(f"渲染失败 {file_path}: {e}")
