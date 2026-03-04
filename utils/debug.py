@@ -67,7 +67,7 @@ def decode_token_ids(
     token_ids: Union[torch.Tensor, List[int], List[List[int]]],
     labels: Optional[Union[torch.Tensor, List[int], List[List[int]]]] = None,
     ignore_index: int = -100,
-) -> Union[List[str], List[List[str]], Tuple[List[str], List[str]], Tuple[List[List[str]], List[List[str]]]]:
+):
     """
     使用 tokenizer 将 token_ids 逐 token 解码为字符串列表，用于调试。
 
@@ -78,19 +78,18 @@ def decode_token_ids(
         ignore_index: labels 中表示“忽略”的值，默认 -100
 
     Returns:
-        - 若未传 labels：返回 decoded_list。
-          - 单条序列：list[str]，长度为 L，第 i 个元素为第 i 个 token 的解码串
+        始终返回字典：
+        - "decoded": 完整逐 token 解码。
+          - 单条序列：list[str]，长度为 L
           - 批量：list[list[str]]，长度为 B
-        - 若传入 labels：返回 (decoded_list, filtered_list)。
-          - decoded_list：同上，完整逐 token 解码
-          - filtered_list：仅保留 labels != ignore_index 位置的解码串组成的列表，
-            用于对比“监督区间”的输入 token 与输出 token，排查移位问题。
-          - 单条时 filtered_list 为 list[str]；批量时为 list[list[str]]
+        - "filtered": 仅当传入 labels 时存在；仅保留 labels != ignore_index 位置的解码串，
+          用于对比“监督区间”的输入 token 与输出 token，排查移位问题。
+          - 单条：list[str]；批量：list[list[str]]
     """
     if torch.is_tensor(token_ids):
         token_ids = token_ids.cpu().tolist()
     if not token_ids:
-        return ([], []) if labels is not None else []
+        return {"decoded": [], "filtered": []} if labels is not None else {"decoded": []}
     single = isinstance(token_ids[0], int)
     if single:
         token_ids = [token_ids]
@@ -108,8 +107,9 @@ def decode_token_ids(
             for tid in seq
         ])
 
+    decoded = decoded_list[0] if single else decoded_list
     if labels is None:
-        return decoded_list[0] if single else decoded_list
+        return {"decoded": decoded}
 
     filtered_list: List[List[str]] = []
     for b in range(len(decoded_list)):
@@ -119,10 +119,8 @@ def decode_token_ids(
             for i in range(min(len(decoded_list[b]), len(lab)))
             if lab[i] != ignore_index
         ])
-
-    if single:
-        return (decoded_list[0], filtered_list[0])
-    return (decoded_list, filtered_list)
+    filtered = filtered_list[0] if single else filtered_list
+    return {"decoded": decoded, "filtered": filtered}
 
 
 def _collect_batch_runtime_stats(input_dict: Dict, device: torch.device) -> Dict[str, float]:
