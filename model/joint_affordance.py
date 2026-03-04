@@ -20,8 +20,9 @@ from collections import OrderedDict
 from configs import JointAffordanceConfig, ImageDecoderConfigs, PointDecoderConfigs, MLLMConfigs
 from model.segment_anything import build_sam_vit_h
 from model.pointnet2_utils import PointCloud3DSegmentor, PointCloudEncoder
-from model.pointcept.models.point_transformer_v3m2_sonata import PointTransformerV3
+from model.pointcept.models.point_prompt_training.point_transformer_v3m2_sonata import PointTransformerV3
 
+from utils.debug import decode_token_ids
 
 class MLLMBackbone(nn.Module):
     """MLLM 主干实现（Qwen3-VL）。"""

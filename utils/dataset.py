@@ -334,9 +334,8 @@ def joint_affordance_collate_fn(
         {
             # mllm输入
             "input_ids"            : [B, L]           # 文本 token ids（含图像 token）
-            "labels"               : [B, L]           # 语言建模标签（非目标位置为 IGNORE_INDEX）
-            "attention_mask"       : [B, L]           # 文本注意力 mask
-            "position_ids"         : [B, 3, L]        # Qwen3-VL RoPE 位置编码
+            "labels"               : [B, L]           # 语言建模标签（不需要预测的位置为 IGNORE_INDEX）
+            "attention_mask"       : [B, L]           # 文本注意力，指示每个token是否为有效输入（即不是pad的token）
             "pixel_values"         : [B, 3, H, W]     # Qwen3-VL 视觉输入（占位样本用复用值回填）
             "image_grid_thw"       : [B, 3]           # Qwen3-VL 图像网格 (T, H, W)
             

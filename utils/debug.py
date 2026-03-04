@@ -1,4 +1,4 @@
-from typing import Dict
+from typing import Dict, List, Optional, Tuple, Union
 import torch
 
 def log_param_dtype_stats(model, logger, stage):
@@ -60,6 +60,69 @@ def count_model_params(model):
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     return total_params, trainable_params
+
+
+def decode_token_ids(
+    tokenizer,
+    token_ids: Union[torch.Tensor, List[int], List[List[int]]],
+    labels: Optional[Union[torch.Tensor, List[int], List[List[int]]]] = None,
+    ignore_index: int = -100,
+) -> Union[List[str], List[List[str]], Tuple[List[str], List[str]], Tuple[List[List[str]], List[List[str]]]]:
+    """
+    使用 tokenizer 将 token_ids 逐 token 解码为字符串列表，用于调试。
+
+    Args:
+        tokenizer: 预训练 tokenizer（如 model.tokenizer / processor.tokenizer）
+        token_ids: [L] 或 [B, L]，tensor 或 list
+        labels: 可选，与 token_ids 同形状；用于 LM 时通常非监督位置为 ignore_index（-100）
+        ignore_index: labels 中表示“忽略”的值，默认 -100
+
+    Returns:
+        - 若未传 labels：返回 decoded_list。
+          - 单条序列：list[str]，长度为 L，第 i 个元素为第 i 个 token 的解码串
+          - 批量：list[list[str]]，长度为 B
+        - 若传入 labels：返回 (decoded_list, filtered_list)。
+          - decoded_list：同上，完整逐 token 解码
+          - filtered_list：仅保留 labels != ignore_index 位置的解码串组成的列表，
+            用于对比“监督区间”的输入 token 与输出 token，排查移位问题。
+          - 单条时 filtered_list 为 list[str]；批量时为 list[list[str]]
+    """
+    if torch.is_tensor(token_ids):
+        token_ids = token_ids.cpu().tolist()
+    if not token_ids:
+        return ([], []) if labels is not None else []
+    single = isinstance(token_ids[0], int)
+    if single:
+        token_ids = [token_ids]
+    if labels is not None:
+        if torch.is_tensor(labels):
+            labels = labels.cpu().tolist()
+        if isinstance(labels[0], (int, float)):
+            labels = [labels]
+        assert len(labels) == len(token_ids), "labels 与 token_ids  batch 维长度一致"
+
+    decoded_list: List[List[str]] = []
+    for seq in token_ids:
+        decoded_list.append([
+            tokenizer.decode([tid], skip_special_tokens=False)
+            for tid in seq
+        ])
+
+    if labels is None:
+        return decoded_list[0] if single else decoded_list
+
+    filtered_list: List[List[str]] = []
+    for b in range(len(decoded_list)):
+        lab = labels[b]
+        filtered_list.append([
+            decoded_list[b][i]
+            for i in range(min(len(decoded_list[b]), len(lab)))
+            if lab[i] != ignore_index
+        ])
+
+    if single:
+        return (decoded_list[0], filtered_list[0])
+    return (decoded_list, filtered_list)
 
 
 def _collect_batch_runtime_stats(input_dict: Dict, device: torch.device) -> Dict[str, float]:
