@@ -154,7 +154,6 @@ def save_batch_predictions(
     output_dict: Dict,
     batch_idx: int,
     output_dir: str,
-    dataset=None,
     batch_start: Optional[int] = None,
 ):
     """
@@ -184,7 +183,7 @@ def save_batch_predictions(
             return masks[index] if index < len(masks) else None
         if isinstance(masks, torch.Tensor):
             if masks.dim() == 2:
-                return masks
+                return masks[index] if masks.shape[0] > index else None
             return masks[index] if masks.shape[0] > index else None
         return None
 
@@ -195,29 +194,42 @@ def save_batch_predictions(
     if batch_start is None:
         batch_start = batch_idx * batch_size
 
-    samples = getattr(dataset, "samples", None) if dataset is not None else None
-
     for i in range(batch_size):
-        sample = None
-        if samples is not None:
-            sample_index = batch_start + i
-            if 0 <= sample_index < len(samples):
-                sample = samples[sample_index]
-        if sample is None:
-            continue
-
-        obj_type = sample.obj_type
-        aff_type = sample.aff_type
-        sample_id = sample.id
+        sample_index = batch_start + i
+        obj_types = input_dict.get("obj_type")
+        aff_types = input_dict.get("aff_type")
+        sample_ids = input_dict.get("sample_id")
+        obj_type = (
+            str(obj_types[i]) if isinstance(obj_types, (list, tuple)) and i < len(obj_types)
+            else "unknown_obj"
+        )
+        aff_type = (
+            str(aff_types[i]) if isinstance(aff_types, (list, tuple)) and i < len(aff_types)
+            else "unknown_aff"
+        )
+        sample_id = (
+            str(sample_ids[i]) if isinstance(sample_ids, (list, tuple)) and i < len(sample_ids)
+            else str(sample_index)
+        )
 
         # 2D mask 保存（在保存前还原到原始图像尺寸）
         pred_mask_2d = _extract_pred_mask("image_logits", i)
-        if pred_mask_2d is not None and sample.img is not None and sample.img.img is not None:
+        images_tensor = input_dict.get("images")
+        if pred_mask_2d is not None and isinstance(images_tensor, torch.Tensor) and images_tensor.shape[0] > i:
             mask_2d = _to_uint8_mask(pred_mask_2d)
 
-            # 根据原始 RGB 图的尺寸调整 mask 尺寸
-            orig_img = sample.img.img
-            orig_h, orig_w = orig_img.shape[:2]
+            # 从 input_dict["images"] 还原 RGB，按 original_size_list 裁剪回原始尺寸
+            img_tensor = images_tensor[i].detach().float().cpu().clamp(0.0, 1.0)
+            orig_img = (img_tensor.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+            original_size_list = input_dict.get("original_size_list")
+            if isinstance(original_size_list, (list, tuple)) and i < len(original_size_list):
+                orig_h, orig_w = map(int, original_size_list[i])
+                orig_h = max(1, min(orig_h, orig_img.shape[0]))
+                orig_w = max(1, min(orig_w, orig_img.shape[1]))
+                orig_img = orig_img[:orig_h, :orig_w]
+            else:
+                orig_h, orig_w = orig_img.shape[:2]
+
             if mask_2d.ndim == 3:
                 # 如果是 (C, H, W) 或 (H, W, C)，先取单通道
                 if mask_2d.shape[0] in (1, 3) and mask_2d.shape[1] == orig_h and mask_2d.shape[2] == orig_w:
@@ -244,13 +256,11 @@ def save_batch_predictions(
 
         # 3D mask 保存
         pred_mask_3d = _extract_pred_mask("point_logits", i)
-        if pred_mask_3d is not None and sample.pc is not None:
+        if pred_mask_3d is not None:
             points = None
             pc_tensor = input_dict.get("point_clouds")
             if isinstance(pc_tensor, torch.Tensor) and pc_tensor.shape[0] > i:
                 points = pc_tensor[i].detach().cpu().numpy()
-            if points is None and sample.pc is not None:
-                points = sample.pc.points
             if points is None:
                 continue
 
@@ -258,7 +268,7 @@ def save_batch_predictions(
                 points = np.transpose(points, (1, 0))
 
             mask_3d = _to_float_mask(pred_mask_3d).reshape(-1)
-            pc_lengths = input_dict.get("pc_lengths")
+            pc_lengths = input_dict.get("pc_valid_lengths")
             if isinstance(pc_lengths, torch.Tensor) and pc_lengths.shape[0] > i:
                 num_points = int(pc_lengths[i].item())
             else:
@@ -420,7 +430,6 @@ def main():
                     output_dict,
                     batch_idx,
                     infer_cfg.output_dir,
-                    dataset=torch_dataset,
                 )
             # 释放当前 batch 的 GPU 张量引用，避免长验证阶段显存碎片累积
             del output_dict, loss_dict, input_dict, pred_token_ids_batch
