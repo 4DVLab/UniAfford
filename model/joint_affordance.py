@@ -23,11 +23,8 @@ class JointAffordanceModel(nn.Module):
 
         self.mllm = MLLMBackbone(self.config.mllm)
         # 以 mllm 初始化后的 token 索引为准。
-        self.seg_token_idx = self.mllm.seg_token_idx
-        self.aff_token_idx = self.mllm.aff_token_idx
-        # 确保lora能够调用这两个token
-        self.config.seg_token_idx = self.seg_token_idx
-        self.config.aff_token_idx = self.aff_token_idx
+        self.functional_tokens = self.mllm.functional_tokens
+        self.functional_token_ids = self.mllm.functional_token_ids
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
         self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
@@ -140,8 +137,8 @@ class JointAffordanceModel(nn.Module):
             else:
                 token_ids_for_seg = token_ids_for_seg.clone()
                 min_len = min(token_ids_for_seg.shape[1], input_ids.shape[1])
-                pred_has_seg = (token_ids_for_seg[:, :min_len] == int(self.seg_token_idx)).any(dim=1)
-                input_has_seg = (input_ids[:, :min_len] == int(self.seg_token_idx)).any(dim=1)
+                pred_has_seg = (token_ids_for_seg[:, :min_len] == int(self.img_aff_token)).any(dim=1)
+                input_has_seg = (input_ids[:, :min_len] == int(self.img_aff_token)).any(dim=1)
                 fallback_rows = (~pred_has_seg) & input_has_seg
                 if fallback_rows.any():
                     token_ids_for_seg[fallback_rows, :min_len] = input_ids[fallback_rows, :min_len]
@@ -151,23 +148,22 @@ class JointAffordanceModel(nn.Module):
 
         if hidden_states is not None:
             # ---- 2. 先提取 SEG token 的单 token hidden_state，再分别做投影 ----
-            # HACK: 目前先共用语义空间，看看会不会有相互增强的效果
-            seg_hidden = self._extract_token_embeddings(
-                hidden_states, token_ids_for_seg, self.seg_token_idx
+            # 分离2D\3D任务的token语义空间
+            img_aff_token = self._extract_token_embeddings(
+                hidden_states, token_ids_for_seg, self.functional_token_ids["img_aff_token"]
             )  # [B, C]
-            image_pred_emb = self.image_decoder.project_hidden_states(seg_hidden).to(self.image_decoder.config.compute_dtype)
-            point_pred_emb = self.point_decoder.project_hidden_states(seg_hidden).to(self.point_decoder.config.compute_dtype)
+            pc_aff_token = self._extract_token_embeddings(
+                hidden_states, token_ids_for_seg, self.functional_token_ids["pc_aff_token"]
+            )  # [B, C]
+            image_pred_emb = self.image_decoder.project_hidden_states(img_aff_token)
+            point_pred_emb = self.point_decoder.project_hidden_states(pc_aff_token)
 
             # ---- 3. 2D 图像分割 ----
-            # 默认 images 非空（由数据集与 collate 保证），所有 rank 统一前向。
             image_embeddings = self.image_decoder.get_visual_embs(images)
-            H, W = images.shape[-2], images.shape[-1]
-            input_size = (H, W)
-            original_size = tuple(original_size_list[0]) if original_size_list else (H, W)
+            input_size = (images.shape[-2], images.shape[-1])
+            original_size = tuple(original_size_list[0]) if original_size_list else input_size
 
-            all_image_logits = self.image_decoder(
-                image_pred_emb, image_embeddings, input_size, original_size
-            )
+            all_image_logits = self.image_decoder(image_pred_emb, image_embeddings, input_size, original_size)
 
             # 将无效样本的输出置零（不影响 loss 计算）
             if img_valid_mask is not None:
@@ -177,7 +173,6 @@ class JointAffordanceModel(nn.Module):
                 image_logits = all_image_logits
 
             # ---- 4. 3D 点云分割 ----
-            # 默认 point_clouds 非空（由数据集与 collate 保证），所有 rank 统一前向。
             all_point_logits = self.point_decoder(point_pred_emb, point_clouds)
 
             # 将无效样本的输出置零

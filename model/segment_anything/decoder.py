@@ -42,9 +42,7 @@ class ImageHiddenStateDecoder(nn.Module):
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到 SAM prompt 空间。"""
         # assert len(self.text_hidden_fcs) == 1
-        # 以实际权重 dtype 为准，避免 config 与参数真实 dtype 不一致导致 matmul 报错。
-        target_dtype = next(self.text_hidden_fcs[0].parameters()).dtype
-        hidden_states = hidden_states.to(target_dtype)
+        hidden_states = hidden_states.to(self.config.compute_dtype)
         projected = self.text_hidden_fcs[0](hidden_states)
         return projected
 

@@ -28,9 +28,8 @@ class MLLMBackbone(nn.Module):
         self.processor.tokenizer.padding_side = "right"
         self.tokenizer = self.processor.tokenizer
 
-        self.seg_token = self.config.seg_token
-        self.aff_token = self.config.aff_token
-        self.seg_token_idx, self.aff_token_idx = self._ensure_special_tokens()
+        self.functional_tokens = self.config.functional_tokens
+        self.functional_token_ids = self._ensure_special_tokens(self.functional_tokens)
 
         # 特殊 token 注入后，词表大小可能变化，这里以模型实际词表为准回写配置。
         self.vocab_size = int(self.model.get_input_embeddings().num_embeddings)
@@ -40,19 +39,20 @@ class MLLMBackbone(nn.Module):
 
         self.to(dtype=self.config.compute_dtype)
 
-    def _ensure_special_tokens(self):
+    def _ensure_special_tokens(self, candidate_tokens: dict):
         """
         确保配置中的分割 token 已加入 tokenizer，并与 MLLM embedding 对齐。
         若 special token 已被占用（如已预训练好的模型、继续微调），则直接使用其现有 id，无需重复添加。
         """
-        candidate_tokens = [self.seg_token, self.aff_token]
         tokens_to_add = []
+        functional_token_ids = dict()
 
         # Qwen tokenizer unknown token id
         unk_id = self.tokenizer.unk_token_id
 
-        for token in candidate_tokens:
+        for token_name, token in candidate_tokens.items():
             token_id = self.tokenizer.convert_tokens_to_ids(token)
+            functional_token_ids[token_name] = token_id
             # token 不存在或被识别为 unk，视为需要添加
             if token_id is None or (unk_id is not None and token_id == unk_id):
                 tokens_to_add.append(token)
@@ -67,9 +67,7 @@ class MLLMBackbone(nn.Module):
             # 若继续微调，建议加入相关 embedding warmup 策略。
 
         # 无论 token 是新加的还是已存在的，都返回其 id
-        seg_token_idx = self.tokenizer.convert_tokens_to_ids(self.seg_token)
-        aff_token_idx = self.tokenizer.convert_tokens_to_ids(self.aff_token)
-        return seg_token_idx, aff_token_idx
+        return functional_token_ids
 
     def _build_qwen_model(self, config: MLLMConfigs):
         model_name = config.qwen_model_name_or_path

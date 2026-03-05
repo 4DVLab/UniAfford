@@ -22,8 +22,11 @@ DEFAULT_PC_TOKEN = "<point_cloud>"
 DEFAULT_PC_START_TOKEN = "<pc_start>"
 DEFAULT_PC_END_TOKEN = "<pc_end>"
 
-SEG_TOKEN = "[SEG]"
-AFF_TOKEN = "[AFF]"
+# 用于下游分割任务的功能性 token
+FUNCTIONAL_TOKENS = {
+    "img_aff_token": "[IMG-AFF]",
+    "pc_aff_token": "[PC-AFF]",
+}
 
 
 # ====================== 分布式日志工具 ======================

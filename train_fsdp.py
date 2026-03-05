@@ -307,7 +307,7 @@ def main():
                 mllm_core.enable_input_require_grads()
             logger.info("已启用 MLLM gradient checkpointing")
 
-    # 直接复用模型内部的 processor（已含注入 [SEG]/[AFF] 的 tokenizer + image_processor），
+    # 直接复用模型内部的 processor（已含注入 functional tokens 的 tokenizer + image_processor），
     processor = model.processor
     data_collator = partial(
         joint_affordance_collate_fn,

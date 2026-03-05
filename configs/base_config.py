@@ -4,7 +4,7 @@
 import json
 import torch
 from typing import Optional, Dict
-from utils.common import resolve_dtype, SEG_TOKEN, AFF_TOKEN
+from utils.common import resolve_dtype, FUNCTIONAL_TOKENS
 
 class Configs:
     """基础配置类，提供快速属性更新能力。"""
@@ -65,11 +65,9 @@ class MLLMConfigs(Configs):
         tokenizer: Optional[object] = None,
         train_mask_decoder: bool = True,
         out_dim: int = 256,
-        seg_token: str = SEG_TOKEN,
-        aff_token: str = AFF_TOKEN,
+        functional_tokens: dict = FUNCTIONAL_TOKENS,
         **kwargs,
     ):
-
         # 在fp32的时候禁用 flash_attention_2，因为flash_attention_2只支持bf16，在fp32的时候使用默认的attn_implementation
         qwen_attn_implementation = qwen_attn_implementation if compute_dtype == 'bf16' else None
         super().__init__(
@@ -83,8 +81,7 @@ class MLLMConfigs(Configs):
             tokenizer=tokenizer,
             train_mask_decoder=train_mask_decoder,
             out_dim=out_dim,
-            seg_token=seg_token,
-            aff_token=aff_token,
+            functional_tokens=functional_tokens,
             **kwargs,
         )
 

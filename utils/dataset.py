@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 
 from model.qwenvl.data.rope2d import get_rope_index_3
 from utils.base_dataset import JointDataSample
-from utils.common import resolve_dtype, SEG_TOKEN, AFF_TOKEN, IGNORE_INDEX
+from utils.common import resolve_dtype, FUNCTIONAL_TOKEN, IGNORE_INDEX
 
 
 def _pad_and_cat_position_ids(position_ids_list: List[torch.Tensor]) -> torch.Tensor:
@@ -63,29 +63,32 @@ class JointAffordanceTorchDataset(Dataset):
         return self._build_sample(self.samples[index])
 
     def _build_text(self, sample: JointDataSample, has_image: bool, has_pc: bool, instruction: str) -> tuple[str, str]:
+        """HACK: 目前先使用预置模版构建回答，之后尝试使用VLM的能力构建回答"""
         obj_type = sample.obj_type
         aff_type = sample.aff_type
         question = instruction or f"Please identify the {aff_type} affordance region of the {obj_type}."
 
         answer_parts = []
         if has_image:
+            IMG_AFF_TOKEN = FUNCTIONAL_TOKEN["img_aff_token"]
             image_templates = [
-                f"The {aff_type} affordance region of the {obj_type} is {SEG_TOKEN}.",
-                f"Here is the {aff_type} region: {SEG_TOKEN}.",
-                f"The {aff_type} area for the {obj_type} is highlighted as {SEG_TOKEN}.",
-                f"I've identified the {aff_type} affordance: {SEG_TOKEN}.",
-                f"The region for {aff_type} interaction is {SEG_TOKEN}.",
-                f"{SEG_TOKEN} shows the {aff_type} affordance of the {obj_type}.",
+                f"The {aff_type} affordance region of the {obj_type} is {IMG_AFF_TOKEN}.",
+                f"Here is the {aff_type} region: {IMG_AFF_TOKEN}.",
+                f"The {aff_type} area for the {obj_type} is highlighted as {IMG_AFF_TOKEN}.",
+                f"I've identified the {aff_type} affordance: {IMG_AFF_TOKEN}.",
+                f"The region for {aff_type} interaction is {IMG_AFF_TOKEN}.",
+                f"{IMG_AFF_TOKEN} shows the {aff_type} affordance of the {obj_type}.",
             ]
             answer_parts.append(random.choice(image_templates))
         if has_pc:
+            PC_AFF_TOKEN = FUNCTIONAL_TOKEN["pc_aff_token"]
             pc_templates = [
-                f"The 3D {aff_type} affordance region is {SEG_TOKEN}.",
-                f"In 3D space, the {aff_type} region is {SEG_TOKEN}.",
-                f"The point cloud shows the {aff_type} area as {SEG_TOKEN}.",
-                f"{SEG_TOKEN} represents the 3D {aff_type} affordance.",
-                f"The {aff_type} region in the point cloud is {SEG_TOKEN}.",
-                f"For 3D interaction, the {aff_type} area is {SEG_TOKEN}.",
+                f"The 3D {aff_type} affordance region is {PC_AFF_TOKEN}.",
+                f"In 3D space, the {aff_type} region is {PC_AFF_TOKEN}.",
+                f"The point cloud shows the {aff_type} area as {PC_AFF_TOKEN}.",
+                f"{PC_AFF_TOKEN} represents the 3D {aff_type} affordance.",
+                f"The {aff_type} region in the point cloud is {PC_AFF_TOKEN}.",
+                f"For 3D interaction, the {aff_type} area is {PC_AFF_TOKEN}.",
             ]
             answer_parts.append(random.choice(pc_templates))
         if not answer_parts:
