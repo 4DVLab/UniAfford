@@ -1,4 +1,10 @@
-## TODO
-1. 替换3D评估的指标和loss
-2. 分离2D和3D部分的学习率，没有生效是什么原因
-3. 
+
+## QuickStart
+### Environments
+### Run
+
+## Train
+
+## Dataset
+
+## Cite

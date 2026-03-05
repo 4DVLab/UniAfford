@@ -5,6 +5,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from time import time
 import numpy as np
+from configs.base_config import PointDecoderConfigs
+from collections import OrderedDict
+
 
 def timeit(tag, t):
     print("{}: {}s".format(tag, time() - t))
@@ -601,3 +604,76 @@ class PointCloudEncoder(nn.Module):
         x = self.fc(x)
         
         return x
+
+
+# old version with low performance
+class PointCloudHiddenStateDecoder(nn.Module):
+    """使用文本隐藏状态查询点云特征的解码器。"""
+
+    def __init__(
+        self,
+        config: PointDecoderConfigs,
+        text_hidden_size: int
+    ):
+        super().__init__()
+        self.config = config
+        self.point_encoder = PointCloudEncoder(out_dim=text_hidden_size)
+
+        text_fc = nn.Sequential(OrderedDict([
+            ("fc1", nn.Linear(text_hidden_size, 2*text_hidden_size)),
+            ("relu", nn.ReLU(inplace=True)),
+            ("fc2", nn.Linear(2*text_hidden_size, config.hidden_size)),
+            # ("dropout", nn.Dropout(0.0)),
+        ]))
+        self.text_hidden_fcs = nn.ModuleList([text_fc])
+        for param in self.text_hidden_fcs.parameters():
+            param.requires_grad = True
+
+        self.point_cloud_segmentor = PointCloud3DSegmentor(
+            embed_dim=config.hidden_size,
+            num_heads=8,
+            num_decoder_layers=3,
+            max_text_len=77,
+        )
+        for param in self.point_cloud_segmentor.parameters():
+            param.requires_grad = True
+        
+        self.to(dtype=self.config.compute_dtype)
+
+    def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
+        # 以实际权重 dtype 为准，避免 config 与参数真实 dtype 不一致导致 matmul 报错。
+        target_dtype = next(self.text_hidden_fcs[0].parameters()).dtype
+        hidden_states = hidden_states.to(target_dtype)
+        projected = self.text_hidden_fcs[0](hidden_states)
+        return projected
+
+    def forward(
+        self,
+        pred_embeddings: torch.Tensor,
+        point_clouds: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        批量生成 3D 分割掩码。
+
+        Args:
+            pred_embeddings: [B, C] — 每个样本的 SEG token 投影嵌入（已 mean-pool）
+            point_clouds: [B, N, 3] 或 [B, 3, N]
+
+        Returns:
+            pred_masks: [B, N]
+        """
+        if point_clouds.shape[1] != 3:
+            point_clouds = point_clouds.permute(0, 2, 1)
+
+        pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
+        point_clouds = point_clouds.to(self.config.compute_dtype)
+
+        # [B, C] → [B, 1, C]，PointCloud3DSegmentor 接受 [B, L, C] 的 text_feat
+        text_feat = pred_embeddings.unsqueeze(1)
+        text_mask = torch.ones(
+            text_feat.shape[0], 1,
+            dtype=torch.bool, device=text_feat.device,
+        )
+
+        return self.point_cloud_segmentor(point_clouds, text_feat, text_mask)
