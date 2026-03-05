@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 
 from model.qwenvl.data.rope2d import get_rope_index_3
 from utils.base_dataset import JointDataSample
-from utils.common import resolve_dtype, FUNCTIONAL_TOKEN, IGNORE_INDEX
+from utils.common import resolve_dtype, FUNCTIONAL_TOKENS, IGNORE_INDEX
 
 
 def _pad_and_cat_position_ids(position_ids_list: List[torch.Tensor]) -> torch.Tensor:
@@ -70,7 +70,7 @@ class JointAffordanceTorchDataset(Dataset):
 
         answer_parts = []
         if has_image:
-            IMG_AFF_TOKEN = FUNCTIONAL_TOKEN["img_aff_token"]
+            IMG_AFF_TOKEN = FUNCTIONAL_TOKENS["img_aff_token"]
             image_templates = [
                 f"The {aff_type} affordance region of the {obj_type} is {IMG_AFF_TOKEN}.",
                 f"Here is the {aff_type} region: {IMG_AFF_TOKEN}.",
@@ -81,7 +81,7 @@ class JointAffordanceTorchDataset(Dataset):
             ]
             answer_parts.append(random.choice(image_templates))
         if has_pc:
-            PC_AFF_TOKEN = FUNCTIONAL_TOKEN["pc_aff_token"]
+            PC_AFF_TOKEN = FUNCTIONAL_TOKENS["pc_aff_token"]
             pc_templates = [
                 f"The 3D {aff_type} affordance region is {PC_AFF_TOKEN}.",
                 f"In 3D space, the {aff_type} region is {PC_AFF_TOKEN}.",

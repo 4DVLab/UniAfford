@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
-from models.point_prompt_training.point_transformer_v3m2_sonata import PointTransformerV3
+from .models.point_prompt_training.point_transformer_v3m2_sonata import PointTransformerV3
 
 class PointCloudHiddenStateDecoder(nn.Module):
     """使用文本隐藏状态查询点云特征的解码器。"""

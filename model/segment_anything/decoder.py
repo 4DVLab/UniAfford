@@ -2,7 +2,7 @@ from configs import ImageDecoderConfigs
 import torch
 import torch.nn as nn
 from collections import OrderedDict
-from build_sam import build_sam_vit_h
+from .build_sam import build_sam_vit_h
 
 
 class ImageHiddenStateDecoder(nn.Module):
