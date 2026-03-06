@@ -139,21 +139,42 @@ class JointAffordanceTorchDataset(Dataset):
 
         labels = torch.full_like(input_ids, IGNORE_INDEX)
 
+        # 不依赖硬编码 token id，按 chat template 真实边界匹配 assistant 监督区间：
+        # <|im_start|>assistant\n ... <|im_end|>
         input_ids_flat = input_ids[0].tolist()
-        L = len(input_ids_flat)
+        assistant_prefix = self.tokenizer.encode(
+            "<|im_start|>assistant\n",
+            add_special_tokens=False,
+        )
+        im_end = self.tokenizer.encode(
+            "<|im_end|>\n",
+            add_special_tokens=False,
+        )
+
+        def _find_subseq(seq, pat, start=0):
+            if not pat:
+                return -1
+            end = len(seq) - len(pat) + 1
+            for i in range(max(0, start), max(0, end)):
+                if seq[i : i + len(pat)] == pat:
+                    return i
+            return -1
+
         pos = 0
-        while pos < L:
-            if input_ids_flat[pos] == 77091:
-                ans_start = pos + 2
-                ans_end = ans_start
-                while ans_end < L and input_ids_flat[ans_end] != 151645:
-                    ans_end += 1
-                if ans_end < L:
-                    labels[0, ans_start : ans_end + 2] = input_ids[
-                        0, ans_start : ans_end + 2
-                    ]
-                    pos = ans_end
-            pos += 1
+        while True:
+            prefix_pos = _find_subseq(input_ids_flat, assistant_prefix, start=pos)
+            if prefix_pos < 0:
+                break
+            ans_start = prefix_pos + len(assistant_prefix)
+            end_pos = _find_subseq(input_ids_flat, im_end, start=ans_start)
+            if end_pos < 0:
+                # 模板异常时至少监督 assistant 内容尾部，避免全 -100
+                labels[0, ans_start:] = input_ids[0, ans_start:]
+                break
+
+            ans_end = end_pos + len(im_end)
+            labels[0, ans_start:ans_end] = input_ids[0, ans_start:ans_end]
+            pos = ans_end
 
         full_result["labels"] = labels
         full_result["input_ids"] = input_ids
