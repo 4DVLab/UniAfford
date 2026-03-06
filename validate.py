@@ -387,14 +387,16 @@ def main():
                 # GT 文本：从 labels 中提取非 IGNORE 的 token ids 解码
                 labels_i = input_dict["labels"][i].cpu()
                 answer_mask = labels_i != IGNORE_INDEX
-                gt_ids = labels_i[answer_mask].tolist()
+                supervised_pos = torch.nonzero(answer_mask, as_tuple=False).squeeze(-1)
+                gt_ids = labels_i[supervised_pos].tolist()
                 record["gt_text"] = tokenizer.decode(gt_ids, skip_special_tokens=False)
 
-                # 预测文本：从模型 logits argmax 中提取对应位置
+                # 预测文本：Causal LM 需要按监督位置左移一位对齐
+                # logits[t] 预测 token[t+1]，所以 label 位置 p 应取 pred 位置 p-1
                 if pred_token_ids_batch is not None:
                     pred_ids_i = pred_token_ids_batch[i]
-                    min_len = min(pred_ids_i.shape[0], answer_mask.shape[0])
-                    pred_answer_ids = pred_ids_i[:min_len][answer_mask[:min_len]].tolist()
+                    valid_pos = supervised_pos[(supervised_pos > 0) & (supervised_pos - 1 < pred_ids_i.shape[0])]
+                    pred_answer_ids = pred_ids_i[valid_pos - 1].tolist()
                     record["pred_token_ids"] = json.dumps(pred_answer_ids)
                     record["pred_text"] = tokenizer.decode(pred_answer_ids, skip_special_tokens=False)
                 else:

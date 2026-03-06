@@ -179,13 +179,13 @@ class JointAffordanceTorchDataset(Dataset):
         full_result["labels"] = labels
         full_result["input_ids"] = input_ids
 
-        grid_thw = full_result.get("image_grid_thw")
-        if grid_thw is None:
-            cat_grid_thw = None
-        elif isinstance(grid_thw, (list, tuple)):
-            cat_grid_thw = torch.cat(grid_thw, dim=0)
-        else:
-            cat_grid_thw = grid_thw
+        # grid_thw = full_result.get("image_grid_thw")
+        # if grid_thw is None:
+        #     cat_grid_thw = None
+        # elif isinstance(grid_thw, (list, tuple)):
+        #     cat_grid_thw = torch.cat(grid_thw, dim=0)
+        # else:
+        #     cat_grid_thw = grid_thw
 
         # position_ids, _ = get_rope_index_3(
         #     self.merge_size,
