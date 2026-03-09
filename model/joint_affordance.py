@@ -99,6 +99,77 @@ class JointAffordanceModel(nn.Module):
         embeddings = embeddings * has_token.unsqueeze(-1).to(embeddings.dtype)
         return embeddings
 
+    def _extract_per_sample_token_embeddings(
+        self,
+        last_hidden_state: torch.Tensor,
+        token_ids: Optional[torch.Tensor],
+        token_idx_per_sample: Optional[torch.Tensor],
+        fallback_token_ids: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """按样本使用不同 token id 提取提示向量。"""
+        B, _, C = last_hidden_state.shape
+        if token_idx_per_sample is None:
+            return last_hidden_state.new_zeros(B, C)
+
+        if token_ids is None:
+            token_ids = fallback_token_ids
+        elif fallback_token_ids is not None:
+            token_ids = token_ids.clone()
+            min_len = min(token_ids.shape[1], fallback_token_ids.shape[1])
+            valid_ids = token_idx_per_sample >= 0
+            pred_has_token = (
+                token_ids[:, :min_len] == token_idx_per_sample.unsqueeze(1)
+            ).any(dim=1) & valid_ids
+            fallback_has_token = (
+                fallback_token_ids[:, :min_len] == token_idx_per_sample.unsqueeze(1)
+            ).any(dim=1) & valid_ids
+            fallback_rows = (~pred_has_token) & fallback_has_token
+            if fallback_rows.any():
+                token_ids[fallback_rows, :min_len] = fallback_token_ids[fallback_rows, :min_len]
+
+        if token_ids is None:
+            return last_hidden_state.new_zeros(B, C)
+
+        if last_hidden_state.shape[1] != token_ids.shape[1]:
+            min_len = min(last_hidden_state.shape[1], token_ids.shape[1])
+            last_hidden_state = last_hidden_state[:, :min_len, :]
+            token_ids = token_ids[:, :min_len]
+
+        token_mask = token_ids == token_idx_per_sample.unsqueeze(1)
+        has_token = token_mask.any(dim=1)
+        first_idx = token_mask.to(torch.long).argmax(dim=1)
+        embeddings = last_hidden_state.gather(
+            1, first_idx.unsqueeze(-1).unsqueeze(-1).expand(B, 1, C)
+        ).squeeze(1)
+        embeddings = embeddings * has_token.unsqueeze(-1).to(embeddings.dtype)
+        return embeddings
+
+    def _resolve_obj_aff_token_ids(
+        self,
+        obj_type: Optional[List[str]],
+        aff_type: Optional[List[str]],
+        batch_size: int,
+        device: torch.device,
+    ) -> Optional[torch.Tensor]:
+        """将 batch 内 (obj, aff) 映射为功能 token id。"""
+        if obj_type is None or aff_type is None:
+            return None
+        if len(obj_type) != batch_size or len(aff_type) != batch_size:
+            return None
+
+        unk_id = self.tokenizer.unk_token_id
+        token_ids = []
+        for obj_name, aff_name in zip(obj_type, aff_type):
+            pair_key = f"{obj_name}-{aff_name}"
+            token_id = self.functional_token_ids.get(pair_key)
+            if token_id is None:
+                token_text = self.functional_tokens.get(pair_key, f"<{pair_key}>")
+                token_id = self.tokenizer.convert_tokens_to_ids(token_text)
+                if token_id is None or (unk_id is not None and token_id == unk_id):
+                    token_id = -1
+            token_ids.append(int(token_id))
+        return torch.tensor(token_ids, dtype=torch.long, device=device)
+
     def forward(
         self,
         # Qwen 推理所需
@@ -116,6 +187,8 @@ class JointAffordanceModel(nn.Module):
         point_clouds: Optional[torch.Tensor] = None,
         pc_valid_lengths: Optional[torch.Tensor] = None,
         pc_gt_tensor: Optional[torch.Tensor] = None,  # 后续可能支持，暂且保留
+        obj_type: Optional[List[str]] = None,
+        aff_type: Optional[List[str]] = None,
 
         return_hidden_states: bool = False,
         return_mllm_output: bool = False,
@@ -147,20 +220,36 @@ class JointAffordanceModel(nn.Module):
         point_logits = None
 
         if hidden_states is not None:
+            obj_aff_token_ids = self._resolve_obj_aff_token_ids(
+                obj_type=obj_type,
+                aff_type=aff_type,
+                batch_size=B,
+                device=hidden_states.device,
+            )
             # ---- 2. 先提取 SEG token 的单 token hidden_state，再分别做投影 ----
             # 分离2D\3D任务的token语义空间
-            img_aff_token = self._extract_token_embeddings(
-                hidden_states,
-                logits_token_ids,
-                self.functional_token_ids["img_aff_token"],
-                fallback_token_ids=input_ids,
-            )  # [B, C]
-            pc_aff_token = self._extract_token_embeddings(
-                hidden_states,
-                logits_token_ids,
-                self.functional_token_ids["pc_aff_token"],
-                fallback_token_ids=input_ids,
-            )  # [B, C]
+            if obj_aff_token_ids is not None and (obj_aff_token_ids >= 0).any():
+                obj_aff_prompt = self._extract_per_sample_token_embeddings(
+                    hidden_states,
+                    logits_token_ids,
+                    obj_aff_token_ids,
+                    fallback_token_ids=input_ids,
+                )
+                img_aff_token = obj_aff_prompt
+                pc_aff_token = obj_aff_prompt
+            else:
+                img_aff_token = self._extract_token_embeddings(
+                    hidden_states,
+                    logits_token_ids,
+                    self.functional_token_ids["img_aff_token"],
+                    fallback_token_ids=input_ids,
+                )  # [B, C]
+                pc_aff_token = self._extract_token_embeddings(
+                    hidden_states,
+                    logits_token_ids,
+                    self.functional_token_ids["pc_aff_token"],
+                    fallback_token_ids=input_ids,
+                )  # [B, C]
             image_pred_emb = self.image_decoder.project_hidden_states(img_aff_token)
             point_pred_emb = self.point_decoder.project_hidden_states(pc_aff_token)
 

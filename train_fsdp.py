@@ -30,13 +30,13 @@ from tqdm import tqdm
 
 from configs import TrainingConfig
 from model.joint_affordance import JointAffordanceModel
-from utils.base_dataset import JointDataset
+from utils.base_dataset import JointDataset, JointDataSample
 from utils.dataset import (
     JointAffordanceTorchDataset,
     JointAffordanceTrainDataset,
     joint_affordance_collate_fn,
 )
-from utils.common import dict_to_cuda, setup_logger
+from utils.common import dict_to_cuda, setup_logger, FUNCTIONAL_TOKENS
 from utils import calculator as calc
 from utils.metrics import (
     build_torchmetrics_bundle,
@@ -288,6 +288,32 @@ def main():
         writer.add_text("config/training", str(training_configs.to_dict()))
         writer.add_text("config/model", str(model_config.to_dict()))
 
+    # ---------- 加载数据集 ----------
+    logger.info("加载数据集...")
+    data_objects = [None, None, None]
+    if local_rank == 0:
+        train_data = JointDataset(dataset_root=training_configs.dataset_dir, dtype='train').load_all_data()
+        val_data = JointDataset(dataset_root=training_configs.dataset_dir, dtype='val').load_all_data()
+        train_samples_local = train_data.samples
+        val_samples_local = val_data.samples
+        pair_token_map = {}
+        for obj_type, aff_count_dict in JointDataSample.count.items():
+            for aff_type, count in aff_count_dict.items():
+                pair_key = f"{obj_type}-{aff_type}"
+                pair_token_map[pair_key] = f"<{pair_key}>"
+
+        data_objects = [train_samples_local, val_samples_local, pair_token_map]
+        logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
+    dist.broadcast_object_list(data_objects, src=0)
+    train_samples, val_samples, pair_token_map = data_objects
+
+    FUNCTIONAL_TOKENS.update(pair_token_map)
+    model_config.mllm.functional_tokens = dict(FUNCTIONAL_TOKENS)
+    if local_rank == 0:
+        logger.info(
+            f"已注册 obj-aff 专用 token: {len(pair_token_map)} 个: {pair_token_map.values()}"
+        )
+
     # ---------- 初始化模型 ----------
     logger.info("正在初始化模型...")
     model = JointAffordanceModel(model_config)
@@ -333,17 +359,6 @@ def main():
         f"参数统计: total={total_params:,}, trainable={trainable_params:,}, "
         f"ratio={100.0 * trainable_params / max(1, total_params):.2f}%"
     )
-
-    # ---------- 加载数据集 ----------
-    logger.info("加载数据集...")
-    data_objects = [None, None]
-    if local_rank == 0:
-        train_data = JointDataset(dataset_root=training_configs.dataset_dir, dtype='train').load_all_data()
-        val_data = JointDataset(dataset_root=training_configs.dataset_dir, dtype='val').load_all_data()
-        data_objects = [train_data.samples, val_data.samples]
-        logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
-    dist.broadcast_object_list(data_objects, src=0)
-    train_samples, val_samples = data_objects
 
     train_ds_cls = JointAffordanceTrainDataset if training_configs.samples_per_epoch else JointAffordanceTorchDataset
     train_ds_kwargs = dict(

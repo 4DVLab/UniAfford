@@ -66,29 +66,29 @@ class JointAffordanceTorchDataset(Dataset):
         """HACK: 目前先使用预置模版构建回答，之后尝试使用VLM的能力构建回答"""
         obj_type = sample.obj_type
         aff_type = sample.aff_type
+        obj_aff_key = f"{obj_type}-{aff_type}"
+        obj_aff_token = FUNCTIONAL_TOKENS.get(obj_aff_key, f"<{obj_aff_key}>")
         question = instruction or f"Please identify the {aff_type} affordance region of the {obj_type}."
 
         answer_parts = []
         if has_image:
-            IMG_AFF_TOKEN = FUNCTIONAL_TOKENS["img_aff_token"]
             image_templates = [
-                f"The {aff_type} affordance region of the {obj_type} is {IMG_AFF_TOKEN}.",
-                f"Here is the {aff_type} region of the {obj_type}: {IMG_AFF_TOKEN}.",
-                f"The {aff_type} area for the {obj_type} is highlighted as {IMG_AFF_TOKEN}.",
-                f"I've identified the {aff_type} affordance of the {obj_type}: {IMG_AFF_TOKEN}.",
-                f"The region for {aff_type} interaction on the {obj_type} is {IMG_AFF_TOKEN}.",
-                f"{IMG_AFF_TOKEN} shows the {aff_type} affordance of the {obj_type}.",
+                f"The {aff_type} affordance region of the {obj_type} is {obj_aff_token}.",
+                f"Here is the {aff_type} region of the {obj_type}: {obj_aff_token}.",
+                f"The {aff_type} area for the {obj_type} is highlighted as {obj_aff_token}.",
+                f"I've identified the {aff_type} affordance of the {obj_type}: {obj_aff_token}.",
+                f"The region for {aff_type} interaction on the {obj_type} is {obj_aff_token}.",
+                f"{obj_aff_token} shows the {aff_type} affordance of the {obj_type}.",
             ]
             answer_parts.append(random.choice(image_templates))
         if has_pc:
-            PC_AFF_TOKEN = FUNCTIONAL_TOKENS["pc_aff_token"]
             pc_templates = [
-                f"The 3D {aff_type} affordance region of the {obj_type} is {PC_AFF_TOKEN}.",
-                f"In 3D space, the {aff_type} region of the {obj_type} is {PC_AFF_TOKEN}.",
-                f"The point cloud shows the {aff_type} area of the {obj_type} as {PC_AFF_TOKEN}.",
-                f"{PC_AFF_TOKEN} represents the 3D {aff_type} affordance of the {obj_type}.",
-                f"The {aff_type} region of the {obj_type} in the point cloud is {PC_AFF_TOKEN}.",
-                f"For 3D interaction with the {obj_type}, the {aff_type} area is {PC_AFF_TOKEN}.",
+                f"The 3D {aff_type} affordance region of the {obj_type} is {obj_aff_token}.",
+                f"In 3D space, the {aff_type} region of the {obj_type} is {obj_aff_token}.",
+                f"The point cloud shows the {aff_type} area of the {obj_type} as {obj_aff_token}.",
+                f"{obj_aff_token} represents the 3D {aff_type} affordance of the {obj_type}.",
+                f"The {aff_type} region of the {obj_type} in the point cloud is {obj_aff_token}.",
+                f"For 3D interaction with the {obj_type}, the {aff_type} area is {obj_aff_token}.",
             ]
             answer_parts.append(random.choice(pc_templates))
         if not answer_parts:
