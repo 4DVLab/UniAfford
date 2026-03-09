@@ -73,30 +73,30 @@ class JointAffordanceTorchDataset(Dataset):
             IMG_AFF_TOKEN = FUNCTIONAL_TOKENS["img_aff_token"]
             image_templates = [
                 f"The {aff_type} affordance region of the {obj_type} is {IMG_AFF_TOKEN}.",
-                f"Here is the {aff_type} region: {IMG_AFF_TOKEN}.",
+                f"Here is the {aff_type} region of the {obj_type}: {IMG_AFF_TOKEN}.",
                 f"The {aff_type} area for the {obj_type} is highlighted as {IMG_AFF_TOKEN}.",
-                f"I've identified the {aff_type} affordance: {IMG_AFF_TOKEN}.",
-                f"The region for {aff_type} interaction is {IMG_AFF_TOKEN}.",
+                f"I've identified the {aff_type} affordance of the {obj_type}: {IMG_AFF_TOKEN}.",
+                f"The region for {aff_type} interaction on the {obj_type} is {IMG_AFF_TOKEN}.",
                 f"{IMG_AFF_TOKEN} shows the {aff_type} affordance of the {obj_type}.",
             ]
             answer_parts.append(random.choice(image_templates))
         if has_pc:
             PC_AFF_TOKEN = FUNCTIONAL_TOKENS["pc_aff_token"]
             pc_templates = [
-                f"The 3D {aff_type} affordance region is {PC_AFF_TOKEN}.",
-                f"In 3D space, the {aff_type} region is {PC_AFF_TOKEN}.",
-                f"The point cloud shows the {aff_type} area as {PC_AFF_TOKEN}.",
-                f"{PC_AFF_TOKEN} represents the 3D {aff_type} affordance.",
-                f"The {aff_type} region in the point cloud is {PC_AFF_TOKEN}.",
-                f"For 3D interaction, the {aff_type} area is {PC_AFF_TOKEN}.",
+                f"The 3D {aff_type} affordance region of the {obj_type} is {PC_AFF_TOKEN}.",
+                f"In 3D space, the {aff_type} region of the {obj_type} is {PC_AFF_TOKEN}.",
+                f"The point cloud shows the {aff_type} area of the {obj_type} as {PC_AFF_TOKEN}.",
+                f"{PC_AFF_TOKEN} represents the 3D {aff_type} affordance of the {obj_type}.",
+                f"The {aff_type} region of the {obj_type} in the point cloud is {PC_AFF_TOKEN}.",
+                f"For 3D interaction with the {obj_type}, the {aff_type} area is {PC_AFF_TOKEN}.",
             ]
             answer_parts.append(random.choice(pc_templates))
         if not answer_parts:
             no_input_templates = [
-                "I cannot identify the affordance region without visual input.",
-                "I need visual information to identify the affordance region.",
-                "Please provide an image or point cloud to analyze the affordance.",
-                "Visual input is required to determine the affordance region.",
+                f"I cannot identify the {aff_type} affordance region of the {obj_type} without visual input.",
+                f"I need visual information to identify the {aff_type} affordance region of the {obj_type}.",
+                f"Please provide an image or point cloud to analyze the {aff_type} affordance of the {obj_type}.",
+                f"Visual input is required to determine the {aff_type} affordance region of the {obj_type}.",
             ]
             answer_parts.append(random.choice(no_input_templates))
         answer = " ".join(answer_parts)
