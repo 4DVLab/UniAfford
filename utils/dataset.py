@@ -75,19 +75,19 @@ class JointAffordanceTorchDataset(Dataset):
             image_templates = [
                 f"The {aff_type} affordance region of the {obj_type} is {obj_aff_token}.",
                 f"Here is the {aff_type} region of the {obj_type}: {obj_aff_token}.",
-                f"The {aff_type} area for the {obj_type} is highlighted as {obj_aff_token}.",
+                f"For the {obj_type}, the {aff_type} area is highlighted as {obj_aff_token}.",
                 f"I've identified the {aff_type} affordance of the {obj_type}: {obj_aff_token}.",
-                f"The region for {aff_type} interaction on the {obj_type} is {obj_aff_token}.",
-                f"{obj_aff_token} shows the {aff_type} affordance of the {obj_type}.",
+                f"On the {obj_type}, the region for {aff_type} interaction is {obj_aff_token}.",
+                f"This token {obj_aff_token} marks the {aff_type} affordance of the {obj_type}.",
             ]
             answer_parts.append(random.choice(image_templates))
         if has_pc:
             pc_templates = [
                 f"The 3D {aff_type} affordance region of the {obj_type} is {obj_aff_token}.",
                 f"In 3D space, the {aff_type} region of the {obj_type} is {obj_aff_token}.",
-                f"The point cloud shows the {aff_type} area of the {obj_type} as {obj_aff_token}.",
-                f"{obj_aff_token} represents the 3D {aff_type} affordance of the {obj_type}.",
-                f"The {aff_type} region of the {obj_type} in the point cloud is {obj_aff_token}.",
+                f"Within the point cloud, the {aff_type} area of the {obj_type} is {obj_aff_token}.",
+                f"This token {obj_aff_token} represents the 3D {aff_type} affordance of the {obj_type}.",
+                f"For the {obj_type}, the {aff_type} region in the point cloud is {obj_aff_token}.",
                 f"For 3D interaction with the {obj_type}, the {aff_type} area is {obj_aff_token}.",
             ]
             answer_parts.append(random.choice(pc_templates))
@@ -96,7 +96,7 @@ class JointAffordanceTorchDataset(Dataset):
                 f"I cannot identify the {aff_type} affordance region of the {obj_type} without visual input.",
                 f"I need visual information to identify the {aff_type} affordance region of the {obj_type}.",
                 f"Please provide an image or point cloud to analyze the {aff_type} affordance of the {obj_type}.",
-                f"Visual input is required to determine the {aff_type} affordance region of the {obj_type}.",
+                f"For the {obj_type}, visual input is required to determine the {aff_type} affordance region.",
             ]
             answer_parts.append(random.choice(no_input_templates))
         answer = " ".join(answer_parts)

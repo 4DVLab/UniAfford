@@ -45,19 +45,15 @@ class MLLMBackbone(nn.Module):
         若 special token 已被占用（如已预训练好的模型、继续微调），则直接使用其现有 id，无需重复添加。
         """
         tokens_to_add = []
-        functional_token_ids = dict()
-
         # Qwen tokenizer unknown token id
         unk_id = self.tokenizer.unk_token_id
 
-        for token_name, token in candidate_tokens.items():
+        for _, token in candidate_tokens.items():
             token_id = self.tokenizer.convert_tokens_to_ids(token)
-            functional_token_ids[token_name] = token_id
             # token 不存在或被识别为 unk，视为需要添加
             if token_id is None or (unk_id is not None and token_id == unk_id):
                 tokens_to_add.append(token)
             # 如果token已存在，认为是兼容已预训练好的模型，无需报错也无需重新添加，兼容性处理
-            # 否则直接复用存在的token
 
         # 只有需要添加时才扩充tokenizer和embedding
         if len(tokens_to_add) > 0:
@@ -66,7 +62,14 @@ class MLLMBackbone(nn.Module):
             # NOTE: embedding resize 可能会导致新 token embedding 随机初始化。
             # 若继续微调，建议加入相关 embedding warmup 策略。
 
-        # 无论 token 是新加的还是已存在的，都返回其 id
+        # 必须在 add_special_tokens 之后重新读取 token_id，避免返回旧值/unk_id
+        functional_token_ids = dict()
+        for token_name, token in candidate_tokens.items():
+            token_id = self.tokenizer.convert_tokens_to_ids(token)
+            if token_id is None or (unk_id is not None and token_id == unk_id):
+                raise ValueError(f"功能 token 注册失败: name={token_name}, token={token}")
+            functional_token_ids[token_name] = int(token_id)
+
         return functional_token_ids
 
     def _build_qwen_model(self, config: MLLMConfigs):

@@ -13,12 +13,12 @@ logger = logging.getLogger(__name__)
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = -200
 DEFAULT_IMAGE_TOKEN = "<image>"
-DEFAULT_IMAGE_PATCH_TOKEN = "<im_patch>"
+DEFAULT_IMAGE_PATCH_TOKEN = "<image_pad>"
 DEFAULT_IM_START_TOKEN = "<im_start>"
 DEFAULT_IM_END_TOKEN = "<im_end>"
 
 # 点云相关常量
-DEFAULT_PC_TOKEN = "<point_cloud>"
+DEFAULT_PC_TOKEN = "<pointcloud>"
 DEFAULT_PC_START_TOKEN = "<pc_start>"
 DEFAULT_PC_END_TOKEN = "<pc_end>"
 
