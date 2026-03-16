@@ -256,7 +256,9 @@ class JointAffordanceModel(nn.Module):
             # ---- 3. 2D 图像分割 ----
             image_embeddings = self.image_decoder.get_visual_embs(images)
             input_size = (images.shape[-2], images.shape[-1])
-            original_size = tuple(original_size_list[0]) if original_size_list else input_size
+            # 训练时 decoder 输出需与 img_gt_tensor 一致（均为 padding 后的 input_size）
+            # 推理保存时再按 original_size_list 缩放还原
+            original_size = input_size
 
             all_image_logits = self.image_decoder(image_pred_emb, image_embeddings, input_size, original_size)
 

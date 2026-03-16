@@ -292,8 +292,8 @@ def main():
     logger.info("加载数据集...")
     data_objects = [None, None, None]
     if local_rank == 0:
-        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json')
-        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json')
+        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json').load_all_data()
+        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json').load_all_data()
         train_samples_local = train_data.samples
         val_samples_local = val_data.samples
         pair_token_map = {}
