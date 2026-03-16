@@ -1432,9 +1432,7 @@ class SplitManager:
                     n_total = len(unique_ids)
                     assert test_ratio > 0 and val_ratio > 0, "test_ratio 和 val_ratio 不能为0"
                     if n_total <= 20:
-                        warnings.warn(f"{obj_type_name}-{aff_type_name} 样本数量过少: {n_total}，只训练不评估")
-                        # 跳过该数据并删除ids记录
-                        del groups[obj_type_name][aff_type_name]
+                        print(f"{obj_type_name}-{aff_type_name} 样本数量过少: {n_total}，跳过该数据")
                         continue
                     else:
                         n_test = max(5, int(round(n_total * test_ratio)))
