@@ -414,8 +414,8 @@ class PointCloud(Modality):
                 if target_ids_dict:
                     files_id_to_load = set()
                     for _aff, target_ids in target_ids_dict.get(obj_type_name, {}).items():
-                        for target_id, mask_id in target_ids:
-                            files_id_to_load.add(target_id)
+                        for entry in target_ids:
+                            files_id_to_load.add(entry)
                     files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in sorted(files_id_to_load)]
                 else:
                     files_to_load = [f for f in os.listdir(dir_path) if f.endswith('.csv')]
@@ -1431,10 +1431,14 @@ class SplitManager:
                     unique_ids = _apply_sampling(unique_ids, n_total, obj_type_name, aff_type_name)
                     n_total = len(unique_ids)
                     assert test_ratio > 0 and val_ratio > 0, "test_ratio 和 val_ratio 不能为0"
-                    if n_total <= 10:
+                    if n_total <= 20:
                         warnings.warn(f"{obj_type_name}-{aff_type_name} 样本数量过少: {n_total}，只训练不评估")
-                        n_test = 0
-                        n_val = 0
+                        # 跳过该数据并删除ids记录
+                        del groups[obj_type_name][aff_type_name]
+                        del train_ids[obj_type_name][aff_type_name]
+                        del val_ids[obj_type_name][aff_type_name]
+                        del test_ids[obj_type_name][aff_type_name]
+                        continue
                     else:
                         n_test = max(5, int(round(n_total * test_ratio)))
                         n_val = max(5, int(round(n_total * val_ratio)))
@@ -1533,20 +1537,55 @@ class SplitManager:
                     for k in keys_to_remove:
                         del split_data[t][m][obj_type_name][k]
 
+        def _normalize_pc_to_ids(entries):
+            """PointCloud 与 Image 一致，只保存 id，不保存 index。"""
+            return [e[0] if isinstance(e, (list, tuple)) and len(e) > 0 else e for e in entries]
+
+        def _dump_split_part(part: dict, f) -> None:
+            """将分割 JSON 写入文件，每个 aff 的 ids 列表保持在同一行。"""
+            lines = ['{']
+            mod_items = [(k, v) for k, v in part.items() if v]
+            for mod_i, (mod_name, mod_data) in enumerate(mod_items):
+                obj_items = [(k, {a: v for a, v in aff_map.items() if v}) for k, aff_map in mod_data.items()]
+                obj_items = [(k, v) for k, v in obj_items if v]
+                if not obj_items:
+                    continue
+                lines.append(f'  "{mod_name}": {{')
+                for obj_i, (obj_name, obj_data) in enumerate(obj_items):
+                    lines.append(f'    "{obj_name}": {{')
+                    aff_items = [(a, lst) for a, lst in obj_data.items() if lst]
+                    for aff_i, (aff_name, aff_list) in enumerate(aff_items):
+                        ids_str = json.dumps(aff_list, ensure_ascii=False)
+                        comma = ',' if aff_i < len(aff_items) - 1 else ''
+                        lines.append(f'      "{aff_name}": {ids_str}{comma}')
+                    obj_comma = ',' if obj_i < len(obj_items) - 1 else ''
+                    lines.append(f'    }}{obj_comma}')
+                mod_comma = ',' if mod_i < len(mod_items) - 1 else ''
+                lines.append(f'  }}{mod_comma}')
+            lines.append('}')
+            f.write('\n'.join(lines))
+
         def save_split_json(save_dir: str):
             save_dir = os.path.abspath(save_dir)
             os.makedirs(save_dir, exist_ok=True)
             with open(os.path.join(save_dir, 'metadata.json'), 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, ensure_ascii=False, indent=2)
             for name, ids in [('train', train_ids), ('val', val_ids), ('test', test_ids)]:
-                part = {k: ids[k] for k in ('Instruction', 'Image', 'PointCloud')}
-                for m in list(part.keys()):
-                    for obj in list(part[m].keys()):
-                        keys_to_remove = [k for k in part[m][obj].keys() if not part[m][obj][k]]
-                        for k in keys_to_remove:
-                            del part[m][obj][k]
+                part = {}
+                for k in ('Instruction', 'Image', 'PointCloud'):
+                    mod_data = ids.get(k, {})
+                    part[k] = {}
+                    for obj, aff_map in mod_data.items():
+                        part[k][obj] = {}
+                        for aff, entries in aff_map.items():
+                            if not entries:
+                                continue
+                            if k == 'PointCloud':
+                                part[k][obj][aff] = _normalize_pc_to_ids(entries)
+                            else:
+                                part[k][obj][aff] = list(entries)
                 with open(os.path.join(save_dir, f'{name}.json'), 'w', encoding='utf-8') as f:
-                    json.dump(part, f, ensure_ascii=False, indent=2)
+                    _dump_split_part(part, f)
             print(f"分割结果已保存至: {save_dir} (metadata.json, train.json, val.json, test.json)")
 
         save_split_json(self.dataset_root)
@@ -1663,6 +1702,20 @@ class JointDataset:
                     seen_img.add(key)
                     normalized_img_ids.append(img_id)
                 aff_map[aff_name] = normalized_img_ids
+
+        for _, aff_map in sample_ids.get("pc", {}).items():
+            for aff_name, entries in list(aff_map.items()):
+                normalized_pc_ids = []
+                seen_pc = set()
+                for entry in entries:
+                    pc_id = entry[0] if isinstance(entry, (list, tuple)) and len(entry) > 0 else entry
+                    pc_id = _to_int(pc_id)
+                    key = str(pc_id)
+                    if key in seen_pc:
+                        continue
+                    seen_pc.add(key)
+                    normalized_pc_ids.append(pc_id)
+                aff_map[aff_name] = normalized_pc_ids
         return sample_ids
 
     def load_all_data(self, filter_by_ids=None):

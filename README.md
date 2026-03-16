@@ -77,7 +77,7 @@ dataset_root/
 
 - `Instruction`: `{obj_type: {aff_type: [ins_id, ...]}}`
 - `Image`: `{obj_type: {aff_type: [img_id, ...]}}`（或旧格式 `[[img_id, img_mask_idx], ...]`）
-- `PointCloud`: `{obj_type: {aff_type: [[pc_id, mask_idx], ...]}}`（或新格式 `[pc_id, ...]`）
+- `PointCloud`: `{obj_type: {aff_type: [pc_id, ...]}}`（与 Image 一致，仅保存 id）
 
 说明：
 
