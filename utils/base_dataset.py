@@ -7,6 +7,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import random
+import shutil
 import warnings
 from tqdm import tqdm
 import json
@@ -413,8 +414,8 @@ class PointCloud(Modality):
                 if target_ids_dict:
                     files_id_to_load = set()
                     for _aff, target_ids in target_ids_dict.get(obj_type_name, {}).items():
-                        for target_id, mask_id in target_ids:
-                            files_id_to_load.add(target_id)
+                        for entry in target_ids:
+                            files_id_to_load.add(entry)
                     files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in sorted(files_id_to_load)]
                 else:
                     files_to_load = [f for f in os.listdir(dir_path) if f.endswith('.csv')]
@@ -1331,64 +1332,326 @@ class JointDataSample:
         }
 
 
+class SplitManager:
+    """数据集分割管理器。从已加载的 Instruction/Image/PointCloud 构建 train/val/test，保存为 metadata.json、train.json、val.json、test.json。
+    可选：将分割后的源文件复制到指定目录。"""
+
+    def __init__(self, dataset_root: str):
+        self.dataset_root = os.path.abspath(dataset_root)
+
+    def split(
+        self,
+        train_ratio: float = None,
+        val_ratio: float = None,
+        test_ratio: float = None,
+        sample_rate: float = None,
+        max_sample_per_group: int = None,
+        min_sample_per_group: int = 10,
+        random_seed: int = 114514,
+        balance_data: bool = False,
+        copy_to: Optional[str] = None,
+        obj_type: Optional[List[str]] = None,
+        aff_type: Optional[List[str]] = None,
+        keep_id: bool = True,
+    ) -> Tuple['JointDataset', 'JointDataset', 'JointDataset']:
+        """
+        从已加载的 Instruction/Image/PointCloud 构建 train/val/test 并保存 JSON。
+
+        Args:
+            train_ratio, val_ratio, test_ratio: 分割比例
+            sample_rate: 采样率 (0~1)，None 表示不采样
+            max_sample_per_group: 每组最大采样数
+            min_sample_per_group: 每组最小保留数
+            random_seed: 随机种子
+            balance_data: 是否平衡数据
+            copy_to: 若指定，将分割后的源文件复制到该目录，并保存 split_file 至该目录
+            obj_type, aff_type, keep_id: 传递给返回的 JointDataset
+
+        Returns:
+            (train_dataset, val_dataset, test_dataset)
+        """
+        random.seed(random_seed)
+        ratios = [train_ratio, val_ratio, test_ratio]
+        if any(r is not None for r in ratios):
+            none_count = sum(1 for r in ratios if r is None)
+            assert none_count < 2, "只允许一个比例为 None"
+            if none_count == 1:
+                idx_none = ratios.index(None)
+                rest = 1.0 - sum(r for r in ratios if r is not None)
+                assert rest > 0, "分割比例不合理，剩余比例需大于0"
+                if idx_none == 0:
+                    train_ratio = rest
+                elif idx_none == 1:
+                    val_ratio = rest
+                else:
+                    test_ratio = rest
+            assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
+                f"比例之和必须为 1.0，当前为 {train_ratio + val_ratio + test_ratio}"
+
+        text_image_pairs = defaultdict(lambda: defaultdict(list))
+        for obj_type_name in tqdm(Instruction.all.keys(), desc="构建图文对"):
+            for inst in Instruction.all[obj_type_name]:
+                matched_image = Image.get_by_id(obj_type_name, inst.id)
+                if matched_image and inst.aff_type in matched_image.aff_mask_dict:
+                    pair = (inst.id, matched_image.id)
+                    text_image_pairs[obj_type_name][inst.aff_type].append(pair)
+
+        pc_groups = defaultdict(lambda: defaultdict(list))
+        for obj_type_name, pcs in PointCloud.all.items():
+            for pc in pcs:
+                if pc is None or not pc.aff_mask_dict:
+                    continue
+                for idx, label in enumerate(pc.get_aff_types()):
+                    pc_groups[obj_type_name][label].append(((pc.id, idx),))
+
+        train_ids = create_info_dict()
+        val_ids = create_info_dict()
+        test_ids = create_info_dict()
+
+        def _apply_sampling(unique_ids: list, n_total: int, obj_type_name: str, aff_type_name: str) -> list:
+            if sample_rate is None:
+                return unique_ids
+            group_seed = hash((obj_type_name, aff_type_name, random_seed)) % (2 ** 32)
+            rng = random.Random(group_seed)
+            n_target = max(min_sample_per_group, int(round(n_total * sample_rate)))
+            if max_sample_per_group is not None:
+                n_target = min(n_target, max_sample_per_group)
+            n_target = min(n_target, n_total)
+            return rng.sample(unique_ids, n_target)
+
+        def _split_group(groups, inner):
+            nonlocal train_ids, val_ids, test_ids
+            for obj_type_name in groups.keys():
+                for aff_type_name, inner_ids in groups[obj_type_name].items():
+                    if not inner_ids:
+                        continue
+                    unique_ids = list(set(inner_ids))
+                    random.shuffle(unique_ids)
+                    n_total = len(unique_ids)
+                    unique_ids = _apply_sampling(unique_ids, n_total, obj_type_name, aff_type_name)
+                    n_total = len(unique_ids)
+                    assert test_ratio > 0 and val_ratio > 0, "test_ratio 和 val_ratio 不能为0"
+                    if n_total <= 20:
+                        print(f"{obj_type_name}-{aff_type_name} 样本数量过少: {n_total}，跳过该数据")
+                        continue
+                    else:
+                        n_test = max(5, int(round(n_total * test_ratio)))
+                        n_val = max(5, int(round(n_total * val_ratio)))
+                    if n_test + n_val >= n_total:
+                        overflow = n_test + n_val - (n_total - 10)
+                        while overflow > 0 and (n_val > 0 or n_test > 0):
+                            if n_val >= n_test and n_val > 0:
+                                n_val -= 1
+                            elif n_test > 0:
+                                n_test -= 1
+                            overflow -= 1
+                    test_list = unique_ids[:n_test]
+                    val_list = unique_ids[n_test:n_test + n_val]
+                    train_list = unique_ids[n_test + n_val:]
+                    for idx, modality in enumerate(inner):
+                        train_ids[modality][obj_type_name][aff_type_name] = [e[idx] for e in train_list]
+                        val_ids[modality][obj_type_name][aff_type_name] = [e[idx] for e in val_list]
+                        test_ids[modality][obj_type_name][aff_type_name] = [e[idx] for e in test_list]
+
+        _split_group(text_image_pairs, ('ins', 'img'))
+        _split_group(pc_groups, ('pc',))
+
+        train_dataset = JointDataset(
+            dataset_root=self.dataset_root,
+            sample_ids=train_ids,
+            obj_type=obj_type,
+            aff_type=aff_type,
+            keep_id=keep_id,
+            balance_data=balance_data,
+        )
+        val_dataset = JointDataset(
+            dataset_root=self.dataset_root,
+            sample_ids=val_ids,
+            obj_type=obj_type,
+            aff_type=aff_type,
+            keep_id=keep_id,
+            balance_data=balance_data,
+        )
+        test_dataset = JointDataset(
+            dataset_root=self.dataset_root,
+            sample_ids=test_ids,
+            obj_type=obj_type,
+            aff_type=aff_type,
+            keep_id=keep_id,
+            balance_data=balance_data,
+        )
+
+        def _collect_obj_aff_counts(split_ids):
+            split_counts = {}
+            for modality in ("Instruction", "Image", "PointCloud"):
+                modality_counts = {"total": 0}
+                modality_ids = split_ids.get(modality, {})
+                for obj_type_name, aff_map in modality_ids.items():
+                    obj_counts = {"total": 0}
+                    for aff_type_name, entries in aff_map.items():
+                        obj_counts[aff_type_name] = len(entries)
+                        obj_counts["total"] += len(entries)
+                    modality_counts[obj_type_name] = obj_counts
+                    modality_counts["total"] += obj_counts["total"]
+                split_counts[modality] = modality_counts
+            return split_counts
+
+        metadata = {
+            'total_sample': len(train_dataset) + len(val_dataset) + len(test_dataset),
+            'train_sample': len(train_dataset),
+            'val_sample': len(val_dataset),
+            'test_sample': len(test_dataset),
+            'train_ratio': train_ratio,
+            'val_ratio': val_ratio,
+            'test_ratio': test_ratio,
+            'random_seed': random_seed,
+            'obj_aff_count_by_split': {
+                'train': _collect_obj_aff_counts(train_ids),
+                'val': _collect_obj_aff_counts(val_ids),
+                'test': _collect_obj_aff_counts(test_ids),
+            },
+        }
+        if sample_rate is not None:
+            metadata['sample_rate'] = sample_rate
+            metadata['max_sample_per_group'] = max_sample_per_group
+            metadata['min_sample_per_group'] = min_sample_per_group
+        split_data = {
+            'metadata': metadata,
+            'train': {k: train_ids[k] for k in ('Instruction', 'Image', 'PointCloud')},
+            'val': {k: val_ids[k] for k in ('Instruction', 'Image', 'PointCloud')},
+            'test': {k: test_ids[k] for k in ('Instruction', 'Image', 'PointCloud')}
+        }
+
+        for t in split_data.keys():
+            if t == 'metadata':
+                continue
+            for m in split_data[t].keys():
+                for obj_type_name in list(split_data[t][m].keys()):
+                    keys_to_remove = [k for k in split_data[t][m][obj_type_name].keys()
+                                    if not split_data[t][m][obj_type_name][k]]
+                    for k in keys_to_remove:
+                        del split_data[t][m][obj_type_name][k]
+
+        def _normalize_pc_to_ids(entries):
+            """PointCloud 与 Image 一致，只保存 id，不保存 index。"""
+            return [e[0] if isinstance(e, (list, tuple)) and len(e) > 0 else e for e in entries]
+
+        def _dump_split_part(part: dict, f) -> None:
+            """将分割 JSON 写入文件，每个 aff 的 ids 列表保持在同一行。"""
+            lines = ['{']
+            mod_items = [(k, v) for k, v in part.items() if v]
+            for mod_i, (mod_name, mod_data) in enumerate(mod_items):
+                obj_items = [(k, {a: v for a, v in aff_map.items() if v}) for k, aff_map in mod_data.items()]
+                obj_items = [(k, v) for k, v in obj_items if v]
+                if not obj_items:
+                    continue
+                lines.append(f'  "{mod_name}": {{')
+                for obj_i, (obj_name, obj_data) in enumerate(obj_items):
+                    lines.append(f'    "{obj_name}": {{')
+                    aff_items = [(a, lst) for a, lst in obj_data.items() if lst]
+                    for aff_i, (aff_name, aff_list) in enumerate(aff_items):
+                        ids_str = json.dumps(aff_list, ensure_ascii=False)
+                        comma = ',' if aff_i < len(aff_items) - 1 else ''
+                        lines.append(f'      "{aff_name}": {ids_str}{comma}')
+                    obj_comma = ',' if obj_i < len(obj_items) - 1 else ''
+                    lines.append(f'    }}{obj_comma}')
+                mod_comma = ',' if mod_i < len(mod_items) - 1 else ''
+                lines.append(f'  }}{mod_comma}')
+            lines.append('}')
+            f.write('\n'.join(lines))
+
+        def save_split_json(save_dir: str):
+            save_dir = os.path.abspath(save_dir)
+            os.makedirs(save_dir, exist_ok=True)
+            with open(os.path.join(save_dir, 'metadata.json'), 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, ensure_ascii=False, indent=2)
+            for name, ids in [('train', train_ids), ('val', val_ids), ('test', test_ids)]:
+                part = {}
+                for k in ('Instruction', 'Image', 'PointCloud'):
+                    mod_data = ids.get(k, {})
+                    part[k] = {}
+                    for obj, aff_map in mod_data.items():
+                        part[k][obj] = {}
+                        for aff, entries in aff_map.items():
+                            if not entries:
+                                continue
+                            if k == 'PointCloud':
+                                part[k][obj][aff] = _normalize_pc_to_ids(entries)
+                            else:
+                                part[k][obj][aff] = list(entries)
+                with open(os.path.join(save_dir, f'{name}.json'), 'w', encoding='utf-8') as f:
+                    _dump_split_part(part, f)
+            print(f"分割结果已保存至: {save_dir} (metadata.json, train.json, val.json, test.json)")
+
+        save_split_json(self.dataset_root)
+
+        if copy_to is not None:
+            copy_to_abs = os.path.abspath(copy_to)
+            os.makedirs(copy_to_abs, exist_ok=True)
+            train_dataset.copy_to(os.path.join(copy_to_abs, 'train'))
+            val_dataset.copy_to(os.path.join(copy_to_abs, 'val'))
+            test_dataset.copy_to(os.path.join(copy_to_abs, 'test'))
+            save_split_json(copy_to_abs)
+
+        return train_dataset, val_dataset, test_dataset
+
+
 class JointDataset:
-    """聚合 Instruction、Image、PointCloud 三元组的数据集类"""
-    
-    def __init__(self, 
+    """聚合 Instruction、Image、PointCloud 三元组的数据集类。作为 train/val/test 子集使用时，通过 split_file 指定分割 JSON 文件名独立加载。"""
+
+    def __init__(self,
                  dataset_root: str,
-                 sample_ids = None,
+                 sample_ids=None,
                  obj_type: list[str] = None,
                  aff_type: list[str] = None,
                  keep_id: bool = True,
                  balance_data: bool = False,
-                 dtype: Optional[str] = None):
+                 split_file: Optional[str] = None):
         """
-        初始化数据集，不加载数据！！
-        
+        初始化数据集。
+
         Args:
             dataset_root: 数据集根目录
+            sample_ids: 可选，已有的样本 ID 结构；若为 None 且 split_file 指定，则从 split_file 加载
             obj_type: 需要加载的物体类型列表，None 时加载所有
             aff_type: 需要加载的 affordance 类型列表，None 时加载所有
             keep_id: 是否保持原有的 id
-            balance_data: 是否平衡数据（当点云/图文对数量不一致时，复制较少的数据）
-            dtype: 指定加载的分割（train/val/test），None 表示全量
+            balance_data: 是否平衡数据（不建议启用）
+            split_file: 分割 JSON 文件名，如 'train.json'、'val.json'、'test.json'。指定时从该文件加载 sample_ids 并自动执行 load_all_data
         """
-        
         self.dataset_root = os.path.abspath(dataset_root)
         self.obj_type = obj_type
         self.aff_type = aff_type
         self.keep_id = keep_id
+        self.split_file = split_file
 
-        self.dtype = dtype.lower() if dtype is not None else None
-
-        # 配置ids
-        if sample_ids is None:
-            if self.dtype is not None:
-                self.sample_ids = JointDataset.load_ids_from_json(os.path.join(self.dataset_root, 'dataset_split.json'), self.dtype)
+        if sample_ids is not None:
+            self.sample_ids = sample_ids
+        elif split_file is not None:
+            split_path = os.path.join(self.dataset_root, split_file)
+            if os.path.exists(split_path):
+                self.sample_ids = JointDataset.load_ids_from_split_file(split_path)
             else:
                 self.sample_ids = create_info_dict()
         else:
-            self.sample_ids = sample_ids
-        
+            self.sample_ids = create_info_dict()
         assert not balance_data, "balance_data 不建议启用，容易引起数据分布的改变从而影响模型的训练和评估"
         if balance_data: self.balance_data()
             
         self.samples = []
+
     
     @staticmethod
-    def load_ids_from_json(split_json_path: str, dataset_types: list[str]):
+    def load_ids_from_split_file(split_json_path: str):
+        """从单个分割文件（train.json/val.json/test.json）加载 sample_ids，文件内容为 {Instruction, Image, PointCloud} 结构。"""
         if not os.path.exists(split_json_path):
             raise FileNotFoundError(f"分割JSON文件不存在: {split_json_path}")
-        
-        # 加载JSON文件
         with open(split_json_path, 'r', encoding='utf-8') as f:
-            split_data = json.load(f)
+            data = json.load(f)
+        return JointDataset._normalize_split_ids(data)
 
-        if isinstance(dataset_types, str):
-            dataset_types_list = [dataset_types]
-        else:
-            dataset_types_list = dataset_types
-        
+    @staticmethod
+    def _normalize_split_ids(sample_ids):
         def _to_int(value):
             try:
                 return int(value)
@@ -1406,52 +1669,55 @@ class JointDataset:
                 deduped.append(entry)
             return deduped
 
-        def _normalize_split_ids(sample_ids):
-            sample_ids['ins'] = sample_ids.get('Instruction', {})
-            sample_ids['img'] = sample_ids.get('Image', {})
-            sample_ids['pc'] = sample_ids.get('PointCloud', {})
+        sample_ids = dict(sample_ids)
+        sample_ids['ins'] = sample_ids.get('Instruction', sample_ids.get('ins', {}))
+        sample_ids['img'] = sample_ids.get('Image', sample_ids.get('img', {}))
+        sample_ids['pc'] = sample_ids.get('PointCloud', sample_ids.get('pc', {}))
 
-            for modality in ("ins", "img", "pc"):
-                for _, aff_map in sample_ids.get(modality, {}).items():
-                    for aff_name, entries in aff_map.items():
-                        aff_map[aff_name] = _dedup_entries(entries)
+        for modality in ("ins", "img", "pc"):
+            for _, aff_map in sample_ids.get(modality, {}).items():
+                for aff_name, entries in list(aff_map.items()):
+                    aff_map[aff_name] = _dedup_entries(entries)
 
-            # Image 支持新格式 [img_id] 与旧格式 [[img_id, idx], ...]，统一为 img_id
-            for _, aff_map in sample_ids.get("img", {}).items():
-                for aff_name, entries in aff_map.items():
-                    normalized_img_ids = []
-                    seen_img = set()
-                    for entry in entries:
-                        if isinstance(entry, (list, tuple)):
-                            if len(entry) == 0:
-                                continue
-                            img_id = _to_int(entry[0])
-                        else:
-                            img_id = _to_int(entry)
-                        key = str(img_id)
-                        if key in seen_img:
+        for _, aff_map in sample_ids.get("img", {}).items():
+            for aff_name, entries in list(aff_map.items()):
+                normalized_img_ids = []
+                seen_img = set()
+                for entry in entries:
+                    if isinstance(entry, (list, tuple)):
+                        if len(entry) == 0:
                             continue
-                        seen_img.add(key)
-                        normalized_img_ids.append(img_id)
-                    aff_map[aff_name] = normalized_img_ids
-            return sample_ids
+                        img_id = _to_int(entry[0])
+                    else:
+                        img_id = _to_int(entry)
+                    key = str(img_id)
+                    if key in seen_img:
+                        continue
+                    seen_img.add(key)
+                    normalized_img_ids.append(img_id)
+                aff_map[aff_name] = normalized_img_ids
 
-        res = []
-        for dtype in dataset_types_list:
-            sample_ids = split_data.get(dtype, create_info_dict())
-            res.append(_normalize_split_ids(sample_ids))
-        
-        if isinstance(dataset_types, str):
-            return res[0]
-        else:
-            return res
+        for _, aff_map in sample_ids.get("pc", {}).items():
+            for aff_name, entries in list(aff_map.items()):
+                normalized_pc_ids = []
+                seen_pc = set()
+                for entry in entries:
+                    pc_id = entry[0] if isinstance(entry, (list, tuple)) and len(entry) > 0 else entry
+                    pc_id = _to_int(pc_id)
+                    key = str(pc_id)
+                    if key in seen_pc:
+                        continue
+                    seen_pc.add(key)
+                    normalized_pc_ids.append(pc_id)
+                aff_map[aff_name] = normalized_pc_ids
+        return sample_ids
 
     def load_all_data(self, filter_by_ids=None):
         """加载 Instruction、Image、PointCloud 数据"""
         import threading
-
-        if filter_by_ids is None:
-            filter_by_ids = self.sample_ids
+        
+        if filter_by_ids is None and self.split_file is not None:
+            filter_by_ids=self.sample_ids
         
         def load_pc_wrapper():
             target_ids_dict = filter_by_ids['pc'] if filter_by_ids is not None else None
@@ -1484,7 +1750,93 @@ class JointDataset:
 
         print("所有数据加载完成")
         return self
-          
+
+    def copy_to(self, output_dir: str):
+        """将当前 sample_ids 对应的源文件复制到指定目录，保持原有目录结构。"""
+        output_dir = os.path.abspath(output_dir)
+        os.makedirs(output_dir, exist_ok=True)
+
+        def _collect_ids_per_obj(split_ids):
+            ins_ids = defaultdict(set)
+            img_ids = defaultdict(set)
+            pc_ids = defaultdict(set)
+            for modality, key in [('Instruction', 'ins'), ('Image', 'img'), ('PointCloud', 'pc')]:
+                mod_data = split_ids.get(modality, split_ids.get(key, {}))
+                for obj_type_name, aff_map in mod_data.items():
+                    for aff_type_name, entries in aff_map.items():
+                        for entry in entries:
+                            if modality == 'PointCloud':
+                                pc_id = entry[0] if isinstance(entry, (list, tuple)) else entry
+                                pc_ids[obj_type_name].add(pc_id)
+                            elif modality == 'Instruction':
+                                ins_ids[obj_type_name].add(int(entry))
+                            else:
+                                img_id = entry[0] if isinstance(entry, (list, tuple)) else int(entry)
+                                img_ids[obj_type_name].add(img_id)
+            return ins_ids, img_ids, pc_ids
+
+        all_ins, all_img, all_pc = _collect_ids_per_obj(self.sample_ids)
+
+        for obj_type_name in tqdm(set(all_ins.keys()) | set(all_img.keys()) | set(all_pc.keys()), desc="复制源文件"):
+            obj_dir = os.path.join(self.dataset_root, obj_type_name)
+            out_obj_dir = os.path.join(output_dir, obj_type_name)
+            if not os.path.isdir(obj_dir):
+                continue
+
+            if obj_type_name in all_ins:
+                ins_csv = os.path.join(obj_dir, 'Instruction.csv')
+                if os.path.exists(ins_csv):
+                    ids_to_keep = all_ins[obj_type_name]
+                    os.makedirs(out_obj_dir, exist_ok=True)
+                    out_ins = os.path.join(out_obj_dir, 'Instruction.csv')
+                    with open(ins_csv, 'r', newline='', encoding='utf-8') as f_in:
+                        reader = csv.DictReader(f_in)
+                        fieldnames = reader.fieldnames
+                        rows = [r for r in reader if int(r.get('id', -1)) in ids_to_keep]
+                    if rows:
+                        with open(out_ins, 'w', newline='', encoding='utf-8') as f_out:
+                            writer = csv.DictWriter(f_out, fieldnames=fieldnames)
+                            writer.writeheader()
+                            writer.writerows(rows)
+
+            if obj_type_name in all_img:
+                img_dir = os.path.join(obj_dir, 'Image')
+                out_img_dir = os.path.join(out_obj_dir, 'Image')
+                if os.path.isdir(img_dir):
+                    for img_id in all_img[obj_type_name]:
+                        rgb_dir = os.path.join(img_dir, 'rgb')
+                        if os.path.isdir(rgb_dir):
+                            for ext in ('.png', '.jpg', '.jpeg'):
+                                src = os.path.join(rgb_dir, f'{obj_type_name}_{img_id}{ext}')
+                                if os.path.exists(src):
+                                    dst_dir = os.path.join(out_img_dir, 'rgb')
+                                    os.makedirs(dst_dir, exist_ok=True)
+                                    shutil.copy2(src, os.path.join(dst_dir, os.path.basename(src)))
+                                    break
+                        mask_dir = os.path.join(img_dir, 'mask')
+                        if os.path.isdir(mask_dir):
+                            for aff_dir in os.listdir(mask_dir):
+                                aff_path = os.path.join(mask_dir, aff_dir)
+                                if os.path.isdir(aff_path):
+                                    for f in os.listdir(aff_path):
+                                        if f.startswith(f'{obj_type_name}_{img_id}_'):
+                                            src = os.path.join(aff_path, f)
+                                            dst_dir = os.path.join(out_img_dir, 'mask', aff_dir)
+                                            os.makedirs(dst_dir, exist_ok=True)
+                                            shutil.copy2(src, os.path.join(dst_dir, f))
+
+            if obj_type_name in all_pc:
+                pc_dir = os.path.join(obj_dir, 'PointCloud')
+                out_pc_dir = os.path.join(out_obj_dir, 'PointCloud')
+                if os.path.isdir(pc_dir):
+                    os.makedirs(out_pc_dir, exist_ok=True)
+                    for pc_id in all_pc[obj_type_name]:
+                        src = os.path.join(pc_dir, f'{obj_type_name}_{pc_id}.csv')
+                        if os.path.exists(src):
+                            shutil.copy2(src, os.path.join(out_pc_dir, os.path.basename(src)))
+
+        print(f"源文件已复制至: {output_dir}")
+
     def pair_samples(self):
         """
         将单个分割集（train/val/test）的索引聚合成三元组
@@ -1673,312 +2025,6 @@ class JointDataset:
             
             yield batch_data
       
-    def split_dataset(self,
-            train_ratio: float = None, 
-            val_ratio: float = None, 
-            test_ratio: float = None,
-            # 采样设置
-            sample_rate: float = None,
-            max_sample_per_group: int = None,
-            min_sample_per_group: int = 10,
-            random_seed: int = 114514,
-            balance_data = False,
-        ):
-        """
-        分割自身数据为 train、val、test 并保存 json 文件，仅在加载全部数据时手动使用。
-
-        Args:
-            train_ratio, val_ratio, test_ratio: 分割比例
-            random_seed: 切分随机种子
-            sample_rate: 采样率 (0~1)，None 表示不采样、使用全量
-            max_sample_per_group: 每组 (obj_type, aff_type) 最大采样数，防止大组主导
-            min_sample_per_group: 每组最小保留数，避免小组被采空
-        """
-        random.seed(random_seed)
-        # 构建分割比例
-        ratios = [train_ratio, val_ratio, test_ratio]
-        if any(r is not None for r in ratios):
-            none_count = sum(1 for r in ratios if r is None)
-            assert none_count < 2, "只允许一个比例为 None"
-            if none_count == 1:
-                idx_none = ratios.index(None)
-                rest = 1.0 - sum(r for r in ratios if r is not None)
-                assert rest > 0, "分割比例不合理，剩余比例需大于0"
-                if idx_none == 0:
-                    train_ratio = rest
-                elif idx_none == 1:
-                    val_ratio = rest
-                else:
-                    test_ratio = rest
-            assert abs(train_ratio + val_ratio + test_ratio - 1.0) < 1e-6, \
-                f"比例之和必须为 1.0，当前为 {train_ratio + val_ratio + test_ratio}"
-            self.split_ratio = (train_ratio, val_ratio, test_ratio)
-
-        # 构建图文对（Instruction + Image）
-        # 结构: {obj_type: [(inst, img), ...]}
-        text_image_pairs = defaultdict(lambda: defaultdict(list))
-        for obj_type in tqdm(Instruction.all.keys(), desc="构建图文对"):
-            for inst in Instruction.all[obj_type]:
-                # 查找匹配的 Image（按 id 匹配）
-                matched_image = Image.get_by_id(obj_type, inst.id)
-                
-                # 一条指令只配对自己的 aff_type，避免跨 aff 扩增造成分割失衡
-                if matched_image and inst.aff_type in matched_image.aff_mask_dict:
-                    pair = (inst.id, matched_image.id)
-                    text_image_pairs[obj_type][inst.aff_type].append(pair)
-
-        # 按 obj_type 和 aff_type 分组点云
-        # 结构: {obj_type: {aff_type: [pc_ids]}}
-        pc_groups: Dict[str, Dict[str, List[int]]] = defaultdict(lambda: defaultdict(list))
-        
-        for obj_type, pcs in PointCloud.all.items():
-            for pc in pcs:
-                if pc is None or not pc.aff_mask_dict:
-                    continue
-                for idx, label in enumerate(pc.get_aff_types()):
-                    pc_groups[obj_type][label].append(((pc.id, idx),)) # 兼容图文对 _split_group
-        
-        
-        train_ids = create_info_dict()
-        val_ids = create_info_dict()
-        test_ids = create_info_dict()
-
-        def _apply_sampling(unique_ids: list, n_total: int, obj_type: str, aff_type: str) -> list:
-            """在按比例切分之前进行采样，返回采样后的 id 列表。"""
-            if sample_rate is None:
-                return unique_ids
-            # 每组使用不同但可复现的种子
-            group_seed = hash((obj_type, aff_type, random_seed)) % (2 ** 32)
-            rng = random.Random(group_seed)
-            # 计算目标采样数
-            n_target = max(min_sample_per_group, int(round(n_total * sample_rate)))
-            if max_sample_per_group is not None:
-                n_target = min(n_target, max_sample_per_group)
-            n_target = min(n_target, n_total)
-            return rng.sample(unique_ids, n_target)
-
-        def _split_group(groups, inner):
-            nonlocal train_ids, val_ids, test_ids
-            # 对每个分组进行分割
-            for obj_type in groups.keys():
-                for aff_type, inner_ids in groups[obj_type].items():
-                    if not inner_ids:
-                        continue
-                    
-                    # 去重并打乱
-                    unique_ids = list(set(inner_ids))
-                    random.shuffle(unique_ids)
-                    n_total = len(unique_ids)
-
-                    # 在按比例切分之前进行采样
-                    unique_ids = _apply_sampling(unique_ids, n_total, obj_type, aff_type)
-                    n_total = len(unique_ids)
-                    # 小样本组在 floor 下容易出现 val/test 近乎为空，这里做最小分配保护
-                    assert test_ratio > 0 and val_ratio > 0, "test_ratio 和 val_ratio 不能为0"
-                    if n_total <= 10:
-                        warnings.warn(f"{obj_type}-{aff_type} 样本数量过少: {n_total}，只训练不评估")
-                        n_test = 0
-                        n_val = 0
-                    else:
-                        n_test = max(5, int(round(n_total * test_ratio)))
-                        n_val = max(5, int(round(n_total * val_ratio)))
-
-                    # 防止 n_test + n_val 溢出，至少留 10 条给 train
-                    if n_test + n_val >= n_total:
-                        overflow = n_test + n_val - (n_total - 10)
-                        while overflow > 0 and (n_val > 0 or n_test > 0):
-                            if n_val >= n_test and n_val > 0:
-                                n_val -= 1
-                            elif n_test > 0:
-                                n_test -= 1
-                            overflow -= 1
-                    
-                    # 分割ID
-                    test_list = unique_ids[:n_test]
-                    val_list = unique_ids[n_test:n_test + n_val]
-                    train_list = unique_ids[n_test + n_val:]
-                    
-                    # 记录分割结果
-                    for idx, modality in enumerate(inner):
-                        train_ids[modality][obj_type][aff_type] = [e[idx] for e in train_list]
-                        val_ids[modality][obj_type][aff_type] =  [e[idx] for e in val_list]
-                        test_ids[modality][obj_type][aff_type] =  [e[idx] for e in test_list]
-
-        _split_group(text_image_pairs, ('ins', 'img'))
-        _split_group(pc_groups, ('pc',))
-
-
-        train_dataset = JointDataset(
-            dataset_root=self.dataset_root,
-            sample_ids=train_ids,
-            obj_type=self.obj_type,
-            aff_type=self.aff_type,
-            keep_id=self.keep_id,
-            balance_data=balance_data,
-            dtype='train'
-        )
-        val_dataset = JointDataset(
-            dataset_root=self.dataset_root,
-            sample_ids=val_ids,
-            obj_type=self.obj_type,
-            aff_type=self.aff_type,
-            keep_id=self.keep_id,
-            balance_data=balance_data,
-            dtype='val'
-        )
-        test_dataset = JointDataset(
-            dataset_root=self.dataset_root,
-            sample_ids=test_ids,
-            obj_type=self.obj_type,
-            aff_type=self.aff_type,
-            keep_id=self.keep_id,
-            balance_data=balance_data,
-            dtype='test'
-        )
-
-        def save_split_json() -> str:
-            """
-            将数据集分割结果保存为JSON文件
-            
-            保存格式:
-            {
-                "metadata": {
-                    "total_sample": 10000,
-                    "train_sample": 7500,
-                    "val_sample": 1500,
-                    "test_sample": 1000,
-                    "train_ratio": 0.7,
-                    "val_ratio": 0.15,
-                    "test_ratio": 0.15,
-                    "random_seed": 114514
-                },
-                "train": {
-                    'Instruction': {obj_type: {aff_type: [id1, id2, ...]}},
-                    'Image': {obj_type: {aff_type: [id1, id2, ...]}},
-                    'PointCloud': {obj_type: {aff_type: [(id, mask_idx), ...]}}
-                },
-                "val": {...},
-                "test": {...}
-            }
-            """
-            save_path = os.path.join(self.dataset_root, 'dataset_split.json')
-
-            obj_aff_count = defaultdict(lambda: defaultdict(int))
-            for sample in self.samples:
-                obj_aff_count[sample.obj_type][sample.aff_type] += 1
-
-            def _collect_obj_aff_counts(split_ids):
-                """
-                统计单个 split 中各模态的 {obj_type: {aff_type: count}}。
-                计数规则：以 id 列表长度计数
-                """
-                split_counts = {}
-                for modality in ("Instruction", "Image", "PointCloud"):
-                    modality_counts = {"total":0}
-                    modality_ids = split_ids.get(modality, {})
-                    for obj_type, aff_map in modality_ids.items():
-                        obj_counts = {"total":0}
-                        for aff_type, entries in aff_map.items():
-                            obj_counts[aff_type] = len(entries)
-                            obj_counts["total"] += len(entries)
-                        modality_counts[obj_type] = obj_counts
-                        modality_counts["total"] += obj_counts["total"]
-                    split_counts[modality] = modality_counts
-                return split_counts
-                    
-            # 构建JSON数据
-            metadata = {
-                'total_sample': len(train_dataset) + len(val_dataset) + len(test_dataset),
-                'train_sample': len(train_dataset),
-                'val_sample': len(val_dataset),
-                'test_sample': len(test_dataset),
-                'train_ratio': train_ratio,
-                'val_ratio': val_ratio,
-                'test_ratio': test_ratio,
-                'random_seed': random_seed,
-                'obj_aff_count': obj_aff_count,
-                'obj_aff_count_by_split': {
-                    'train': _collect_obj_aff_counts(train_ids),
-                    'val': _collect_obj_aff_counts(val_ids),
-                    'test': _collect_obj_aff_counts(test_ids),
-                },
-            }
-            if sample_rate is not None:
-                metadata['sample_rate'] = sample_rate
-                metadata['max_sample_per_group'] = max_sample_per_group
-                metadata['min_sample_per_group'] = min_sample_per_group
-            split_data = {
-                'metadata': metadata,
-                'train': {k: train_ids[k] for k in ('Instruction', 'Image', 'PointCloud')},
-                'val': {k: val_ids[k] for k in ('Instruction', 'Image', 'PointCloud')},
-                'test': {k: test_ids[k] for k in ('Instruction', 'Image', 'PointCloud')}
-            }
-
-            # 去除值为空的aff
-            for t in split_data.keys():
-                if t == 'metadata': continue
-                for m in split_data[t].keys():
-                    for obj_type in split_data[t][m].keys():
-                        keys_to_remove = []
-                        for aff_type in split_data[t][m][obj_type].keys():  # 不能同时遍历删除
-                            if not split_data[t][m][obj_type][aff_type]:
-                                keys_to_remove.append(aff_type)
-                        
-                        for k in keys_to_remove:
-                            del split_data[t][m][obj_type][k]
-
-            def get_compact_json(data):
-                json_str = json.dumps(data, indent=4)
-                
-                output = []
-                depth = 0        # 记录方括号嵌套深度
-                in_str = False   # 标记是否在字符串内部
-                escaped = False  # 标记转义字符
-
-                for char in json_str:
-                    # 处理字符串状态，防止误判字符串内的括号 (例如 "this is [a] test")
-                    if char == '"' and not escaped:
-                        in_str = not in_str
-                    
-                    if in_str:
-                        output.append(char)
-                        escaped = (char == '\\' and not escaped)
-                        continue
-
-                    # 核心逻辑：根据括号深度决定是否保留空白字符
-                    if char == '[':
-                        depth += 1
-                        output.append(char)
-                    elif char == ']':
-                        depth -= 1
-                        output.append(char)
-                    elif char == '\n':
-                        # 如果在列表内，丢弃换行符
-                        if depth == 0:
-                            output.append(char)
-                    elif char == ' ':
-                        # 如果在列表内，丢弃缩进空格
-                        # 但为了可读性，我们可以保留逗号后面的一个空格
-                        if depth == 0:
-                            output.append(char)
-                        elif output and output[-1] == ',':
-                            output.append(' ')
-                    else:
-                        output.append(char)
-
-                return "".join(output)
-
-            compact_json = get_compact_json(split_data)
-            with open(save_path, 'w', encoding='utf-8') as f:
-                f.write(compact_json)
-
-            
-            print(f"数据集分割结果已保存至: {save_path}")
-
-        save_split_json()
-
-        return train_dataset, val_dataset, test_dataset
-    
     def balance_data(self):
         # 平衡数据集中的 pc 和图文数据
         def _balance_by_copy(data_list: list, target_count: int) -> list:
@@ -2072,6 +2118,8 @@ def main():
                         help='保存数据集分割结果为JSON文件')
     parser.add_argument('--keep-id', action='store_true', default=True,
                         help='保持原有的ID（默认启用）')
+    parser.add_argument('--copy-to', type=str, default=None,
+                        help='分割后将源文件复制到指定目录，并保存 split_file 至该目录')
 
     # 渲染参数，和上述参数不共存
     parser.add_argument('-s', '--show', type=str, nargs='+', default=None,
@@ -2122,19 +2170,19 @@ def main():
         return
 
     elif args.dataset_root is not None:
-        # 创建数据集并加载
-        dataset = JointDataset(
-            dataset_root=args.dataset_root,
+        dataset_root = resolve_path(args.dataset_root)
+        # 加载全量数据
+        JointDataset(
+            dataset_root=dataset_root,
             obj_type=args.obj_type,
             aff_type=args.aff_type,
             keep_id=args.keep_id,
             balance_data=not args.no_balance,
-            dtype=None,
         ).load_all_data()
 
-        # 保存分割结果
+        # 使用 SplitManager 执行分割
         if args.save_split:
-            dataset.split_dataset(
+            SplitManager(dataset_root).split(
                 train_ratio=args.train_ratio,
                 val_ratio=args.val_ratio,
                 test_ratio=args.test_ratio,
@@ -2142,6 +2190,7 @@ def main():
                 sample_rate=args.sample_rate,
                 max_sample_per_group=args.max_sample_per_group,
                 min_sample_per_group=args.min_sample_per_group,
+                copy_to=args.copy_to,
             )
     else:
         parser.error("未使用 -s/--show 时需指定 -d/--dataset-root")

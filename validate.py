@@ -13,7 +13,7 @@ import csv
 import json
 import os
 from functools import partial
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -39,6 +39,7 @@ from utils.metrics import (
     compute_sample_metrics,
     log_epoch_summary,
 )
+from collections import defaultdict
 
 
 def parse_args():
@@ -100,8 +101,8 @@ def build_dataloader_for_split(
 
     joint_dataset = JointDataset(
         dataset_root=training_cfg.dataset_dir,
-        dtype=infer_cfg.split,
-    ).load_all_data()
+        split_file=f'{infer_cfg.split}.json',
+    )
     torch_dataset = JointAffordanceTorchDataset(
         joint_dataset.samples,
         processor=processor,
@@ -123,30 +124,6 @@ def build_dataloader_for_split(
     )
     return loader, torch_dataset, processor
 
-
-def _normalize_mask(mask_tensor: torch.Tensor) -> torch.Tensor:
-    mask = mask_tensor.detach().float()
-    if mask.dim() > 2:
-        mask = mask.squeeze()
-    if mask.max() > 1.0 or mask.min() < 0.0:
-        mask = mask.sigmoid()
-    return mask.clamp(0.0, 1.0)
-
-
-def _to_uint8_mask(mask_tensor: torch.Tensor) -> np.ndarray:
-    mask = _normalize_mask(mask_tensor)
-    return mask.mul(255.0).round().to(torch.uint8).cpu().numpy()
-
-
-def _to_float_mask(mask_tensor: torch.Tensor) -> np.ndarray:
-    return _normalize_mask(mask_tensor).cpu().numpy()
-
-
-def _save_pointcloud_csv(file_path: str, points: np.ndarray, mask: np.ndarray, label: str):
-    header = ["x", "y", "z", label]
-    data = np.concatenate([points, mask[:, None]], axis=1)
-    with open(file_path, "w") as f:
-        np.savetxt(f, data, delimiter=",", header=",".join(header))
 
 
 def save_batch_predictions(
@@ -187,6 +164,27 @@ def save_batch_predictions(
             return masks[index] if masks.shape[0] > index else None
         return None
 
+    def _normalize_mask(mask_tensor: torch.Tensor) -> torch.Tensor:
+        mask = mask_tensor.detach().float()
+        if mask.dim() > 2:
+            mask = mask.squeeze()
+        if mask.max() > 1.0 or mask.min() < 0.0:
+            mask = mask.sigmoid()
+        return mask.clamp(0.0, 1.0)
+
+    def _to_uint8_mask(mask_tensor: torch.Tensor) -> np.ndarray:
+        mask = _normalize_mask(mask_tensor)
+        return mask.mul(255.0).round().to(torch.uint8).cpu().numpy()
+
+    def _to_float_mask(mask_tensor: torch.Tensor) -> np.ndarray:
+        return _normalize_mask(mask_tensor).cpu().numpy()
+
+    def _save_pointcloud_csv(file_path: str, points: np.ndarray, mask: np.ndarray, label: str):
+        header = ["x", "y", "z", label]
+        data = np.concatenate([points, mask[:, None]], axis=1)
+        with open(file_path, "w") as f:
+            np.savetxt(f, data, delimiter=",", header=",".join(header))
+
     batch_size = _get_batch_size()
     if batch_size <= 0:
         return
@@ -200,23 +198,31 @@ def save_batch_predictions(
         aff_type = input_dict.get("aff_type")[i]
         sample_id = input_dict.get("sample_id")[i]
 
-        # 2D mask 保存（在保存前还原到原始图像尺寸）
+        # 2D mask 保存：仅当该样本有有效图像输入时保存
+        has_img = False
+        img_valid = input_dict.get("img_valid_mask")
+        if isinstance(img_valid, torch.Tensor) and img_valid.shape[0] > i:
+            has_img = bool(img_valid[i].item())
         pred_mask_2d = _extract_pred_mask("image_logits", i)
         images_tensor = input_dict.get("images")
-        if pred_mask_2d is not None and isinstance(images_tensor, torch.Tensor) and images_tensor.shape[0] > i:
+        if has_img and pred_mask_2d is not None and isinstance(images_tensor, torch.Tensor) and images_tensor.shape[0] > i:
             mask_2d = _to_uint8_mask(pred_mask_2d)
 
-            # 从 input_dict["images"] 还原 RGB，按 original_size_list 裁剪回原始尺寸
+            # 从 input_dict["images"] 还原 RGB，按 original_size_list 缩放到原始尺寸
+            # original_size_list 为 _build_sample 中 resize 前记录的原图 (H, W)，保证准确未篡改
             img_tensor = images_tensor[i].detach().float().cpu().clamp(0.0, 1.0)
-            orig_img = (img_tensor.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+            model_img = (img_tensor.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
             original_size_list = input_dict.get("original_size_list")
             if isinstance(original_size_list, (list, tuple)) and i < len(original_size_list):
                 orig_h, orig_w = map(int, original_size_list[i])
-                orig_h = max(1, min(orig_h, orig_img.shape[0]))
-                orig_w = max(1, min(orig_w, orig_img.shape[1]))
-                orig_img = orig_img[:orig_h, :orig_w]
+                orig_h, orig_w = max(1, orig_h), max(1, orig_w)
+                if (orig_h, orig_w) != model_img.shape[:2]:
+                    orig_img = cv2.resize(model_img, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+                else:
+                    orig_img = model_img
             else:
-                orig_h, orig_w = orig_img.shape[:2]
+                orig_h, orig_w = model_img.shape[0], model_img.shape[1]
+                orig_img = model_img
 
             if mask_2d.ndim == 3:
                 # 如果是 (C, H, W) 或 (H, W, C)，先取单通道
@@ -242,9 +248,13 @@ def save_batch_predictions(
             mask_path = os.path.join(mask_dir, f"{obj_type}_{sample_id}_{aff_type}.png")
             cv2.imwrite(mask_path, mask_2d)
 
-        # 3D mask 保存
+        # 3D mask 保存：仅当该样本有有效点云输入时保存
+        has_pc = False
+        pc_lengths = input_dict.get("pc_valid_lengths")
+        if isinstance(pc_lengths, torch.Tensor) and pc_lengths.shape[0] > i:
+            has_pc = int(pc_lengths[i].item()) > 0
         pred_mask_3d = _extract_pred_mask("point_logits", i)
-        if pred_mask_3d is not None:
+        if has_pc and pred_mask_3d is not None:
             points = None
             pc_tensor = input_dict.get("point_clouds")
             if isinstance(pc_tensor, torch.Tensor) and pc_tensor.shape[0] > i:
@@ -273,6 +283,119 @@ def save_batch_predictions(
             os.makedirs(pc_dir, exist_ok=True)
             pc_path = os.path.join(pc_dir, f"{obj_type}_{sample_id}.csv")
             _save_pointcloud_csv(pc_path, points, mask_3d, aff_type)
+
+
+def _parse_metric_val(v) -> Optional[float]:
+    """将样本记录中的指标值解析为 float，无效则返回 None。"""
+    if v is None or v == "":
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _aggregate_by_label(sample_records: List[Dict]) -> Dict:
+    """
+    从逐样本记录聚合出按 obj-aff、按 obj、按 aff、总体的指标均值，便于分析各标签表现。
+
+    Returns:
+        {
+            "by_obj_aff": { "obj_type": { "aff_type": {"iou_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int} } },
+            "by_obj": { "obj_type": {"iou_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int} },
+            "by_aff": { "aff_type": {"iou_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int} },
+            "overall": {"iou_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int},
+        }
+    """
+    metric_keys = ("iou_2d", "iou_3d", "mae_3d", "sim_3d")
+
+    # 按 (obj, aff) 收集有效值
+    obj_aff_vals: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
+    obj_aff_n2d: Dict[Tuple[str, str], int] = defaultdict(int)
+    obj_aff_n3d: Dict[Tuple[str, str], int] = defaultdict(int)
+
+    for r in sample_records:
+        obj, aff = r.get("obj_type", ""), r.get("aff_type", "")
+        if not obj or not aff:
+            continue
+        iou_2d = _parse_metric_val(r.get("iou_2d"))
+        iou_3d = _parse_metric_val(r.get("iou_3d"))
+        mae_3d = _parse_metric_val(r.get("mae_3d"))
+        sim_3d = _parse_metric_val(r.get("sim_3d"))
+        if iou_2d is not None:
+            obj_aff_vals[obj][aff]["iou_2d"].append(iou_2d)
+            obj_aff_n2d[(obj, aff)] += 1
+        if iou_3d is not None:
+            obj_aff_vals[obj][aff]["iou_3d"].append(iou_3d)
+            obj_aff_n3d[(obj, aff)] += 1
+        if mae_3d is not None:
+            obj_aff_vals[obj][aff]["mae_3d"].append(mae_3d)
+        if sim_3d is not None:
+            obj_aff_vals[obj][aff]["sim_3d"].append(sim_3d)
+
+    def _mean(lst: List[float]) -> Optional[float]:
+        return round(sum(lst) / len(lst), 6) if lst else None
+
+    def _to_summary(vals: Dict[str, List[float]], n2d: int, n3d: int) -> Dict:
+        out = {}
+        for k in metric_keys:
+            v = _mean(vals.get(k, []))
+            out[k] = v
+        out["n_2d"] = n2d
+        out["n_3d"] = n3d
+        return out
+
+    # 1) by_obj_aff
+    by_obj_aff = {}
+    for obj in sorted(obj_aff_vals.keys()):
+        by_obj_aff[obj] = {}
+        for aff in sorted(obj_aff_vals[obj].keys()):
+            vals = obj_aff_vals[obj][aff]
+            by_obj_aff[obj][aff] = _to_summary(vals, obj_aff_n2d[(obj, aff)], obj_aff_n3d[(obj, aff)])
+
+    # 2) by_obj：该 obj 下所有 aff 的平均（按样本数加权）
+    by_obj = {}
+    for obj in sorted(obj_aff_vals.keys()):
+        agg = defaultdict(list)
+        n2d, n3d = 0, 0
+        for aff, vals in obj_aff_vals[obj].items():
+            for k, lst in vals.items():
+                agg[k].extend(lst)
+            n2d += obj_aff_n2d[(obj, aff)]
+            n3d += obj_aff_n3d[(obj, aff)]
+        by_obj[obj] = _to_summary(dict(agg), n2d, n3d)
+
+    # 3) by_aff：该 aff 下所有 obj 的平均（按样本数加权）
+    aff_vals: Dict[str, Dict[str, List[float]]] = defaultdict(lambda: defaultdict(list))
+    aff_n2d: Dict[str, int] = defaultdict(int)
+    aff_n3d: Dict[str, int] = defaultdict(int)
+    for obj in obj_aff_vals:
+        for aff in obj_aff_vals[obj]:
+            for k, lst in obj_aff_vals[obj][aff].items():
+                aff_vals[aff][k].extend(lst)
+            aff_n2d[aff] += obj_aff_n2d[(obj, aff)]
+            aff_n3d[aff] += obj_aff_n3d[(obj, aff)]
+
+    by_aff = {}
+    for aff in sorted(aff_vals.keys()):
+        by_aff[aff] = _to_summary(aff_vals[aff], aff_n2d[aff], aff_n3d[aff])
+
+    # 4) overall
+    all_vals = defaultdict(list)
+    total_n2d = sum(obj_aff_n2d.values())
+    total_n3d = sum(obj_aff_n3d.values())
+    for obj in obj_aff_vals:
+        for aff in obj_aff_vals[obj]:
+            for k, lst in obj_aff_vals[obj][aff].items():
+                all_vals[k].extend(lst)
+    overall = _to_summary(dict(all_vals), total_n2d, total_n3d)
+
+    return {
+        "by_obj_aff": by_obj_aff,
+        "by_obj": by_obj,
+        "by_aff": by_aff,
+        "overall": overall,
+    }
 
 
 def main():
@@ -457,11 +580,52 @@ def main():
         writer.writerows(sample_records)
     print(f"\n逐样本评估结果已保存到: {csv_path}")
 
-    # 2) 汇总指标 JSON
+    # 2) 按 obj-aff / obj / aff / 总体 聚合指标，便于分析各标签表现
+    label_agg = _aggregate_by_label(sample_records)
+
+    def _row_for_csv(d: Dict[str, Any]) -> Dict[str, Any]:
+        return {k: (v if v is not None else "") for k, v in d.items()}
+
+    # 2a) 按 obj-aff 的 CSV（便于表格分析）
+    obj_aff_rows = []
+    for obj in sorted(label_agg["by_obj_aff"].keys()):
+        for aff in sorted(label_agg["by_obj_aff"][obj].keys()):
+            row = {"obj_type": obj, "aff_type": aff, **_row_for_csv(label_agg["by_obj_aff"][obj][aff])}
+            obj_aff_rows.append(row)
+    obj_aff_csv = os.path.join(out_dir, "validation_by_obj_aff.csv")
+    if obj_aff_rows:
+        with open(obj_aff_csv, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=["obj_type", "aff_type", "iou_2d", "iou_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+            writer.writeheader()
+            writer.writerows(obj_aff_rows)
+        print(f"按 obj-aff 聚合结果已保存到: {obj_aff_csv}")
+
+    # 2b) 按 obj 的 CSV
+    obj_rows = [{"obj_type": k, **_row_for_csv(v)} for k, v in sorted(label_agg["by_obj"].items())]
+    obj_csv = os.path.join(out_dir, "validation_by_obj.csv")
+    if obj_rows:
+        with open(obj_csv, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=["obj_type", "iou_2d", "iou_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+            writer.writeheader()
+            writer.writerows(obj_rows)
+        print(f"按 obj 聚合结果已保存到: {obj_csv}")
+
+    # 2c) 按 aff 的 CSV
+    aff_rows = [{"aff_type": k, **_row_for_csv(v)} for k, v in sorted(label_agg["by_aff"].items())]
+    aff_csv = os.path.join(out_dir, "validation_by_aff.csv")
+    if aff_rows:
+        with open(aff_csv, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=["aff_type", "iou_2d", "iou_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+            writer.writeheader()
+            writer.writerows(aff_rows)
+        print(f"按 aff 聚合结果已保存到: {aff_csv}")
+
+    # 3) 汇总指标 JSON（含 label 聚合）
     json_path = os.path.join(out_dir, "validation_results.json")
+    results_with_labels = {**results, "by_label": label_agg}
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(results, f, indent=2, ensure_ascii=False)
-    print(f"汇总评估指标已保存到: {json_path}")
+        json.dump(results_with_labels, f, indent=2, ensure_ascii=False)
+    print(f"汇总评估指标（含 label 聚合）已保存到: {json_path}")
 
 
 if __name__ == "__main__":
