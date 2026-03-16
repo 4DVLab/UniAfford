@@ -64,13 +64,15 @@ def rename_obj_type(dataset_root, obj_rename, aff_rename=None):
                     obj_type=new_obj_type,  # 强制指定为新名称
                     keep_id=True
                 )
-                # 如果需要同时重命名 affordance，则替换 labels 中的名称
-                if aff_rename is not None and pc.labels is not None:
+                # 如果需要同时重命名 affordance，则替换 aff_mask_dict 中的键
+                if aff_rename is not None and pc.aff_mask_dict is not None:
                     old_aff, new_aff = aff_rename
-                    pc.labels = [new_aff if label == old_aff else label
-                                 for label in pc.labels]
-                # 只保留有 labels 和 mask 的对象
-                if pc.labels is not None and len(pc.labels) > 0 and pc.mask is not None:
+                    renamed = {}
+                    for label, mask in pc.aff_mask_dict.items():
+                        renamed[new_aff if label == old_aff else label] = mask
+                    pc.aff_mask_dict = renamed
+                # 只保留有 affordance 标注的对象
+                if pc.aff_mask_dict:
                     pc.save_to(os.path.join(new_pc_dir, f'{pc.obj_type}_{pc.id}.csv'))
                 pc.free_memory()
     
@@ -89,13 +91,15 @@ def rename_obj_type(dataset_root, obj_rename, aff_rename=None):
                             obj_type=new_obj_type,  # 强制指定为新名称
                             keep_id=True
                         )
-                        # 如果需要同时重命名 affordance，则替换 labels 中的名称
-                        if aff_rename is not None and img.labels is not None:
+                        # 如果需要同时重命名 affordance，则替换 aff_mask_dict 中的键
+                        if aff_rename is not None and img.aff_mask_dict is not None:
                             old_aff, new_aff = aff_rename
-                            img.labels = [new_aff if label == old_aff else label
-                                          for label in img.labels]
-                        # 只保留有 labels 和 mask 的对象
-                        if img.labels is not None and len(img.labels) > 0 and len(img.mask) > 0:
+                            renamed = {}
+                            for label, mask in img.aff_mask_dict.items():
+                                renamed[new_aff if label == old_aff else label] = mask
+                            img.aff_mask_dict = renamed
+                        # 只保留有 affordance 标注的对象
+                        if img.aff_mask_dict:
                             img.save_to(new_img_dir)
                         img.free_memory()
                     except Exception as e:

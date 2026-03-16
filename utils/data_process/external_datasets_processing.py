@@ -38,8 +38,8 @@ class AGPIL_PC(PointCloud):
 
     count = defaultdict(lambda: defaultdict(int))
 
-    def __init__(self, points, obj_type, mask: np.ndarray = None, labels: list = None):
-        super().__init__(points, obj_type=obj_type, mask=mask, labels=labels)
+    def __init__(self, points, obj_type, aff_mask_dict: dict = None):
+        super().__init__(points, obj_type=obj_type, aff_mask_dict=aff_mask_dict)
         AGPIL_PC.all[obj_type].append(self)
         AGPIL_PC.count[obj_type]['ID'] += 1
 
@@ -63,13 +63,14 @@ class AGPIL_PC(PointCloud):
         # 筛选出 mask 中全 0 的列索引（按列判断，忽略前三列 xyz）
         zero_col_idx = np.where(np.all(data[:, 3:] == 0, axis=0))[0]
         # 根据列索引过滤掉对应的标签；此处先用 header 作为占位标签
-        labels = [label for idx, label in enumerate(AGPIL_PC.aff_type) if idx not in zero_col_idx]
-        pc_obj = AGPIL_PC(points = data[:, :3], obj_type=obj_type, labels=labels)
-
         if zero_col_idx.size > 0:
             data = np.delete(data, zero_col_idx+3, axis=1) 
+        aff_mask_dict = {}
         if data.shape[1] > 3:
-            pc_obj.mask = data[:, 3:]
+            kept_labels = [label for idx, label in enumerate(AGPIL_PC.aff_type) if idx not in zero_col_idx]
+            for idx, label in enumerate(kept_labels):
+                aff_mask_dict[label] = data[:, 3 + idx]
+        pc_obj = AGPIL_PC(points=data[:, :3], obj_type=obj_type, aff_mask_dict=aff_mask_dict)
         
         return pc_obj
 
@@ -115,15 +116,19 @@ class PIADv2_PC(PointCloud):
 
     count = defaultdict(lambda: defaultdict(int))
 
-    def __init__(self, points, obj_type, mask: np.ndarray = None, labels: list = None):
-        super().__init__(points, obj_type, mask, labels)
+    def __init__(self, points, obj_type, aff_mask_dict: dict = None):
+        super().__init__(points, obj_type, aff_mask_dict=aff_mask_dict)
         PIADv2_PC.all[obj_type].append(self)
         PIADv2_PC.count[obj_type]['ID'] += 1
 
     @staticmethod
     def load_file(filepath, obj_type=None, aff_type=None) -> 'PointCloud':
         data = np.load(filepath)
-        pc_obj = PIADv2_PC(points=data[:, :3], obj_type=obj_type, mask=data[:, 3:],labels=[aff_type])
+        aff_mask_dict = {}
+        if data.shape[1] > 3 and aff_type is not None:
+            point_mask = data[:, 3]
+            aff_mask_dict[str(aff_type)] = point_mask
+        pc_obj = PIADv2_PC(points=data[:, :3], obj_type=obj_type, aff_mask_dict=aff_mask_dict)
 
         return pc_obj
 
@@ -174,8 +179,8 @@ class LASO_PC(PointCloud):
 
     count = defaultdict(lambda: defaultdict(int))
 
-    def __init__(self, points, obj_type, mask: np.ndarray = None, labels: list = None):
-        super().__init__(points, obj_type, mask, labels)
+    def __init__(self, points, obj_type, aff_mask_dict: dict = None):
+        super().__init__(points, obj_type, aff_mask_dict=aff_mask_dict)
         LASO_PC.all[obj_type].append(self)
         LASO_PC.count[obj_type]['ID'] += 1
 
@@ -195,7 +200,11 @@ class LASO_PC(PointCloud):
 
                 for i, e in enumerate(zip(obj_points, obj_aff)):
                     print(f'loading PC: {file_path}')
-                    yield cls(points=obj_points[i], obj_type=e[1]['class'], mask=e[1]['mask'], labels=[e[1]['affordance'],])
+                    yield cls(
+                        points=obj_points[i],
+                        obj_type=e[1]['class'],
+                        aff_mask_dict={str(e[1]['affordance']): e[1]['mask']},
+                    )
 
         return iterator()
 
@@ -205,52 +214,49 @@ class AffNet_PC(PointCloud):...
 """  ----------------------------------------------- Image classes ----------------------------------------------  """
 
 class BoxedImage(Image):
-    def __init__(self, img, obj_type, box:np.ndarray=None, labels=None, **kwargs):
+    def __init__(self, img, obj_type, box:np.ndarray=None, aff_type: str = "box", **kwargs):
         """
         Args:
             img: 图片数组
             obj_type: 物体类型
             box: 标注文本框的左上角(x1, y1)和右下角(x2, y2)组合成的数组(x1, y1, x2, y2)
-            labels: 标签列表
             **kwargs: 其他传递给父类的参数
         """
-        super().__init__(img, obj_type=obj_type, labels=labels, **kwargs)
+        aff_mask_dict = kwargs.pop("aff_mask_dict", None) or {}
+        super().__init__(img, obj_type=obj_type, aff_mask_dict=aff_mask_dict, **kwargs)
 
         # 直接将box区域划作mask
         if box is not None:
             box_mask = np.zeros((img.shape[0], img.shape[1]), dtype=np.uint8)
             box_mask[box[1]:box[3], box[0]:box[2]] = 1
-            if len(self.mask) == 0:
-                self.mask = [box_mask]
-            else:
-                self.mask.append(box_mask)
+            self.aff_mask_dict[str(aff_type)] = box_mask
         self.dtype = 'Boxed'
 
 class HeatImage(Image):
-    def __init__(self, img:np.ndarray, obj_type, aff_mask:np.ndarray=None, labels=None, obj_mask:np.ndarray=None):
-        super().__init__(img, obj_type=obj_type, aff_mask=aff_mask, labels=labels, obj_mask=obj_mask)
+    def __init__(self, img:np.ndarray, obj_type, aff_mask_dict: dict = None, obj_mask:np.ndarray=None):
+        aff_mask_dict = dict(aff_mask_dict) if aff_mask_dict is not None else {}
+        super().__init__(img, obj_type=obj_type, aff_mask_dict=aff_mask_dict, obj_mask=obj_mask)
         self.dtype = 'HeatMap'
     # TODO: 热力图的标注转换
 
 class HANDAL_IMG(Image):
-    def __init__(self, img, obj_type, labels=None, aff_mask=None, obj_mask=None, visible_mask=None, **kwargs):
+    def __init__(self, img, obj_type, aff_mask_dict=None, obj_mask=None, visible_mask=None, **kwargs):
         """
         HANDAL数据集的Image子类
         
         Args:
             img: 图片数组
             obj_type: 物体类型
-            labels: 标签列表
-            aff_mask: affordance mask列表
+            aff_mask_dict: affordance 掩码字典
             obj_mask: 物体mask
             visible_mask: 可见部分mask
             **kwargs: 其他传递给父类的参数
         """
+        aff_mask_dict = kwargs.pop("aff_mask_dict", aff_mask_dict) or {}
         super().__init__(
             img=img,
             obj_type=obj_type,
-            labels=labels,
-            aff_mask=aff_mask,
+            aff_mask_dict=aff_mask_dict,
             obj_mask=obj_mask,
             visible_mask=visible_mask,
             **kwargs
@@ -310,8 +316,7 @@ class HANDAL_IMG(Image):
                         obj = HANDAL_IMG(
                             img,
                             obj_type=obj_type,
-                            labels=[aff_type],
-                            aff_mask=[aff_mask],
+                            aff_mask_dict={str(aff_type): aff_mask},
                             # obj_mask=obj_mask,
                             # visible_mask=visib_mask,
                         )
@@ -368,9 +373,8 @@ class RAGNet(Image):
 
                     img_obj = RAGNet(
                         img=img,
-                        labels=['None'],  # HACK: 数据集里没有明确指定aff类型，无法分类保存
                         obj_mask=None,
-                        aff_mask=[cv2.imread(obj['mask_path'], cv2.IMREAD_GRAYSCALE)],
+                        aff_mask_dict={'None': cv2.imread(obj['mask_path'], cv2.IMREAD_GRAYSCALE)},
                         obj_type = obj['task_object_class'].capitalize()
                     )
                     if 'answer' in obj:

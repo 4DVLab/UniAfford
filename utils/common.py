@@ -24,8 +24,8 @@ DEFAULT_PC_END_TOKEN = "<pc_end>"
 
 # 用于下游分割任务的功能性 token
 FUNCTIONAL_TOKENS = {
-    "img_aff_token": "[IMG-AFF]",
-    "pc_aff_token": "[PC-AFF]",
+    "img_aff_token": "<img_aff>",  # default
+    "pc_aff_token": "<pc_aff>",   # default
 }
 
 
