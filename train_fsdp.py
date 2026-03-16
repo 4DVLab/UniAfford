@@ -292,8 +292,8 @@ def main():
     logger.info("加载数据集...")
     data_objects = [None, None, None]
     if local_rank == 0:
-        train_data = JointDataset(dataset_root=training_configs.dataset_dir, dtype='train').load_all_data()
-        val_data = JointDataset(dataset_root=training_configs.dataset_dir, dtype='val').load_all_data()
+        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json')
+        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json')
         train_samples_local = train_data.samples
         val_samples_local = val_data.samples
         pair_token_map = {}
@@ -359,17 +359,6 @@ def main():
         f"参数统计: total={total_params:,}, trainable={trainable_params:,}, "
         f"ratio={100.0 * trainable_params / max(1, total_params):.2f}%"
     )
-
-    # ---------- 加载数据集 ----------
-    logger.info("加载数据集...")
-    data_objects = [None, None]
-    if local_rank == 0:
-        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json')
-        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json')
-        data_objects = [train_data.samples, val_data.samples]
-        logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
-    dist.broadcast_object_list(data_objects, src=0)
-    train_samples, val_samples = data_objects
 
     train_ds_cls = JointAffordanceTrainDataset if training_configs.samples_per_epoch else JointAffordanceTorchDataset
     train_ds_kwargs = dict(
