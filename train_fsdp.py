@@ -338,8 +338,8 @@ def main():
     logger.info("加载数据集...")
     data_objects = [None, None]
     if local_rank == 0:
-        train_data = JointDataset(dataset_root=training_configs.dataset_dir, dtype='train').load_all_data()
-        val_data = JointDataset(dataset_root=training_configs.dataset_dir, dtype='val').load_all_data()
+        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json').load_all_data()
+        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json').load_all_data()
         data_objects = [train_data.samples, val_data.samples]
         logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
     dist.broadcast_object_list(data_objects, src=0)

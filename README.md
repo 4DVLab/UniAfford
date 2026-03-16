@@ -32,7 +32,10 @@ dataset_root/
 │       ├── Spoon_2.csv
 │       └── Spoon_3.csv
 ├── Mug/...
-└── dataset_split.json  # 数据集的汇总信息和train\val\test分割信息
+├── metadata.json  # 分割统计信息（比例、样本数、随机种子等）
+├── train.json      # 训练集分割
+├── val.json        # 验证集分割
+└── test.json       # 测试集分割
 ```
 
 说明：
@@ -42,43 +45,39 @@ dataset_root/
 
 ## 分割配置文件
 
- `dataset_split.json` 文件由 `JointDataset.split_dataset()` 生成，核心字段：
+分割由 `SplitManager` 执行，生成四个文件：`metadata.json`、`train.json`、`val.json`、`test.json`。`JointDataset` 通过 `split_file='train.json'` 等形式加载对应分割。
+
+`train.json` / `val.json` / `test.json` 各自为独立结构，示例（以 train.json 为例）：
 
 ```json
 {
-  "metadata": {}, // 各种统计信息
-  "train": {
-    "Instruction": {
-      "Spoon": {
-        "grasp": [1, 2, 3, 4, 5],
-        "contain": [1, 2, 3],
-        "lift": [1, 2]
-      }
-    },
-    "Image": {
-      "Spoon": {
-        "grasp": [101, 102, 103],
-        "contain": [101, 104]
-      }
-    },
-    "PointCloud": {
-      "Spoon": {
-        "grasp": [301, 302, 303],
-        "contain": [301, 304]
-      }
+  "Instruction": {
+    "Spoon": {
+      "grasp": [1, 2, 3, 4, 5],
+      "contain": [1, 2, 3],
+      "lift": [1, 2]
     }
   },
-  "val": {}, // 和train,一致，但是数量更少 
-  "test": {}
+  "Image": {
+    "Spoon": {
+      "grasp": [101, 102, 103],
+      "contain": [101, 104]
+    }
+  },
+  "PointCloud": {
+    "Spoon": {
+      "grasp": [301, 302, 303],
+      "contain": [301, 304]
+    }
   }
 }
 ```
 
 
 
-- `train/val/test/Instruction`: `{obj_type: {aff_type: [ins_id, ...]}}`
-- `train/val/test/Image`: `{obj_type: {aff_type: [img_id, ...]}}`（或旧格式 `[[img_id, img_mask_idx], ...]`）
-- `train/val/test/PointCloud`: `{obj_type: {aff_type: [[pc_id, mask_idx], ...]}}`（或新格式 `[pc_id, ...]`）
+- `Instruction`: `{obj_type: {aff_type: [ins_id, ...]}}`
+- `Image`: `{obj_type: {aff_type: [img_id, ...]}}`（或旧格式 `[[img_id, img_mask_idx], ...]`）
+- `PointCloud`: `{obj_type: {aff_type: [[pc_id, mask_idx], ...]}}`（或新格式 `[pc_id, ...]`）
 
 说明：
 
@@ -88,7 +87,7 @@ dataset_root/
 
 ## 数据分割策略
 
-`JointDataset.split_dataset()` 先构建分组，再按比例切分：
+`SplitManager.split()` 先构建分组，再按比例切分：
 
 - 图文对：按 `Instruction.aff_type` 与同 id 的 `Image` 精确配对
 - 点云对：按点云 `aff_mask_dict` 的 aff_type 拆成 `(pc_id, mask_idx)` 列表（mask_idx 仅用于兼容旧格式，配对时以 aff_type 为准）

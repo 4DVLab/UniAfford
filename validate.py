@@ -100,7 +100,7 @@ def build_dataloader_for_split(
 
     joint_dataset = JointDataset(
         dataset_root=training_cfg.dataset_dir,
-        dtype=infer_cfg.split,
+        split_file=f'{infer_cfg.split}.json',
     ).load_all_data()
     torch_dataset = JointAffordanceTorchDataset(
         joint_dataset.samples,
