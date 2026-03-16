@@ -257,6 +257,8 @@ class JointAffordanceTorchDataset(Dataset):
         # 2D 输入（CPU + image_precision）
         if has_image:
             img = data["img"]
+            orig_h, orig_w = int(img.shape[0]), int(img.shape[1])
+            result["original_size"] = (orig_h, orig_w)
             if img.shape[:2] != (self.image_size[0], self.image_size[1]):
                 img = cv2.resize(img, (self.image_size[0], self.image_size[1]))
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
@@ -393,6 +395,7 @@ def joint_affordance_collate_fn(
     images_list, img_gt_masks = [], []
     point_clouds_list, pc_gt_masks = [], []
     sample_ids, obj_types, aff_types = [], [], []
+    original_size_per_sample = []
     for sample in batch:
         # 文本与 Qwen3-VL 位置编码
         input_ids_list.append(sample["input_ids"].squeeze(0))
@@ -414,6 +417,7 @@ def joint_affordance_collate_fn(
         sample_ids.append(sample.get("sample_id"))
         obj_types.append(sample.get("obj_type"))
         aff_types.append(sample.get("aff_type"))
+        original_size_per_sample.append(sample.get("original_size"))
 
     # -------- 2) 文本输入 padding --------
     input_ids = torch.nn.utils.rnn.pad_sequence(
@@ -499,12 +503,17 @@ def joint_affordance_collate_fn(
                 padded_images.append(padded_img)
 
             mask = img_gt_masks[i] if i < len(img_gt_masks) else None
+            orig_size = original_size_per_sample[i] if i < len(original_size_per_sample) else None
+            if orig_size is not None and len(orig_size) >= 2:
+                original_size_list.append((int(orig_size[0]), int(orig_size[1])))
+            elif mask is not None:
+                original_size_list.append((mask.shape[0], mask.shape[1]))
+            else:
+                original_size_list.append((max_h, max_w))
             if mask is None:
                 padded_masks.append(torch.zeros(max_h, max_w, dtype=image_precision))
-                original_size_list.append((max_h, max_w))
             else:
                 mask_h, mask_w = mask.shape[0], mask.shape[1]
-                original_size_list.append((mask_h, mask_w))
                 if mask_h < max_h or mask_w < max_w:
                     pad_h = max_h - mask_h
                     pad_w = max_w - mask_w

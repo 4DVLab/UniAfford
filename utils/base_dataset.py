@@ -1435,9 +1435,6 @@ class SplitManager:
                         warnings.warn(f"{obj_type_name}-{aff_type_name} 样本数量过少: {n_total}，只训练不评估")
                         # 跳过该数据并删除ids记录
                         del groups[obj_type_name][aff_type_name]
-                        del train_ids[obj_type_name][aff_type_name]
-                        del val_ids[obj_type_name][aff_type_name]
-                        del test_ids[obj_type_name][aff_type_name]
                         continue
                     else:
                         n_test = max(5, int(round(n_total * test_ratio)))

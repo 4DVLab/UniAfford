@@ -101,7 +101,7 @@ def build_dataloader_for_split(
     joint_dataset = JointDataset(
         dataset_root=training_cfg.dataset_dir,
         split_file=f'{infer_cfg.split}.json',
-    ).load_all_data()
+    )
     torch_dataset = JointAffordanceTorchDataset(
         joint_dataset.samples,
         processor=processor,
@@ -200,23 +200,31 @@ def save_batch_predictions(
         aff_type = input_dict.get("aff_type")[i]
         sample_id = input_dict.get("sample_id")[i]
 
-        # 2D mask 保存（在保存前还原到原始图像尺寸）
+        # 2D mask 保存：仅当该样本有有效图像输入时保存
+        has_img = False
+        img_valid = input_dict.get("img_valid_mask")
+        if isinstance(img_valid, torch.Tensor) and img_valid.shape[0] > i:
+            has_img = bool(img_valid[i].item())
         pred_mask_2d = _extract_pred_mask("image_logits", i)
         images_tensor = input_dict.get("images")
-        if pred_mask_2d is not None and isinstance(images_tensor, torch.Tensor) and images_tensor.shape[0] > i:
+        if has_img and pred_mask_2d is not None and isinstance(images_tensor, torch.Tensor) and images_tensor.shape[0] > i:
             mask_2d = _to_uint8_mask(pred_mask_2d)
 
-            # 从 input_dict["images"] 还原 RGB，按 original_size_list 裁剪回原始尺寸
+            # 从 input_dict["images"] 还原 RGB，按 original_size_list 缩放到原始尺寸
+            # original_size_list 为 _build_sample 中 resize 前记录的原图 (H, W)，保证准确未篡改
             img_tensor = images_tensor[i].detach().float().cpu().clamp(0.0, 1.0)
-            orig_img = (img_tensor.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
+            model_img = (img_tensor.permute(1, 2, 0).numpy() * 255.0).round().astype(np.uint8)
             original_size_list = input_dict.get("original_size_list")
             if isinstance(original_size_list, (list, tuple)) and i < len(original_size_list):
                 orig_h, orig_w = map(int, original_size_list[i])
-                orig_h = max(1, min(orig_h, orig_img.shape[0]))
-                orig_w = max(1, min(orig_w, orig_img.shape[1]))
-                orig_img = orig_img[:orig_h, :orig_w]
+                orig_h, orig_w = max(1, orig_h), max(1, orig_w)
+                if (orig_h, orig_w) != model_img.shape[:2]:
+                    orig_img = cv2.resize(model_img, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
+                else:
+                    orig_img = model_img
             else:
-                orig_h, orig_w = orig_img.shape[:2]
+                orig_h, orig_w = model_img.shape[0], model_img.shape[1]
+                orig_img = model_img
 
             if mask_2d.ndim == 3:
                 # 如果是 (C, H, W) 或 (H, W, C)，先取单通道
@@ -242,9 +250,13 @@ def save_batch_predictions(
             mask_path = os.path.join(mask_dir, f"{obj_type}_{sample_id}_{aff_type}.png")
             cv2.imwrite(mask_path, mask_2d)
 
-        # 3D mask 保存
+        # 3D mask 保存：仅当该样本有有效点云输入时保存
+        has_pc = False
+        pc_lengths = input_dict.get("pc_valid_lengths")
+        if isinstance(pc_lengths, torch.Tensor) and pc_lengths.shape[0] > i:
+            has_pc = int(pc_lengths[i].item()) > 0
         pred_mask_3d = _extract_pred_mask("point_logits", i)
-        if pred_mask_3d is not None:
+        if has_pc and pred_mask_3d is not None:
             points = None
             pc_tensor = input_dict.get("point_clouds")
             if isinstance(pc_tensor, torch.Tensor) and pc_tensor.shape[0] > i:
