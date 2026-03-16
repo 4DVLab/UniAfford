@@ -1370,8 +1370,8 @@ class JointDataset:
         else:
             self.sample_ids = sample_ids
         
-        if balance_data:
-            self.balance_data()
+        assert not balance_data, "balance_data 不建议启用，容易引起数据分布的改变从而影响模型的训练和评估"
+        if balance_data: self.balance_data()
             
         self.samples = []
     
@@ -1682,6 +1682,7 @@ class JointDataset:
             max_sample_per_group: int = None,
             min_sample_per_group: int = 10,
             random_seed: int = 114514,
+            balance_data = False,
         ):
         """
         分割自身数据为 train、val、test 并保存 json 文件，仅在加载全部数据时手动使用。
@@ -1807,14 +1808,13 @@ class JointDataset:
         _split_group(pc_groups, ('pc',))
 
 
-        assert not self.balance_data, "balance_data 不建议启用，容易引起数据分布的改变从而影响模型的训练和评估"
         train_dataset = JointDataset(
             dataset_root=self.dataset_root,
             sample_ids=train_ids,
             obj_type=self.obj_type,
             aff_type=self.aff_type,
             keep_id=self.keep_id,
-            balance_data=self.balance_data,
+            balance_data=balance_data,
             dtype='train'
         )
         val_dataset = JointDataset(
@@ -1823,7 +1823,7 @@ class JointDataset:
             obj_type=self.obj_type,
             aff_type=self.aff_type,
             keep_id=self.keep_id,
-            balance_data=self.balance_data,
+            balance_data=balance_data,
             dtype='val'
         )
         test_dataset = JointDataset(
@@ -1832,7 +1832,7 @@ class JointDataset:
             obj_type=self.obj_type,
             aff_type=self.aff_type,
             keep_id=self.keep_id,
-            balance_data=self.balance_data,
+            balance_data=balance_data,
             dtype='test'
         )
 
