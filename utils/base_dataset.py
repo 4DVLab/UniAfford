@@ -189,6 +189,54 @@ class Modality:
             
         return obj_type_set
 
+    @staticmethod
+    def _normalize_aff_mask_dict(aff_mask_dict):
+        """归一化 aff_mask_dict：过滤 None、统一 key 为 str。PointCloud/Image 共用。"""
+        if not aff_mask_dict:
+            return {}
+        normalized = {}
+        for aff_type, mask_col in aff_mask_dict.items():
+            if aff_type is None or mask_col is None:
+                continue
+            normalized[str(aff_type)] = np.asarray(mask_col)
+        return normalized
+
+    def get_aff_types(self) -> List[str]:
+        """获取 affordance 类型列表。有 aff_mask_dict 的用其 keys；否则（如 Instruction）用 aff_type 单值。"""
+        aff = getattr(self, 'aff_mask_dict', None)
+        if aff:
+            return list(aff.keys())
+        aff_type = getattr(self, 'aff_type', None)
+        return [aff_type] if aff_type else []
+
+    def get_aff_index(self, aff_type: str):
+        """返回 aff_type 在 aff_types 列表中的索引，不存在则返回 None。"""
+        aff_types = self.get_aff_types()
+        if not aff_types:
+            return None
+        try:
+            return aff_types.index(aff_type)
+        except ValueError:
+            return None
+
+    def get_aff_type_by_index(self, idx: int) -> Optional[str]:
+        """根据索引返回 aff_type，越界返回 None。"""
+        aff_types = self.get_aff_types()
+        if idx is None or idx < 0 or idx >= len(aff_types):
+            return None
+        return aff_types[idx]
+
+    def get_mask_by_aff(self, aff_type: str) -> Optional[np.ndarray]:
+        """根据 aff_type 返回 mask。无 aff_mask_dict 的模态（如 Instruction）返回 None。"""
+        if aff_type is None:
+            return None
+        return getattr(self, 'aff_mask_dict', {}).get(aff_type)
+
+    def get_mask_by_index(self, idx: int):
+        """根据索引返回 mask。"""
+        aff_type = self.get_aff_type_by_index(idx)
+        return self.get_mask_by_aff(aff_type)
+
     
 class PointCloud(Modality):
     all = defaultdict(list)
@@ -210,7 +258,7 @@ class PointCloud(Modality):
     }
     """
 
-    def __init__(self, points, obj_type, mask:list[np.ndarray]=None, labels:list=None, given_id:int=None):
+    def __init__(self, points, obj_type, aff_mask_dict: Optional[Dict[str, np.ndarray]] = None, given_id:int=None):
         self.points = points
         self.obj_type = obj_type
        
@@ -218,17 +266,12 @@ class PointCloud(Modality):
         PointCloud.count[obj_type]['ID'] += 1
         self.id = PointCloud.count[obj_type]['ID'] if given_id is None else given_id
         PointCloud.index[obj_type][self.id] = self
-
-        if labels is not None:
-            for l in labels:
-                PointCloud.count[obj_type][l] += 1
-
-        self.mask = mask       # 对应点的aff的值
-        self.labels = labels   # aff_mask对应列的标签
+        self.aff_mask_dict = Modality._normalize_aff_mask_dict(aff_mask_dict)
+        for l in self.aff_mask_dict.keys():
+            PointCloud.count[obj_type][l] += 1
 
         self.is_sorted = False
         self._hash = None
-       
 
     """  ---------------------------------------- 读写相关 ---------------------------------------------  """
     def save_to(self, filepath):
@@ -236,9 +279,11 @@ class PointCloud(Modality):
         header = ['x', 'y', 'z']
 
         # 拼接xyz和mask
-        if self.mask is not None:
-            data = np.concatenate([self.points, self.mask], axis=1)
-            header += self.labels
+        if self.aff_mask_dict:
+            labels = list(self.aff_mask_dict.keys())
+            mask_matrix = np.column_stack([self.aff_mask_dict[l] for l in labels])
+            data = np.concatenate([self.points, mask_matrix], axis=1)
+            header += labels
         else:
             data = self.points
 
@@ -312,13 +357,20 @@ class PointCloud(Modality):
                     # 如果没有匹配的列，则置空 mask / labels
                     mask = None
                     labels = None
-            
-            mask = [mask[:, col] for col in range(mask.shape[1])]
-            pc_obj = PointCloud(points=data[:, :3],
-                                mask=mask,
-                                obj_type=obj_type,
-                                labels=labels,
-                                given_id=given_id)
+
+            aff_mask_dict = {}
+            if mask is not None and labels is not None:
+                if mask.ndim == 1:
+                    aff_mask_dict[str(labels[0])] = mask
+                else:
+                    for col, label in enumerate(labels):
+                        aff_mask_dict[str(label)] = mask[:, col]
+            pc_obj = PointCloud(
+                points=data[:, :3],
+                obj_type=obj_type,
+                aff_mask_dict=aff_mask_dict,
+                given_id=given_id,
+            )
         else:
             pc_obj = PointCloud(points=data[:, :3],
                                 obj_type=obj_type,
@@ -436,14 +488,11 @@ class PointCloud(Modality):
         """
         import open3d as o3d
 
-        if self.mask is not None and self.labels is not None and len(self.labels) > 0:
-            for idx, label in enumerate(self.labels):
+        if self.aff_mask_dict:
+            for label, mask_col in self.aff_mask_dict.items():
                 if selected_labels is not None and label not in selected_labels: continue
-                if len(self.mask) <= idx: raise ValueError(f'Error in {self.obj_type}-{self.id}: mask的列数{self.mask.shape}和label的维度 {label} 不同')
-
-                mask_col = self.mask[idx]
                 # 未标注区域用浅灰，避免与背景白色混在一起
-                base_gray = 0.9
+                base_gray = 0.95
                 colors = np.full((self.points.shape[0], 3), base_gray, dtype=np.float32)
                 mask_mask = mask_col > 0
                 if mask_mask.any():
@@ -474,11 +523,10 @@ class PointCloud(Modality):
         else:
             sort_idx = np.lexsort((self.points[:, 2], self.points[:, 1], self.points[:, 0]))
             self.points = self.points[sort_idx]
-            if self.mask is not None:
-                if isinstance(self.mask, list):
-                    self.mask = [m[sort_idx] if m is not None else None for m in self.mask]
-                else:
-                    self.mask = self.mask[sort_idx]
+            if self.aff_mask_dict is not None:
+                for label, mask_col in list(self.aff_mask_dict.items()):
+                    if mask_col is not None:
+                        self.aff_mask_dict[label] = mask_col[sort_idx]
 
             self.is_sorted = True
             return True
@@ -487,14 +535,14 @@ class PointCloud(Modality):
         """释放自身占用的内存（不更改计数，用于不重复加载的情况）"""
         # 删除内部数组
         self.points = None
-        self.mask = None
-        self.labels = None
+        self.aff_mask_dict = None
 
     def __del__(self):
         # 更新count
         PointCloud.count[self.obj_type]["ID"] -= 1
-        if self.labels:
-            for l in self.labels:
+        label_source = list(self.aff_mask_dict.keys()) if getattr(self, "aff_mask_dict", None) else []
+        if label_source:
+            for l in label_source:
                 PointCloud.count[self.obj_type][l] -= 1
 
         self.free_memory()
@@ -506,10 +554,11 @@ class PointCloud(Modality):
     def _merge(self, other):
         """合并两个点云标注并更新label、计数（默认点云hash相等）"""
         if isinstance(other, PointCloud):
-            for i, l in enumerate(other.labels):
-                if l not in self.labels:
-                    self.labels.append(l)
-                    self.mask = np.hstack((self.mask, other.mask[:, [i]]))
+            if self.aff_mask_dict is None:
+                self.aff_mask_dict = {}
+            for label, mask_col in other.aff_mask_dict.items():
+                if label not in self.aff_mask_dict:
+                    self.aff_mask_dict[label] = mask_col
             del other
         return self
 
@@ -528,8 +577,7 @@ class Image(Modality):
    
     def __init__(self, img:np.ndarray,
             obj_type,
-            labels:list=None,
-            aff_mask:list[np.ndarray]=None,
+            aff_mask_dict: Optional[Dict[str, np.ndarray]] = None,
             obj_mask:np.ndarray=None,
             visible_mask:np.ndarray=None,
             given_id:int=None,
@@ -546,13 +594,11 @@ class Image(Modality):
         if self.img.ndim == 2:  # 灰度图转三通道
             self.img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
-        self.labels = []
-        if labels:
-            for l in labels:
-                Image.count[obj_type][l] += 1
-            self.labels = labels
+        self.aff_mask_dict = Modality._normalize_aff_mask_dict(aff_mask_dict)
+        for l in self.aff_mask_dict.keys():
+            Image.count[obj_type][l] += 1
 
-        self.dtype = 'No-mask' if aff_mask is None else 'Segmented'
+        self.dtype = 'No-mask' if not self.aff_mask_dict else 'Segmented'
         self.obj_type = obj_type
         Image.all[obj_type].append(self)
 
@@ -560,7 +606,6 @@ class Image(Modality):
         self.id = Image.count[self.obj_type]['ID'] if given_id is None else given_id
         Image.index[self.obj_type][self.id] = self
 
-        self.mask = aff_mask if aff_mask is not None else []
         self.obj_mask = obj_mask
         self.visible_mask = visible_mask
 
@@ -613,12 +658,12 @@ class Image(Modality):
         cv2.imwrite(img_path, self.img)
 
         # 保存aff_mask
-        if len(self.mask) != 0:
+        if self.aff_mask_dict:
             # 每个mask单独保存
-            for idx, mask in enumerate(self.mask):
-                mask_label_dir = os.path.join(dir_path, 'mask', self.labels[idx])
+            for label, mask in self.aff_mask_dict.items():
+                mask_label_dir = os.path.join(dir_path, 'mask', label)
                 os.makedirs(mask_label_dir, exist_ok=True)
-                single_mask_path = os.path.join(mask_label_dir, f'{self.obj_type}_{save_id}_{self.labels[idx]}.png')
+                single_mask_path = os.path.join(mask_label_dir, f'{self.obj_type}_{save_id}_{label}.png')
                 cv2.imwrite(single_mask_path, mask)
 
         # 保存obj_mask和visib_mask（如有）
@@ -709,9 +754,8 @@ class Image(Modality):
             max_width = max_height = None
 
         # affordance masks
-        if len(self.mask) > 0:
-            for idx, mask in enumerate(self.mask):
-                label = self.labels[idx] if idx < len(self.labels) else f'mask_{idx}'
+        if self.aff_mask_dict:
+            for label, mask in self.aff_mask_dict.items():
                 if selected_labels is not None and label not in selected_labels:
                     continue
                 mask_u8 = mask if mask.dtype == np.uint8 else (mask * 255).clip(0, 255).astype(np.uint8)
@@ -782,14 +826,14 @@ class Image(Modality):
        
         # 缩放affordance masks（使用最近邻插值保持mask的离散性）
         mask_interpolation = cv2.INTER_NEAREST if interpolation == cv2.INTER_LINEAR else interpolation
-        resized_masks = []
-        if len(self.mask) > 0:
-            for mask in self.mask:
+        resized_aff_mask_dict = {}
+        if self.aff_mask_dict:
+            for label, mask in self.aff_mask_dict.items():
                 if mask is not None and mask.size > 0:
                     resized_mask = cv2.resize(mask.copy(), size, interpolation=mask_interpolation)
-                    resized_masks.append(resized_mask)
+                    resized_aff_mask_dict[label] = resized_mask
                 else:
-                    resized_masks.append(None)
+                    resized_aff_mask_dict[label] = None
        
         # 缩放obj_mask
         resized_obj_mask = None
@@ -805,8 +849,7 @@ class Image(Modality):
         resized_image = Image(
             img=resized_img,
             obj_type=self.obj_type,
-            labels=self.labels.copy() if self.labels else None,
-            aff_mask=resized_masks if resized_masks else None,
+            aff_mask_dict=resized_aff_mask_dict if resized_aff_mask_dict else None,
             obj_mask=resized_obj_mask,
             visible_mask=resized_visible_mask,
             given_id=self.id  # 保持相同的id
@@ -816,8 +859,8 @@ class Image(Modality):
         # 将计数恢复到原来的值（因为这是同一个对象的缩放版本，不应该增加计数）
         Image.count[self.obj_type]['ID'] -= 1
         # 如果labels相同，也需要减少label计数（因为__init__中已经增加了）
-        if resized_image.labels:
-            for label in resized_image.labels:
+        if resized_image.aff_mask_dict:
+            for label in resized_image.aff_mask_dict.keys():
                 if Image.count[resized_image.obj_type][label] > 0:
                     Image.count[resized_image.obj_type][label] -= 1
        
@@ -862,8 +905,7 @@ class Image(Modality):
             raise ValueError(f"Failed to load image: {filepath}")
        
         # 加载affordance masks
-        aff_mask = []
-        labels = []
+        aff_mask_dict = {}
         mask_dir = os.path.join(dir_path, 'mask')
         if os.path.exists(mask_dir):
             aff_set = Modality.normalize_to_set(aff_type)
@@ -885,8 +927,7 @@ class Image(Modality):
                 if os.path.exists(mask_filepath):
                     mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
                     if mask is not None:
-                        aff_mask.append(mask)
-                        labels.append(aff)
+                        aff_mask_dict[aff] = mask
         # Discard: 暂不使用
         # # 加载obj_mask
         # obj_mask = None
@@ -909,8 +950,7 @@ class Image(Modality):
         img_obj = Image(
             img=img,
             obj_type=obj_type,
-            labels=labels if labels else None,
-            aff_mask=aff_mask if aff_mask else None,
+            aff_mask_dict=aff_mask_dict if aff_mask_dict else None,
             # obj_mask=obj_mask,
             # visible_mask=visible_mask,
             given_id=given_id,
@@ -951,7 +991,13 @@ class Image(Modality):
                 if target_ids_dict is not None:
                     # 这里虽然多了一层循环，但在 ID 确定的情况下，比 os.listdir 依然快得多
                     for _aff, target_ids in target_ids_dict.get(obj_type_name, dict()).items():
-                        for target_id, mask_id in sorted(target_ids):
+                        for target_entry in sorted(target_ids):
+                            if isinstance(target_entry, (list, tuple)):
+                                if len(target_entry) == 0:
+                                    continue
+                                target_id = target_entry[0]
+                            else:
+                                target_id = target_entry
                             found = False
                             # 尝试构造文件名
                             for ext in VALID_EXTS:
@@ -1007,16 +1053,16 @@ class Image(Modality):
 
     def free_memory(self):
         self.img=None
-        self.mask = None
+        self.aff_mask_dict = None
         self.obj_mask = None
         self.visible_mask = None
-        self.labels = None
 
     def __del__(self):
         # 更新count
         Image.count[self.obj_type]["ID"] -= 1
-        if self.labels:
-            for l in self.labels:
+        label_source = list(self.aff_mask_dict.keys()) if getattr(self, "aff_mask_dict", None) else []
+        if label_source:
+            for l in label_source:
                 Image.count[self.obj_type][l] -= 1
 
         self.free_memory()
@@ -1176,47 +1222,54 @@ class JointDataSample:
         ins: Instruction = None,
         img: Image = None,
         pc: PointCloud = None,
-        img_mask_idx=None,
-        pc_mask_idx=None,
+        aff_type: str = None,
         data_source_id: Optional[Dict[str, Any]] = None,
     ):
         """
         Args:
             ins: Instruction 对象
-            imgimg: Image 对象
+            img: Image 对象
             pc: PointCloud 对象
+            aff_type: 统一的 affordance 类型，当 ins 为 None 时必须传入
         """
         self.ins = ins
         self.img = img
-        self.img_mask_idx = img_mask_idx
         self.pc = pc
-        self.pc_mask_idx = pc_mask_idx
         self.data_source_id = data_source_id
         self.split = None
         
 
-        obj_type, aff_type = None, None
+        obj_type, aff_type_val = None, None
         if ins is not None: 
             obj_type = ins.obj_type
-            aff_type = ins.aff_type
-        elif img is not None:
-            obj_type = img.obj_type
-            aff_type = img.labels[img_mask_idx]
-        elif pc is not None:
-            obj_type = pc.obj_type
-            aff_type = pc.labels[pc_mask_idx]
+            aff_type_val = ins.aff_type
+        elif aff_type is not None:
+            aff_type_val = aff_type
+            if img is not None:
+                obj_type = img.obj_type
+                if img.get_aff_index(aff_type_val) is None:
+                    raise ValueError(f"Image 不包含 aff_type: {aff_type_val}")
+            elif pc is not None:
+                obj_type = pc.obj_type
+                if pc.get_aff_index(aff_type_val) is None:
+                    raise ValueError(f"PointCloud 不包含 aff_type: {aff_type_val}")
+            else:
+                raise ValueError("aff_type 需配合 img 或 pc 使用以确定 obj_type")
         else:
-            raise ValueError('没有任何一条数据包含obj_type或aff_type信息')
+            raise ValueError('需提供 ins 或 aff_type')
+
+        self.aff_type = aff_type_val
+        self.obj_type = obj_type
 
         # 如果没有 ins 参数输入，则使用点云的物体和类别作为 ins
         if ins is None and pc is not None:
             # 生成默认的 instruction 文本
             default_ins_templates = [
-                f"Please identify the {aff_type} affordance region of the {obj_type}.",
-                f"Find the area of the {obj_type} that is related to {aff_type} functionality.",
-                f"Which part of the {obj_type} provides the {aff_type} affordance?",
-                f"Locate the {aff_type} region on the {obj_type}.",
-                f"For this {obj_type}, show the {aff_type} functionality region.",
+                f"Please identify the {aff_type_val} affordance region of the {obj_type}.",
+                f"Find the area of the {obj_type} that is related to {aff_type_val} functionality.",
+                f"Which part of the {obj_type} provides the {aff_type_val} affordance?",
+                f"Locate the {aff_type_val} region on the {obj_type}.",
+                f"For this {obj_type}, show the {aff_type_val} functionality region.",
             ]
             default_ins_text = random.choice(default_ins_templates)
 
@@ -1224,11 +1277,9 @@ class JointDataSample:
             self.ins = Instruction(
                 ins=default_ins_text,
                 obj_type=obj_type,
-                aff_type=aff_type,
+                aff_type=aff_type_val,
             )
 
-        self.aff_type = aff_type
-        self.obj_type = obj_type
         JointDataSample.start_id += 1
         self.id = JointDataSample.start_id
 
@@ -1244,9 +1295,8 @@ class JointDataSample:
             self.data_source_id = {
                 'ins_id': self.ins.id if self.ins is not None else None,
                 'img_id': self.img.id if self.img is not None else None,
-                'img_mask_idx': self.img_mask_idx,
                 'pc_id': self.pc.id if self.pc is not None else None,
-                'pc_mask_idx': self.pc_mask_idx,
+                'aff_type': self.aff_type,
             }
     
     def apply_mask(self, mask_prob=(0, 0.02, 0.003)) -> 'JointDataSample':
@@ -1275,8 +1325,8 @@ class JointDataSample:
             'ins': self.ins.ins if self.is_available['ins'] else None,
             'img': self.img.img if self.is_available['img'] else None,
             'pc': self.pc.points if self.is_available['pc'] else None,
-            'img_gt': self.img.mask[self.img_mask_idx] if self.is_available['img'] else None,
-            'pc_gt': self.pc.mask[self.pc_mask_idx] if self.is_available['pc'] else None,
+            'img_gt': self.img.get_mask_by_aff(self.aff_type) if self.is_available['img'] else None,
+            'pc_gt': self.pc.get_mask_by_aff(self.aff_type) if self.is_available['pc'] else None,
             'data_source_id': self.data_source_id,
         }
 
@@ -1339,18 +1389,57 @@ class JointDataset:
         else:
             dataset_types_list = dataset_types
         
+        def _to_int(value):
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return value
+
+        def _dedup_entries(entries):
+            deduped = []
+            seen = set()
+            for entry in entries:
+                key = tuple(entry) if isinstance(entry, (list, tuple)) else entry
+                if key in seen:
+                    continue
+                seen.add(key)
+                deduped.append(entry)
+            return deduped
+
+        def _normalize_split_ids(sample_ids):
+            sample_ids['ins'] = sample_ids.get('Instruction', {})
+            sample_ids['img'] = sample_ids.get('Image', {})
+            sample_ids['pc'] = sample_ids.get('PointCloud', {})
+
+            for modality in ("ins", "img", "pc"):
+                for _, aff_map in sample_ids.get(modality, {}).items():
+                    for aff_name, entries in aff_map.items():
+                        aff_map[aff_name] = _dedup_entries(entries)
+
+            # Image 支持新格式 [img_id] 与旧格式 [[img_id, idx], ...]，统一为 img_id
+            for _, aff_map in sample_ids.get("img", {}).items():
+                for aff_name, entries in aff_map.items():
+                    normalized_img_ids = []
+                    seen_img = set()
+                    for entry in entries:
+                        if isinstance(entry, (list, tuple)):
+                            if len(entry) == 0:
+                                continue
+                            img_id = _to_int(entry[0])
+                        else:
+                            img_id = _to_int(entry)
+                        key = str(img_id)
+                        if key in seen_img:
+                            continue
+                        seen_img.add(key)
+                        normalized_img_ids.append(img_id)
+                    aff_map[aff_name] = normalized_img_ids
+            return sample_ids
+
         res = []
         for dtype in dataset_types_list:
-            # 加载分割索引
             sample_ids = split_data.get(dtype, create_info_dict())
-            
-            # 兼容缩写
-            for e in (sample_ids, ):
-                e['ins'] = e['Instruction']
-                e['img'] = e['Image']
-                e['pc'] = e['PointCloud']
-
-            res.append(sample_ids)
+            res.append(_normalize_split_ids(sample_ids))
         
         if isinstance(dataset_types, str):
             return res[0]
@@ -1434,34 +1523,60 @@ class JointDataset:
                     # 获取 Instruction
                     ins = Instruction.get_by_id(obj_type, ins_ids[i]) if i < len(ins_ids) else None
                     
-                    # 获取 Image 和 GT
-                    image, img_mask_idx = None, None 
+                    # 获取 Image（按 aff_type 检查是否包含该 affordance）
+                    image = None
                     if i < len(img_ids):
-                        image = Image.get_by_id(obj_type, img_ids[i][0])
-                        img_mask_idx = img_ids[i][1]
+                        img_entry = img_ids[i]
+                        img_id = img_entry[0] if isinstance(img_entry, (list, tuple)) and len(img_entry) > 0 else img_entry
+                        image = Image.get_by_id(obj_type, img_id)
+                        if image is not None:
+                            has_aff = image.get_aff_index(aff_type) is not None
+                            if not has_aff and isinstance(img_entry, (list, tuple)) and len(img_entry) > 1:
+                                fallback_idx = int(img_entry[1])
+                                if 0 <= fallback_idx < len(image.get_aff_types()) and image.get_aff_type_by_index(fallback_idx) == aff_type:
+                                    has_aff = True  # 旧格式兼容
+                                else:
+                                    warnings.warn(
+                                        f"Image 旧格式索引与 aff_type 不一致，已跳过: "
+                                        f"{obj_type}-{aff_type}, image_id={img_id}"
+                                    )
+                            if not has_aff:
+                                image = None
                     
-                    # 获取 PointCloud 和 GT
+                    # 获取 PointCloud（按 aff_type 检查是否包含该 affordance）
                     pc = None
-                    pc_mask_idx = None
                     if i < len(pc_ids):
-                        pc = PointCloud.get_by_id(obj_type, pc_ids[i][0])
-                        pc_mask_idx =  pc_ids[i][1]
+                        pc_entry = pc_ids[i]
+                        pc_id = pc_entry[0] if isinstance(pc_entry, (list, tuple)) and len(pc_entry) > 0 else pc_entry
+                        pc = PointCloud.get_by_id(obj_type, pc_id)
+                        if pc is not None:
+                            has_aff = pc.get_aff_index(aff_type) is not None
+                            if not has_aff and isinstance(pc_entry, (list, tuple)) and len(pc_entry) > 1:
+                                # 兼容旧格式 (pc_id, mask_idx)：验证索引对应 aff_type
+                                mask_idx = int(pc_entry[1])
+                                if 0 <= mask_idx < len(pc.get_aff_types()) and pc.get_aff_type_by_index(mask_idx) == aff_type:
+                                    has_aff = True
+                                else:
+                                    warnings.warn(
+                                        f"PointCloud 旧格式索引与 aff_type 不一致，已跳过: "
+                                        f"{obj_type}-{aff_type}, pc_id={pc_id}"
+                                    )
+                            if not has_aff:
+                                pc = None
                     
                     # 至少有一个模态有数据才创建样本
                     if (ins or image or pc) is not None:
                         data_source_id = {
                             'ins_id': ins.id if ins is not None else None,
                             'img_id': image.id if image is not None else None,
-                            'img_mask_idx': img_mask_idx,
                             'pc_id': pc.id if pc is not None else None,
-                            'pc_mask_idx': pc_mask_idx,
+                            'aff_type': aff_type,
                         }
                         sample = JointDataSample(
                             ins=ins,
                             img=image,
                             pc=pc,
-                            img_mask_idx=img_mask_idx,
-                            pc_mask_idx=pc_mask_idx,
+                            aff_type=aff_type,
                             data_source_id=data_source_id,
                         )
                         samples.append(sample)
@@ -1562,9 +1677,22 @@ class JointDataset:
             train_ratio: float = None, 
             val_ratio: float = None, 
             test_ratio: float = None,
-            random_seed = 42,
+            # 采样设置
+            sample_rate: float = None,
+            max_sample_per_group: int = None,
+            min_sample_per_group: int = 10,
+            random_seed: int = 114514,
         ):
-        """分割自身数据为train、test、val数据集并保存json文件，仅在加载全部数据的时候手动使用"""
+        """
+        分割自身数据为 train、val、test 并保存 json 文件，仅在加载全部数据时手动使用。
+
+        Args:
+            train_ratio, val_ratio, test_ratio: 分割比例
+            random_seed: 切分随机种子
+            sample_rate: 采样率 (0~1)，None 表示不采样、使用全量
+            max_sample_per_group: 每组 (obj_type, aff_type) 最大采样数，防止大组主导
+            min_sample_per_group: 每组最小保留数，避免小组被采空
+        """
         random.seed(random_seed)
         # 构建分割比例
         ratios = [train_ratio, val_ratio, test_ratio]
@@ -1593,10 +1721,10 @@ class JointDataset:
                 # 查找匹配的 Image（按 id 匹配）
                 matched_image = Image.get_by_id(obj_type, inst.id)
                 
-                if matched_image:
-                    for i, aff in enumerate(matched_image.labels):
-                        pair = (inst.id, (matched_image.id, i))  # NOTE: 一张图片可能对应多个inst（不同aff_type），因此使用时需要用对应的aff_type
-                        text_image_pairs[obj_type][aff].append(pair)
+                # 一条指令只配对自己的 aff_type，避免跨 aff 扩增造成分割失衡
+                if matched_image and inst.aff_type in matched_image.aff_mask_dict:
+                    pair = (inst.id, matched_image.id)
+                    text_image_pairs[obj_type][inst.aff_type].append(pair)
 
         # 按 obj_type 和 aff_type 分组点云
         # 结构: {obj_type: {aff_type: [pc_ids]}}
@@ -1604,15 +1732,30 @@ class JointDataset:
         
         for obj_type, pcs in PointCloud.all.items():
             for pc in pcs:
-                if pc is None or pc.labels is None:
+                if pc is None or not pc.aff_mask_dict:
                     continue
-                for idx, label in enumerate(pc.labels):
+                for idx, label in enumerate(pc.get_aff_types()):
                     pc_groups[obj_type][label].append(((pc.id, idx),)) # 兼容图文对 _split_group
         
         
         train_ids = create_info_dict()
         val_ids = create_info_dict()
         test_ids = create_info_dict()
+
+        def _apply_sampling(unique_ids: list, n_total: int, obj_type: str, aff_type: str) -> list:
+            """在按比例切分之前进行采样，返回采样后的 id 列表。"""
+            if sample_rate is None:
+                return unique_ids
+            # 每组使用不同但可复现的种子
+            group_seed = hash((obj_type, aff_type, random_seed)) % (2 ** 32)
+            rng = random.Random(group_seed)
+            # 计算目标采样数
+            n_target = max(min_sample_per_group, int(round(n_total * sample_rate)))
+            if max_sample_per_group is not None:
+                n_target = min(n_target, max_sample_per_group)
+            n_target = min(n_target, n_total)
+            return rng.sample(unique_ids, n_target)
+
         def _split_group(groups, inner):
             nonlocal train_ids, val_ids, test_ids
             # 对每个分组进行分割
@@ -1624,12 +1767,30 @@ class JointDataset:
                     # 去重并打乱
                     unique_ids = list(set(inner_ids))
                     random.shuffle(unique_ids)
-                    
                     n_total = len(unique_ids)
-                    # if n_total < 5: continue # 数量过少会导致全部划分到train数据集中(Hack:@Lyh 只训练，不评估，增加鲁棒性？)
-                    n_test = int(n_total * test_ratio)
-                    n_val = int(n_total * val_ratio)
-                    # train 取剩余的，避免舍入误差
+
+                    # 在按比例切分之前进行采样
+                    unique_ids = _apply_sampling(unique_ids, n_total, obj_type, aff_type)
+                    n_total = len(unique_ids)
+                    # 小样本组在 floor 下容易出现 val/test 近乎为空，这里做最小分配保护
+                    assert test_ratio > 0 and val_ratio > 0, "test_ratio 和 val_ratio 不能为0"
+                    if n_total <= 10:
+                        warnings.warn(f"{obj_type}-{aff_type} 样本数量过少: {n_total}，只训练不评估")
+                        n_test = 0
+                        n_val = 0
+                    else:
+                        n_test = max(5, int(round(n_total * test_ratio)))
+                        n_val = max(5, int(round(n_total * val_ratio)))
+
+                    # 防止 n_test + n_val 溢出，至少留 10 条给 train
+                    if n_test + n_val >= n_total:
+                        overflow = n_test + n_val - (n_total - 10)
+                        while overflow > 0 and (n_val > 0 or n_test > 0):
+                            if n_val >= n_test and n_val > 0:
+                                n_val -= 1
+                            elif n_test > 0:
+                                n_test -= 1
+                            overflow -= 1
                     
                     # 分割ID
                     test_list = unique_ids[:n_test]
@@ -1646,6 +1807,7 @@ class JointDataset:
         _split_group(pc_groups, ('pc',))
 
 
+        assert not self.balance_data, "balance_data 不建议启用，容易引起数据分布的改变从而影响模型的训练和评估"
         train_dataset = JointDataset(
             dataset_root=self.dataset_root,
             sample_ids=train_ids,
@@ -1653,7 +1815,6 @@ class JointDataset:
             aff_type=self.aff_type,
             keep_id=self.keep_id,
             balance_data=self.balance_data,
-            mask_prob=self.mask_prob,
             dtype='train'
         )
         val_dataset = JointDataset(
@@ -1663,7 +1824,6 @@ class JointDataset:
             aff_type=self.aff_type,
             keep_id=self.keep_id,
             balance_data=self.balance_data,
-            mask_prob=self.mask_prob,
             dtype='val'
         )
         test_dataset = JointDataset(
@@ -1673,7 +1833,6 @@ class JointDataset:
             aff_type=self.aff_type,
             keep_id=self.keep_id,
             balance_data=self.balance_data,
-            mask_prob=self.mask_prob,
             dtype='test'
         )
 
@@ -1688,14 +1847,14 @@ class JointDataset:
                     "train_sample": 7500,
                     "val_sample": 1500,
                     "test_sample": 1000,
-                    "train_ratio": 0.75,
+                    "train_ratio": 0.7,
                     "val_ratio": 0.15,
-                    "test_ratio": 0.1,
+                    "test_ratio": 0.15,
                     "random_seed": 114514
                 },
                 "train": {
                     'Instruction': {obj_type: {aff_type: [id1, id2, ...]}},
-                    'Image': {obj_type: {aff_type: [(id, mask_idx), ...]}},
+                    'Image': {obj_type: {aff_type: [id1, id2, ...]}},
                     'PointCloud': {obj_type: {aff_type: [(id, mask_idx), ...]}}
                 },
                 "val": {...},
@@ -1707,26 +1866,55 @@ class JointDataset:
             obj_aff_count = defaultdict(lambda: defaultdict(int))
             for sample in self.samples:
                 obj_aff_count[sample.obj_type][sample.aff_type] += 1
+
+            def _collect_obj_aff_counts(split_ids):
+                """
+                统计单个 split 中各模态的 {obj_type: {aff_type: count}}。
+                计数规则：以 id 列表长度计数
+                """
+                split_counts = {}
+                for modality in ("Instruction", "Image", "PointCloud"):
+                    modality_counts = {"total":0}
+                    modality_ids = split_ids.get(modality, {})
+                    for obj_type, aff_map in modality_ids.items():
+                        obj_counts = {"total":0}
+                        for aff_type, entries in aff_map.items():
+                            obj_counts[aff_type] = len(entries)
+                            obj_counts["total"] += len(entries)
+                        modality_counts[obj_type] = obj_counts
+                        modality_counts["total"] += obj_counts["total"]
+                    split_counts[modality] = modality_counts
+                return split_counts
                     
             # 构建JSON数据
-            split_data = {
-                'metadata': {
-                    'total_sample': len(train_dataset) + len(val_dataset) + len(test_dataset),
-                    'train_sample': len(train_dataset),
-                    'val_sample': len(val_dataset),
-                    'test_sample': len(test_dataset),
-                    'train_ratio': train_ratio,
-                    'val_ratio': val_ratio,
-                    'test_ratio': test_ratio,
-                    'random_seed': random_seed,
-                    'obj_aff_count': obj_aff_count,
+            metadata = {
+                'total_sample': len(train_dataset) + len(val_dataset) + len(test_dataset),
+                'train_sample': len(train_dataset),
+                'val_sample': len(val_dataset),
+                'test_sample': len(test_dataset),
+                'train_ratio': train_ratio,
+                'val_ratio': val_ratio,
+                'test_ratio': test_ratio,
+                'random_seed': random_seed,
+                'obj_aff_count': obj_aff_count,
+                'obj_aff_count_by_split': {
+                    'train': _collect_obj_aff_counts(train_ids),
+                    'val': _collect_obj_aff_counts(val_ids),
+                    'test': _collect_obj_aff_counts(test_ids),
                 },
+            }
+            if sample_rate is not None:
+                metadata['sample_rate'] = sample_rate
+                metadata['max_sample_per_group'] = max_sample_per_group
+                metadata['min_sample_per_group'] = min_sample_per_group
+            split_data = {
+                'metadata': metadata,
                 'train': {k: train_ids[k] for k in ('Instruction', 'Image', 'PointCloud')},
                 'val': {k: val_ids[k] for k in ('Instruction', 'Image', 'PointCloud')},
                 'test': {k: test_ids[k] for k in ('Instruction', 'Image', 'PointCloud')}
             }
 
-            # 去除值为空的键
+            # 去除值为空的aff
             for t in split_data.keys():
                 if t == 'metadata': continue
                 for m in split_data[t].keys():
@@ -1870,8 +2058,14 @@ def main():
                         help='验证集比例')
     parser.add_argument('--test-ratio', type=float, default=0.15,
                         help='测试集比例')
-    parser.add_argument('--seed', type=int, default=42,
+    parser.add_argument('--seed', type=int, default=114514,
                         help='随机种子')
+    parser.add_argument('--sample-rate', type=float, default=None,
+                        help='采样率 (0~1)，None 表示不采样')
+    parser.add_argument('--max-sample-per-group', type=int, default=None,
+                        help='每组 (obj_type, aff_type) 最大采样数')
+    parser.add_argument('--min-sample-per-group', type=int, default=10,
+                        help='每组最小保留数')
     parser.add_argument('--no-balance', action='store_true',
                         help='禁用数据平衡（默认启用）')
     parser.add_argument('--save-split', action='store_true',
@@ -1945,6 +2139,9 @@ def main():
                 val_ratio=args.val_ratio,
                 test_ratio=args.test_ratio,
                 random_seed=args.seed,
+                sample_rate=args.sample_rate,
+                max_sample_per_group=args.max_sample_per_group,
+                min_sample_per_group=args.min_sample_per_group,
             )
     else:
         parser.error("未使用 -s/--show 时需指定 -d/--dataset-root")
