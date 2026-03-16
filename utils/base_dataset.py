@@ -2066,7 +2066,7 @@ def main():
                         help='每组 (obj_type, aff_type) 最大采样数')
     parser.add_argument('--min-sample-per-group', type=int, default=10,
                         help='每组最小保留数')
-    parser.add_argument('--no-balance', action='store_true',
+    parser.add_argument('--no-balance', action='store_true', default=True,
                         help='禁用数据平衡（默认启用）')
     parser.add_argument('--save-split', action='store_true',
                         help='保存数据集分割结果为JSON文件')
