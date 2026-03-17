@@ -596,7 +596,7 @@ def main():
     ]
     csv_path = os.path.join(out_dir, "validation_samples.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=csv_fields)
+        writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(sample_records)
     print(f"\n逐样本评估结果已保存到: {csv_path}")
