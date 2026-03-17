@@ -307,7 +307,7 @@ def _aggregate_by_label(sample_records: List[Dict]) -> Dict:
             "overall": {"iou_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int},
         }
     """
-    metric_keys = ("iou_2d", "iou_3d", "mae_3d", "sim_3d")
+    metric_keys = ("giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d")
 
     # 按 (obj, aff) 收集有效值
     obj_aff_vals: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -318,16 +318,24 @@ def _aggregate_by_label(sample_records: List[Dict]) -> Dict:
         obj, aff = r.get("obj_type", ""), r.get("aff_type", "")
         if not obj or not aff:
             continue
-        iou_2d = _parse_metric_val(r.get("iou_2d"))
+        giou_2d = _parse_metric_val(r.get("giou_2d"))
+        inter_2d = _parse_metric_val(r.get("inter_2d"))
+        union_2d = _parse_metric_val(r.get("union_2d"))
         iou_3d = _parse_metric_val(r.get("iou_3d"))
+        auc_3d = _parse_metric_val(r.get("auc_3d"))
         mae_3d = _parse_metric_val(r.get("mae_3d"))
         sim_3d = _parse_metric_val(r.get("sim_3d"))
-        if iou_2d is not None:
-            obj_aff_vals[obj][aff]["iou_2d"].append(iou_2d)
+        if giou_2d is not None:
+            obj_aff_vals[obj][aff]["giou_2d"].append(giou_2d)
             obj_aff_n2d[(obj, aff)] += 1
+        if inter_2d is not None and union_2d is not None:
+            obj_aff_vals[obj][aff]["inter_2d"].append(inter_2d)
+            obj_aff_vals[obj][aff]["union_2d"].append(union_2d)
         if iou_3d is not None:
             obj_aff_vals[obj][aff]["iou_3d"].append(iou_3d)
             obj_aff_n3d[(obj, aff)] += 1
+        if auc_3d is not None:
+            obj_aff_vals[obj][aff]["auc_3d"].append(auc_3d)
         if mae_3d is not None:
             obj_aff_vals[obj][aff]["mae_3d"].append(mae_3d)
         if sim_3d is not None:
@@ -339,8 +347,15 @@ def _aggregate_by_label(sample_records: List[Dict]) -> Dict:
     def _to_summary(vals: Dict[str, List[float]], n2d: int, n3d: int) -> Dict:
         out = {}
         for k in metric_keys:
-            v = _mean(vals.get(k, []))
-            out[k] = v
+            if k == "ciou_2d":
+                inter_lst = vals.get("inter_2d", [])
+                union_lst = vals.get("union_2d", [])
+                if inter_lst and union_lst and sum(union_lst) > 0:
+                    out[k] = round(sum(inter_lst) / sum(union_lst), 6)
+                else:
+                    out[k] = None
+            else:
+                out[k] = _mean(vals.get(k, []))
         out["n_2d"] = n2d
         out["n_3d"] = n3d
         return out
@@ -526,13 +541,19 @@ def main():
                     record["pred_token_ids"] = "[]"
                     record["pred_text"] = ""
 
-                # ---- 逐样本 2D/3D 指标（统一调用 calculator.py）----
+                # ---- 逐样本 2D/3D 指标（与总体一致：giou_2d, ciou_2d, iou_3d=aiou20, auc_3d 等）----
                 sample_metrics = compute_sample_metrics(
                     output_dict, input_dict, i,
                     threshold_2d=threshold_2d, threshold_3d=threshold_3d,
                 )
-                for mk in ("iou_2d", "iou_3d", "mae_3d", "sim_3d"):
+                for mk in ("giou_2d", "inter_2d", "union_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d"):
                     record[mk] = sample_metrics[mk] if sample_metrics[mk] is not None else ""
+                # 逐样本 ciou_2d = inter/union（与总体 ciou 定义一致）
+                inter_2d, union_2d = sample_metrics.get("inter_2d"), sample_metrics.get("union_2d")
+                if inter_2d is not None and union_2d is not None and union_2d > 0:
+                    record["ciou_2d"] = round(inter_2d / union_2d, 6)
+                else:
+                    record["ciou_2d"] = ""
 
                 sample_records.append(record)
 
@@ -571,7 +592,7 @@ def main():
         "sample_id", "obj_type", "aff_type",
         "text_id", "img_id", "pc_id",
         "pred_token_ids", "pred_text", "gt_text",
-        "iou_2d", "iou_3d", "mae_3d", "sim_3d",
+        "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d",
     ]
     csv_path = os.path.join(out_dir, "validation_samples.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -595,7 +616,7 @@ def main():
     obj_aff_csv = os.path.join(out_dir, "validation_by_obj_aff.csv")
     if obj_aff_rows:
         with open(obj_aff_csv, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["obj_type", "aff_type", "iou_2d", "iou_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+            writer = csv.DictWriter(f, fieldnames=["obj_type", "aff_type", "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
             writer.writeheader()
             writer.writerows(obj_aff_rows)
         print(f"按 obj-aff 聚合结果已保存到: {obj_aff_csv}")
@@ -605,7 +626,7 @@ def main():
     obj_csv = os.path.join(out_dir, "validation_by_obj.csv")
     if obj_rows:
         with open(obj_csv, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["obj_type", "iou_2d", "iou_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+            writer = csv.DictWriter(f, fieldnames=["obj_type", "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
             writer.writeheader()
             writer.writerows(obj_rows)
         print(f"按 obj 聚合结果已保存到: {obj_csv}")
@@ -615,7 +636,7 @@ def main():
     aff_csv = os.path.join(out_dir, "validation_by_aff.csv")
     if aff_rows:
         with open(aff_csv, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["aff_type", "iou_2d", "iou_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+            writer = csv.DictWriter(f, fieldnames=["aff_type", "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
             writer.writeheader()
             writer.writerows(aff_rows)
         print(f"按 aff 聚合结果已保存到: {aff_csv}")

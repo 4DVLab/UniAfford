@@ -146,10 +146,15 @@ def compute_sample_metrics(
     """
     计算单个样本的 2D/3D 指标（供 validate.py 逐样本记录使用）。
 
-    统一调用 calculator.py，避免在 validate.py 的循环中重复手写指标计算。
+    与总体指标一致：giou_2d（逐样本 IoU）、ciou 需累积 inter/union；
+    iou_3d 为 aIoU-20；auc_3d 为 ROC-AUC。
 
     Returns:
-        {"iou_2d": float|None, "iou_3d": float|None, "mae_3d": float|None, "sim_3d": float|None}
+        {
+            "giou_2d": float|None, "inter_2d": float|None, "union_2d": float|None,
+            "iou_3d": float|None,  # aIoU-20
+            "auc_3d": float|None, "mae_3d": float|None, "sim_3d": float|None,
+        }
     """
     record = {}
     i = sample_idx
@@ -162,9 +167,14 @@ def compute_sample_metrics(
             and (img_valid is None or img_valid[i].bool())):
         pred_2d = img_logits[i].detach().sigmoid().unsqueeze(0)
         gt_2d = img_gt[i].float().unsqueeze(0)
-        record["iou_2d"] = round(calc.img_IoU(pred_2d, gt_2d, threshold=threshold_2d)[0].item(), 6)
+        record["giou_2d"] = round(calc.img_IoU(pred_2d, gt_2d, threshold=threshold_2d)[0].item(), 6)
+        inter_2d, union_2d = calc.img_I_and_U(pred_2d, gt_2d, threshold=threshold_2d)
+        record["inter_2d"] = round(inter_2d[0].item(), 6)
+        record["union_2d"] = round(union_2d[0].item(), 6)
     else:
-        record["iou_2d"] = None
+        record["giou_2d"] = None
+        record["inter_2d"] = None
+        record["union_2d"] = None
 
     # 3D
     pt_logits = output_dict.get("point_logits")
@@ -174,14 +184,18 @@ def compute_sample_metrics(
             and (pc_valid is None or pc_valid[i] > 0)):
         pred_3d = pt_logits[i].detach().sigmoid().unsqueeze(0)
         gt_3d = pc_gt[i].float().unsqueeze(0)
-        # 单样本也使用 aIoU-20 作为 IoU3D
         record["iou_3d"] = round(calc.pc_aIOU(pred_3d, gt_3d, num_thresholds=20).item(), 6)
         record["mae_3d"] = round(calc.pc_MAE(pred_3d, gt_3d).item(), 6)
         record["sim_3d"] = round(calc.pc_SIM(pred_3d, gt_3d)[0].item(), 6)
+        try:
+            record["auc_3d"] = round(calc.pc_AUC(pred_3d, gt_3d, num_thresholds=50).item(), 6)
+        except Exception:
+            record["auc_3d"] = None
     else:
         record["iou_3d"] = None
         record["mae_3d"] = None
         record["sim_3d"] = None
+        record["auc_3d"] = None
 
     return record
 
