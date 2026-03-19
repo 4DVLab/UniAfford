@@ -1483,6 +1483,7 @@ class SplitManager:
 
         def _collect_obj_aff_counts(split_ids):
             split_counts = {}
+            total = 0 
             for modality in ("Instruction", "Image", "PointCloud"):
                 modality_counts = {"total": 0}
                 modality_ids = split_ids.get(modality, {})
@@ -1493,22 +1494,26 @@ class SplitManager:
                         obj_counts["total"] += len(entries)
                     modality_counts[obj_type_name] = obj_counts
                     modality_counts["total"] += obj_counts["total"]
+                total += obj_counts["total"]
                 split_counts[modality] = modality_counts
-            return split_counts
+            return total, split_counts
 
+        n_train, train_counts = _collect_obj_aff_counts(train_ids)
+        n_val, val_counts = _collect_obj_aff_counts(val_ids)
+        n_test, test_counts = _collect_obj_aff_counts(test_ids)
         metadata = {
-            'total_sample': len(train_dataset) + len(val_dataset) + len(test_dataset),
-            'train_sample': len(train_dataset),
-            'val_sample': len(val_dataset),
-            'test_sample': len(test_dataset),
+            'total_sample': n_train + n_val + n_test,
+            'train_sample': n_train,
+            'val_sample': n_val,
+            'test_sample': n_test,
             'train_ratio': train_ratio,
             'val_ratio': val_ratio,
             'test_ratio': test_ratio,
             'random_seed': random_seed,
             'obj_aff_count_by_split': {
-                'train': _collect_obj_aff_counts(train_ids),
-                'val': _collect_obj_aff_counts(val_ids),
-                'test': _collect_obj_aff_counts(test_ids),
+                'train': train_counts,
+                'val': val_counts,
+                'test': test_counts,
             },
         }
         if sample_rate is not None:
@@ -1531,10 +1536,6 @@ class SplitManager:
                                     if not split_data[t][m][obj_type_name][k]]
                     for k in keys_to_remove:
                         del split_data[t][m][obj_type_name][k]
-
-        def _normalize_pc_to_ids(entries):
-            """PointCloud 与 Image 一致，只保存 id，不保存 index。"""
-            return [e[0] if isinstance(e, (list, tuple)) and len(e) > 0 else e for e in entries]
 
         def _dump_split_part(part: dict, f) -> None:
             """将分割 JSON 写入文件，每个 aff 的 ids 列表保持在同一行。"""
@@ -1575,10 +1576,7 @@ class SplitManager:
                         for aff, entries in aff_map.items():
                             if not entries:
                                 continue
-                            if k == 'PointCloud':
-                                part[k][obj][aff] = _normalize_pc_to_ids(entries)
-                            else:
-                                part[k][obj][aff] = list(entries)
+                            part[k][obj][aff] = list(entries)
                 with open(os.path.join(save_dir, f'{name}.json'), 'w', encoding='utf-8') as f:
                     _dump_split_part(part, f)
             print(f"分割结果已保存至: {save_dir} (metadata.json, train.json, val.json, test.json)")
@@ -1679,37 +1677,6 @@ class JointDataset:
                 for aff_name, entries in list(aff_map.items()):
                     aff_map[aff_name] = _dedup_entries(entries)
 
-        for _, aff_map in sample_ids.get("img", {}).items():
-            for aff_name, entries in list(aff_map.items()):
-                normalized_img_ids = []
-                seen_img = set()
-                for entry in entries:
-                    if isinstance(entry, (list, tuple)):
-                        if len(entry) == 0:
-                            continue
-                        img_id = _to_int(entry[0])
-                    else:
-                        img_id = _to_int(entry)
-                    key = str(img_id)
-                    if key in seen_img:
-                        continue
-                    seen_img.add(key)
-                    normalized_img_ids.append(img_id)
-                aff_map[aff_name] = normalized_img_ids
-
-        for _, aff_map in sample_ids.get("pc", {}).items():
-            for aff_name, entries in list(aff_map.items()):
-                normalized_pc_ids = []
-                seen_pc = set()
-                for entry in entries:
-                    pc_id = entry[0] if isinstance(entry, (list, tuple)) and len(entry) > 0 else entry
-                    pc_id = _to_int(pc_id)
-                    key = str(pc_id)
-                    if key in seen_pc:
-                        continue
-                    seen_pc.add(key)
-                    normalized_pc_ids.append(pc_id)
-                aff_map[aff_name] = normalized_pc_ids
         return sample_ids
 
     def load_all_data(self, filter_by_ids=None):

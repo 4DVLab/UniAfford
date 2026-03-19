@@ -1,7 +1,7 @@
 """
 JointAffordance模型骨架，子架构分布到其他model中并作为模块导入
 """
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 import torch
 import torch.nn as nn
 
@@ -22,9 +22,10 @@ class JointAffordanceModel(nn.Module):
         self.config = config or JointAffordanceConfig()
 
         self.mllm = MLLMBackbone(self.config.mllm)
-        # 以 mllm 初始化后的 token 索引为准。
         self.functional_tokens = self.mllm.functional_tokens
         self.functional_token_ids = self.mllm.functional_token_ids
+        # 双向映射：token_id -> {name, modality}，用于从 output_ids 中快速查找功能 token
+        self.id_to_token_info = getattr(self.mllm, "id_to_token_info", {})
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
         self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
@@ -36,139 +37,42 @@ class JointAffordanceModel(nn.Module):
     @property
     def processor(self): return self.mllm.processor
 
-    def _extract_token_embeddings(
+    def _extract_aff_from_output_ids(
         self,
-        last_hidden_state: torch.Tensor,
-        token_ids: Optional[torch.Tensor],
-        token_idx: int,
-        fallback_token_ids: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
+        hidden_states: torch.Tensor,
+        output_ids: torch.Tensor,
+        id_to_token_info: dict,
+    ) -> Dict[str, List[List[Tuple[str, torch.Tensor]]]]:
         """
-        从隐藏状态中提取匹配特殊 token（如 [SEG]）位置的嵌入。
-
-        当前假设每个样本恰好有 1 个 [SEG] token。
-        TODO: 若后续支持多 [SEG]（一个 SEG 对应一组图像/点云），
-              应返回 [B, N_seg, C] 并在下游逐 SEG 生成 mask。
-
-        Args:
-            last_hidden_state: [B, L', C] 投影后的隐藏状态。
-            token_ids: [B, L] 的 token id 序列（通常来自模型输出 logits 的 argmax）。
-            token_idx: 特殊 token 的词汇表索引。
+        从 output_ids 中按顺序查找功能 token（在 id_to_token_info 中），提取 hidden state。
+        按模态分组，下游 2D/3D 分支对其对应所有 token 推理。
 
         Returns:
-            token_embeddings: [B, C] — 每个样本中第一个匹配 token 的嵌入。
-                若某样本无匹配 token，对应行为零向量。
+            Dict[str, List[List[Tuple[str, Tensor]]]]:
+                - "img": 每样本 [(token_str, emb), ...] 该样本所有 img 模态 token
+                - "pc": 每样本 [(token_str, emb), ...] 该样本所有 pc 模态 token
         """
-        B, _, C = last_hidden_state.shape
-        if token_idx is None:
-            return last_hidden_state.new_zeros(B, C)
+        B, L, C = hidden_states.shape
+        aff_emb_dict: Dict[str, List[List[Tuple[str, torch.Tensor]]]] = {
+            "img": [[] for _ in range(B)],
+            "pc": [[] for _ in range(B)],
+        }
 
-        # 训练稳定性保底：
-        # 若某样本在 token_ids 中未命中目标 token，则回退到 fallback_token_ids（通常是 input_ids）。
-        if token_ids is None:
-            token_ids = fallback_token_ids
-        elif fallback_token_ids is not None:
-            token_ids = token_ids.clone()
-            min_len = min(token_ids.shape[1], fallback_token_ids.shape[1])
-            pred_has_token = (token_ids[:, :min_len] == int(token_idx)).any(dim=1)
-            fallback_has_token = (fallback_token_ids[:, :min_len] == int(token_idx)).any(dim=1)
-            fallback_rows = (~pred_has_token) & fallback_has_token
-            if fallback_rows.any():
-                token_ids[fallback_rows, :min_len] = fallback_token_ids[fallback_rows, :min_len]
+        for i in range(B):
+            seq_len = min(L, output_ids.shape[1])
+            for pos in range(seq_len):
+                tid = int(output_ids[i, pos].item())
+                if tid not in id_to_token_info:
+                    continue
+                info = id_to_token_info[tid]
+                emb = hidden_states[i, pos, :]
+                pair = (info["token"], emb)
+                modality = info.get("modality", "pc")
+                if modality not in aff_emb_dict:
+                    continue
+                aff_emb_dict[modality][i].append(pair)
 
-        if token_ids is None:
-            return last_hidden_state.new_zeros(B, C)
-
-        token_mask = (token_ids == int(token_idx))
-
-        # 若长度不一致，截断到较短的公共长度
-        if last_hidden_state.shape[1] != token_mask.shape[1]:
-            min_len = min(last_hidden_state.shape[1], token_mask.shape[1])
-            token_mask = token_mask[:, :min_len]
-            last_hidden_state = last_hidden_state[:, :min_len, :]
-
-        # 取每个样本中第一个匹配位置的嵌入（无匹配时返回零向量）
-        # has_token: [B], first_idx: [B]（无匹配时 first_idx 为 0，但会被 has_token 置零）
-        has_token = token_mask.any(dim=1)                                    # [B]
-        first_idx = token_mask.to(torch.long).argmax(dim=1)                  # [B]
-        # 用 gather 提取：[B, L, C] → [B, 1, C] → [B, C]
-        embeddings = last_hidden_state.gather(
-            1, first_idx.unsqueeze(-1).unsqueeze(-1).expand(B, 1, C)
-        ).squeeze(1)                                                         # [B, C]
-        # 无匹配 token 的样本置零
-        embeddings = embeddings * has_token.unsqueeze(-1).to(embeddings.dtype)
-        return embeddings
-
-    def _extract_per_sample_token_embeddings(
-        self,
-        last_hidden_state: torch.Tensor,
-        token_ids: Optional[torch.Tensor],
-        token_idx_per_sample: Optional[torch.Tensor],
-        fallback_token_ids: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """按样本使用不同 token id 提取提示向量。"""
-        B, _, C = last_hidden_state.shape
-        if token_idx_per_sample is None:
-            return last_hidden_state.new_zeros(B, C)
-
-        if token_ids is None:
-            token_ids = fallback_token_ids
-        elif fallback_token_ids is not None:
-            token_ids = token_ids.clone()
-            min_len = min(token_ids.shape[1], fallback_token_ids.shape[1])
-            valid_ids = token_idx_per_sample >= 0
-            pred_has_token = (
-                token_ids[:, :min_len] == token_idx_per_sample.unsqueeze(1)
-            ).any(dim=1) & valid_ids
-            fallback_has_token = (
-                fallback_token_ids[:, :min_len] == token_idx_per_sample.unsqueeze(1)
-            ).any(dim=1) & valid_ids
-            fallback_rows = (~pred_has_token) & fallback_has_token
-            if fallback_rows.any():
-                token_ids[fallback_rows, :min_len] = fallback_token_ids[fallback_rows, :min_len]
-
-        if token_ids is None:
-            return last_hidden_state.new_zeros(B, C)
-
-        if last_hidden_state.shape[1] != token_ids.shape[1]:
-            min_len = min(last_hidden_state.shape[1], token_ids.shape[1])
-            last_hidden_state = last_hidden_state[:, :min_len, :]
-            token_ids = token_ids[:, :min_len]
-
-        token_mask = token_ids == token_idx_per_sample.unsqueeze(1)
-        has_token = token_mask.any(dim=1)
-        first_idx = token_mask.to(torch.long).argmax(dim=1)
-        embeddings = last_hidden_state.gather(
-            1, first_idx.unsqueeze(-1).unsqueeze(-1).expand(B, 1, C)
-        ).squeeze(1)
-        embeddings = embeddings * has_token.unsqueeze(-1).to(embeddings.dtype)
-        return embeddings
-
-    def _resolve_obj_aff_token_ids(
-        self,
-        obj_type: Optional[List[str]],
-        aff_type: Optional[List[str]],
-        batch_size: int,
-        device: torch.device,
-    ) -> Optional[torch.Tensor]:
-        """将 batch 内 (obj, aff) 映射为功能 token id。"""
-        if obj_type is None or aff_type is None:
-            return None
-        if len(obj_type) != batch_size or len(aff_type) != batch_size:
-            return None
-
-        unk_id = self.tokenizer.unk_token_id
-        token_ids = []
-        for obj_name, aff_name in zip(obj_type, aff_type):
-            pair_key = f"{obj_name}-{aff_name}"
-            token_id = self.functional_token_ids.get(pair_key)
-            if token_id is None:
-                token_text = self.functional_tokens.get(pair_key, f"<{pair_key}>")
-                token_id = self.tokenizer.convert_tokens_to_ids(token_text)
-                if token_id is None or (unk_id is not None and token_id == unk_id):
-                    token_id = -1
-            token_ids.append(int(token_id))
-        return torch.tensor(token_ids, dtype=torch.long, device=device)
+        return aff_emb_dict
 
     def forward(
         self,
@@ -194,7 +98,6 @@ class JointAffordanceModel(nn.Module):
         return_mllm_output: bool = False,
         **kwargs,
     ) -> Dict[str, Optional[torch.Tensor]]:
-        B = input_ids.shape[0] if input_ids is not None else 1
 
         # ---- 1. MLLM 前向 ----
         mllm_out = self.mllm(
@@ -206,6 +109,11 @@ class JointAffordanceModel(nn.Module):
         )
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
         output_obj = mllm_out.get("output")
+        B,L,C = hidden_states.shape
+
+        # output_ids 选择策略：
+        # - 训练：优先使用 logits_token_ids，缺失时允许回退到 input_ids（teacher-forcing 更稳定）
+        # - 推理：仅使用 logits_token_ids，不回退用户输入
         logits_token_ids = None
         ce_loss = None
         if output_obj is not None:
@@ -216,42 +124,40 @@ class JointAffordanceModel(nn.Module):
             if getattr(output_obj, "loss", None) is not None:
                 # 注意：这里不做缩放，交由 calculator.compute_losses 中的 ce_loss_weight 控制
                 ce_loss = output_obj.loss
+        
         image_logits = None
         point_logits = None
 
         if hidden_states is not None:
-            obj_aff_token_ids = self._resolve_obj_aff_token_ids(
-                obj_type=obj_type,
-                aff_type=aff_type,
-                batch_size=B,
-                device=hidden_states.device,
-            )
-            # ---- 2. 先提取 SEG token 的单 token hidden_state，再分别做投影 ----
-            # 分离2D\3D任务的token语义空间
-            if obj_aff_token_ids is not None and (obj_aff_token_ids >= 0).any():
-                obj_aff_prompt = self._extract_per_sample_token_embeddings(
-                    hidden_states,
-                    logits_token_ids,
-                    obj_aff_token_ids,
-                    fallback_token_ids=input_ids,
-                )
-                img_aff_token = obj_aff_prompt
-                pc_aff_token = obj_aff_prompt
+            if self.training:
+                output_ids = logits_token_ids if logits_token_ids is not None else input_ids
             else:
-                img_aff_token = self._extract_token_embeddings(
-                    hidden_states,
-                    logits_token_ids,
-                    self.functional_token_ids["img_aff_token"],
-                    fallback_token_ids=input_ids,
-                )  # [B, C]
-                pc_aff_token = self._extract_token_embeddings(
-                    hidden_states,
-                    logits_token_ids,
-                    self.functional_token_ids["pc_aff_token"],
-                    fallback_token_ids=input_ids,
-                )  # [B, C]
-            image_pred_emb = self.image_decoder.project_hidden_states(img_aff_token)
-            point_pred_emb = self.point_decoder.project_hidden_states(pc_aff_token)
+                output_ids = logits_token_ids
+            if output_ids is not None and self.id_to_token_info:
+                aff_dict = self._extract_aff_from_output_ids(
+                    hidden_states, output_ids, self.id_to_token_info
+                )
+                # 每样本所有 token 的 emb 做 mean pool，得到 [B, C] 供 decoder；无 token 则零向量
+                img_emb = hidden_states.new_zeros(B, C)
+                pc_emb = hidden_states.new_zeros(B, C)
+                for i in range(B):
+                    if aff_dict["img"][i]:
+                        img_emb[i] = torch.stack([p[1] for p in aff_dict["img"][i]]).mean(dim=0)
+                    if aff_dict["pc"][i]:
+                        pc_emb[i] = torch.stack([p[1] for p in aff_dict["pc"][i]]).mean(dim=0)
+                # 供 validate 的 per-sample 列表：img-aff + pc-aff
+
+                aff_token_pairs = [
+                    aff_dict["img"][i] + aff_dict["pc"][i]
+                    for i in range(B)
+                ]
+            else:
+                img_emb = hidden_states.new_zeros(B, C)
+                pc_emb = hidden_states.new_zeros(B, C)
+                aff_token_pairs = [[] for _ in range(B)]
+
+            image_pred_emb = self.image_decoder.project_hidden_states(img_emb)
+            point_pred_emb = self.point_decoder.project_hidden_states(pc_emb)
 
             # ---- 3. 2D 图像分割 ----
             image_embeddings = self.image_decoder.get_visual_embs(images)
@@ -289,8 +195,13 @@ class JointAffordanceModel(nn.Module):
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
             "ce_loss": ce_loss,
             "output": None,
+            # 用于下游分支的 token 名称与向量（供 validate 等记录）
+            # 格式: List[List[Tuple[str, Tensor]]]，每样本 [("<img-x>", emb), ("<pc-x>", emb), ...]
+            "aff_token_pairs": None,
         }
 
+        if hidden_states is not None:
+            output_dict["aff_token_pairs"] = aff_token_pairs
         if return_hidden_states:
             output_dict["hidden_states"] = hidden_states
         if return_mllm_output:

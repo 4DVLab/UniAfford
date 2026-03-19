@@ -15,13 +15,28 @@ from utils.base_dataset import JointDataSample
 from utils.common import resolve_dtype, FUNCTIONAL_TOKENS, IGNORE_INDEX
 
 
-def _pad_and_cat_position_ids(position_ids_list: List[torch.Tensor]) -> torch.Tensor:
-    max_length = max(tensor.shape[2] for tensor in position_ids_list)
-    padded_tensors = []
-    for tensor in position_ids_list:
-        pad_length = max_length - tensor.shape[2]
-        padded_tensors.append(torch.nn.functional.pad(tensor, (0, pad_length), "constant", 1))
-    return torch.cat(padded_tensors, dim=1)
+def build_functional_tokens_from_samples(samples: List[JointDataSample]) -> Dict[str, Dict[str, str]]:
+    """
+    依据样本真实模态构建功能 token（仅注册会被实际使用的 token）。
+
+    Returns:
+        {
+            "img": {token_name: token_str, ...},
+            "pc":  {token_name: token_str, ...},
+        }
+    """
+    token_map: Dict[str, Dict[str, str]] = {"img": {}, "pc": {}}
+    for sample in samples:
+        obj_type = sample.obj_type
+        aff_type = sample.aff_type
+        pair_key = f"{obj_type}_{aff_type}"
+        if sample.img is not None:
+            img_name = f"img_{pair_key}"
+            token_map["img"][img_name] = f"<{img_name}>"
+        if sample.pc is not None:
+            pc_name = f"pc_{pair_key}"
+            token_map["pc"][pc_name] = f"<{pc_name}>"
+    return token_map
 
 
 class JointAffordanceTorchDataset(Dataset):
@@ -63,32 +78,34 @@ class JointAffordanceTorchDataset(Dataset):
         return self._build_sample(self.samples[index])
 
     def _build_text(self, sample: JointDataSample, has_image: bool, has_pc: bool, instruction: str) -> tuple[str, str]:
-        """HACK: 目前先使用预置模版构建回答，之后尝试使用VLM的能力构建回答"""
+        """HACK: 目前先使用预置模版构建回答，之后尝试使用VLM的能力构建回答。
+        2D 与 3D 使用不同 token：<img_obj_aff> 与 <pc_obj_aff>，便于下游分支区分。"""
         obj_type = sample.obj_type
         aff_type = sample.aff_type
-        obj_aff_key = f"{obj_type}-{aff_type}"
-        obj_aff_token = FUNCTIONAL_TOKENS.get(obj_aff_key, f"<{obj_aff_key}>")
+        obj_aff_key = f"{obj_type}_{aff_type}"
+        img_token = f"<img_{obj_aff_key}>"
+        pc_token = f"<pc_{obj_aff_key}>"
         question = instruction or f"Please identify the {aff_type} affordance region of the {obj_type}."
 
         answer_parts = []
         if has_image:
             image_templates = [
-                f"The {aff_type} affordance region of the {obj_type} is {obj_aff_token}.",
-                f"Here is the {aff_type} region of the {obj_type}: {obj_aff_token}.",
-                f"For the {obj_type}, the {aff_type} area is highlighted as {obj_aff_token}.",
-                f"I've identified the {aff_type} affordance of the {obj_type}: {obj_aff_token}.",
-                f"On the {obj_type}, the region for {aff_type} interaction is {obj_aff_token}.",
-                f"This token {obj_aff_token} marks the {aff_type} affordance of the {obj_type}.",
+                f"The {aff_type} affordance region of the {obj_type} is {img_token}.",
+                f"Here is the {aff_type} region of the {obj_type}: {img_token}.",
+                f"For the {obj_type}, the {aff_type} area is highlighted as {img_token}.",
+                f"I've identified the {aff_type} affordance of the {obj_type}: {img_token}.",
+                f"On the {obj_type}, the region for {aff_type} interaction is {img_token}.",
+                f"This token {img_token} marks the {aff_type} affordance of the {obj_type}.",
             ]
             answer_parts.append(random.choice(image_templates))
         if has_pc:
             pc_templates = [
-                f"The 3D {aff_type} affordance region of the {obj_type} is {obj_aff_token}.",
-                f"In 3D space, the {aff_type} region of the {obj_type} is {obj_aff_token}.",
-                f"Within the point cloud, the {aff_type} area of the {obj_type} is {obj_aff_token}.",
-                f"This token {obj_aff_token} represents the 3D {aff_type} affordance of the {obj_type}.",
-                f"For the {obj_type}, the {aff_type} region in the point cloud is {obj_aff_token}.",
-                f"For 3D interaction with the {obj_type}, the {aff_type} area is {obj_aff_token}.",
+                f"The 3D {aff_type} affordance region of the {obj_type} is {pc_token}.",
+                f"In 3D space, the {aff_type} region of the {obj_type} is {pc_token}.",
+                f"Within the point cloud, the {aff_type} area of the {obj_type} is {pc_token}.",
+                f"This token {pc_token} represents the 3D {aff_type} affordance of the {obj_type}.",
+                f"For the {obj_type}, the {aff_type} region in the point cloud is {pc_token}.",
+                f"For 3D interaction with the {obj_type}, the {aff_type} area is {pc_token}.",
             ]
             answer_parts.append(random.choice(pc_templates))
         if not answer_parts:
@@ -580,11 +597,4 @@ def joint_affordance_collate_fn(
         batch_out["pc_valid_lengths"] = torch.tensor(point_nums, dtype=torch.long)
 
     return batch_out
-
-
-__all__ = [
-    "JointAffordanceTorchDataset",
-    "JointAffordanceTrainDataset",
-    "joint_affordance_collate_fn",
-]
 

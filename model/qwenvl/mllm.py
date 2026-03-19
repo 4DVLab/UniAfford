@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Dict, Tuple
 from pathlib import Path
 from transformers import AutoProcessor
 import torch
@@ -28,8 +28,12 @@ class MLLMBackbone(nn.Module):
         self.processor.tokenizer.padding_side = "right"
         self.tokenizer = self.processor.tokenizer
 
-        self.functional_tokens = self.config.functional_tokens
-        self.functional_token_ids = self._ensure_special_tokens(self.functional_tokens)
+        self.functional_tokens, token_modality = self._normalize_functional_tokens(
+            self.config.functional_tokens
+        )
+        self.functional_token_ids = self._ensure_special_tokens(
+            self.functional_tokens, token_modality
+        )
 
         # 特殊 token 注入后，词表大小可能变化，这里以模型实际词表为准回写配置。
         self.vocab_size = int(self.model.get_input_embeddings().num_embeddings)
@@ -39,7 +43,33 @@ class MLLMBackbone(nn.Module):
 
         self.to(dtype=self.config.compute_dtype)
 
-    def _ensure_special_tokens(self, candidate_tokens: dict):
+    def _normalize_functional_tokens(self, candidate_tokens: dict) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """
+        兼容两种输入：
+        1) 扁平映射：token_name -> token_str
+        2) 分模态映射：{"img": {...}, "pc": {...}}（内部可含正反向，函数只提取 name->token_str）
+        """
+        flat: Dict[str, str] = {}
+        token_modality: Dict[str, str] = {}
+
+        if isinstance(candidate_tokens, dict) and "img" in candidate_tokens and "pc" in candidate_tokens:
+            for modality in ("img", "pc"):
+                sub = candidate_tokens.get(modality, {})
+                if not isinstance(sub, dict):
+                    continue
+                for token_name, token in sub.items():
+                    if isinstance(token_name, str) and isinstance(token, str) and token.startswith("<") and token.endswith(">"):
+                        flat[token_name] = token
+                        token_modality[token_name] = modality
+        else:
+            for token_name, token in candidate_tokens.items():
+                if isinstance(token_name, str) and isinstance(token, str) and token.startswith("<") and token.endswith(">"):
+                    flat[token_name] = token
+                    token_modality[token_name] = "img" if token_name.lower().startswith("img_") or token_name == "img_aff_token" else "pc"
+
+        return flat, token_modality
+
+    def _ensure_special_tokens(self, candidate_tokens: Dict[str, str], token_modality: Dict[str, str]):
         """
         确保配置中的分割 token 已加入 tokenizer，并与 MLLM embedding 对齐。
         若 special token 已被占用（如已预训练好的模型、继续微调），则直接使用其现有 id，无需重复添加。
@@ -63,13 +93,23 @@ class MLLMBackbone(nn.Module):
             # 若继续微调，建议加入相关 embedding warmup 策略。
 
         # 必须在 add_special_tokens 之后重新读取 token_id，避免返回旧值/unk_id
-        functional_token_ids = dict()
+        # 双向映射并按模态分组：
+        # {
+        #   "img": {token_name: token_id, token_id: token_name},
+        #   "pc":  {token_name: token_id, token_id: token_name},
+        # }
+        functional_token_ids = {"img": {}, "pc": {}}
+        id_to_token_info = dict()
         for token_name, token in candidate_tokens.items():
             token_id = self.tokenizer.convert_tokens_to_ids(token)
             if token_id is None or (unk_id is not None and token_id == unk_id):
                 raise ValueError(f"功能 token 注册失败: name={token_name}, token={token}")
-            functional_token_ids[token_name] = int(token_id)
-
+            tid = int(token_id)
+            modality = token_modality.get(token_name, "img" if token_name.lower().startswith("img_") or token_name == "img_aff_token" else "pc")
+            functional_token_ids[modality][token_name] = tid
+            functional_token_ids[modality][tid] = token_name
+            id_to_token_info[tid] = {"name": token_name, "token": token, "modality": modality}
+        self.id_to_token_info = id_to_token_info
         return functional_token_ids
 
     def _build_qwen_model(self, config: MLLMConfigs):

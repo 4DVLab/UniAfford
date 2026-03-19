@@ -30,11 +30,12 @@ from tqdm import tqdm
 
 from configs import TrainingConfig
 from model.joint_affordance import JointAffordanceModel
-from utils.base_dataset import JointDataset, JointDataSample
+from utils.base_dataset import JointDataset
 from utils.dataset import (
     JointAffordanceTorchDataset,
     JointAffordanceTrainDataset,
     joint_affordance_collate_fn,
+    build_functional_tokens_from_samples,
 )
 from utils.common import dict_to_cuda, setup_logger, FUNCTIONAL_TOKENS
 from utils import calculator as calc
@@ -296,27 +297,35 @@ def main():
         val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json').load_all_data()
         train_samples_local = train_data.samples
         val_samples_local = val_data.samples
-        pair_token_map = {}
-        for obj_type, aff_count_dict in JointDataSample.count.items():
-            for aff_type, count in aff_count_dict.items():
-                pair_key = f"{obj_type}-{aff_type}"
-                pair_token_map[pair_key] = f"<{pair_key}>"
+        # 仅按真实样本中存在的模态注册 token，避免未使用 token 注入词表
+        pair_token_map = build_functional_tokens_from_samples(train_samples_local + val_samples_local)
 
         data_objects = [train_samples_local, val_samples_local, pair_token_map]
         logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
     dist.broadcast_object_list(data_objects, src=0)
     train_samples, val_samples, pair_token_map = data_objects
 
-    FUNCTIONAL_TOKENS.update(pair_token_map)
-    model_config.mllm.functional_tokens = dict(FUNCTIONAL_TOKENS)
+    # 构造按模态分组的 token 注册表（先传 token 字符串给 MLLM，随后会映射到 token_id）
+    functional_tokens = {
+        "img": dict(FUNCTIONAL_TOKENS.get("img", {})),
+        "pc": dict(FUNCTIONAL_TOKENS.get("pc", {})),
+    }
+    functional_tokens["img"].update(pair_token_map.get("img", {}))
+    functional_tokens["pc"].update(pair_token_map.get("pc", {}))
+    model_config.mllm.functional_tokens = functional_tokens
     if local_rank == 0:
+        num_img = len(pair_token_map.get("img", {}))
+        num_pc = len(pair_token_map.get("pc", {}))
         logger.info(
-            f"已注册 obj-aff 专用 token: {len(pair_token_map)} 个: {pair_token_map.values()}"
+            f"已注册 obj-aff 专用 token: img={num_img}, pc={num_pc}"
         )
 
     # ---------- 初始化模型 ----------
     logger.info("正在初始化模型...")
     model = JointAffordanceModel(model_config)
+    # MLLM 完成 tokenizer 注入后，回写 FUNCTIONAL_TOKENS 为最终双向映射（token_name <-> token_id）
+    FUNCTIONAL_TOKENS.clear()
+    FUNCTIONAL_TOKENS.update(model.mllm.functional_token_ids)
     device = torch.device("cuda", local_rank)
     model.to(device=device)  # 初始迁移到当前 GPU（各子模块内部再自行控制 dtype）
     if getattr(training_configs, "gradient_checkpointing", False):

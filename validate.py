@@ -541,6 +541,18 @@ def main():
                     record["pred_token_ids"] = "[]"
                     record["pred_text"] = ""
 
+                # ---- 下游分支 token 名称与向量（JointAffordance 提取，格式 [("<img-x>", emb), ("<pc-x>", emb), ...]）----
+                aff_pairs = output_dict.get("aff_token_pairs")
+                if aff_pairs is not None and i < len(aff_pairs):
+                    pairs_i = aff_pairs[i]
+                    tokens = [p[0] for p in pairs_i]
+                    embs = [[round(x, 6) for x in p[1].detach().float().cpu().tolist()] for p in pairs_i]
+                    record["aff_token_names"] = json.dumps(tokens)
+                    record["aff_token_embeddings"] = json.dumps(embs)
+                else:
+                    record["aff_token_names"] = "[]"
+                    record["aff_token_embeddings"] = "[]"
+
                 # ---- 逐样本 2D/3D 指标（与总体一致：giou_2d, ciou_2d, iou_3d=aiou20, auc_3d 等）----
                 sample_metrics = compute_sample_metrics(
                     output_dict, input_dict, i,
@@ -592,6 +604,7 @@ def main():
         "sample_id", "obj_type", "aff_type",
         "text_id", "img_id", "pc_id",
         "pred_token_ids", "pred_text", "gt_text",
+        "aff_token_names", "aff_token_embeddings",
         "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d",
     ]
     csv_path = os.path.join(out_dir, "validation_samples.csv")
