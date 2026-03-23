@@ -239,6 +239,18 @@ class HeatImage(Image):
     # TODO: 热力图的标注转换
 
 class HANDAL_IMG(Image):
+    directory_to_category = {
+        "handal_dataset_adjustable_wrenches": "Wrench",
+        "handal_dataset_measuring_cups": "Cup",
+        "handal_dataset_mugs": "Mug",
+        "handal_dataset_pots_pans": "Pot or Pan",
+        "handal_dataset_power_drills": "Power-drill",
+        "handal_dataset_ratchets": "Ratchet",
+        "handal_dataset_screwdrivers": "Screwdriver",
+        "handal_dataset_spatulashi": "Spatulashi",
+        "handal_dataset_strainers": "Strainer",
+        "handal_dataset_utensils": "Utensil"
+    }
     def __init__(self, img, obj_type, aff_mask_dict=None, obj_mask=None, visible_mask=None, **kwargs):
         """
         HANDAL数据集的Image子类
@@ -265,70 +277,78 @@ class HANDAL_IMG(Image):
         raise NotImplementedError('懒得写，直接使用 HANDAL_IMG.load_all')
 
     @classmethod
-    def load_all(cls, dir_path, obj_type, aff_type='grasp', **kwargs):
+    def load_all(cls, dir_path, obj_type=None, aff_type='grasp', **kwargs):
         """
         Args:
-            dir_path: 指HANDAL数据集中一个压缩包解压后的位置
-            obj_type: 手动指定这个压缩包下的物体种类
+            dir_path: HANDAL 数据集根目录，或某一个子目录（如 handal_dataset_mugs）
+            obj_type: 可选，手动指定物体类别。未指定时根据 directory_to_category 自动映射
             aff_type: 默认只有抓取这一个动作
         """
         def iterator():
-            """需要手动指定种类和文件目录"""
-            for t in ['train',]:# 'test']:
-                path = os.path.join(dir_path, t)
-                if not os.path.isdir(path):
-                    continue
-
-                for video_id in sorted(os.listdir(path)):
-                    base_path = os.path.join(path, video_id)
-                    if not os.path.isdir(base_path):
+            def _iter_one_dir(one_dir: str, mapped_obj: str):
+                for t in ['train']:  # 'test'
+                    path = os.path.join(one_dir, t)
+                    if not os.path.isdir(path):
                         continue
 
-                    # 获取该目录下所有 jpg 和 png 文件并排序
-                    img_files = sorted(
-                        f for f in os.listdir(os.path.join(path, video_id, 'rgb'))
-                        if f.lower().endswith('.jpg') or f.lower().endswith('.png')
-                    )
+                    for video_id in sorted(os.listdir(path)):
+                        base_path = os.path.join(path, video_id)
+                        if not os.path.isdir(base_path):
+                            continue
+                        rgb_dir = os.path.join(base_path, 'rgb')
+                        if not os.path.isdir(rgb_dir):
+                            continue
 
-                    # 每 15 张取一张（约 6 张），按排序顺序抽取
-                    count = 0
-                    for idx in range(0, len(img_files), 20):
-                        fname = os.path.basename(img_files[idx])
-                        o_id = os.path.splitext(fname)[0]
-
-                        # 原始图片
-                        img_path = os.path.join(base_path, 'rgb', fname)  # jpg
-                        img = cv2.imread(img_path)
-
-                        # # 物体部分（含被遮挡）
-                        # obj_path = os.path.join(base_path, 'mask', f'{o_id}_000000.png')
-                        # obj_mask = cv2.imread(obj_path)
-
-                        # handle部分的mask
-                        aff_path = os.path.join(base_path, 'mask_parts', f'{o_id}_000000_handle.png')
-                        aff_mask = cv2.imread(aff_path)
-
-                        # # 可见部分
-                        # visib_path = os.path.join(base_path, 'mask_visib', f'{o_id}_000000.png')
-                        # visib_mask = cv2.imread(visib_path)
-
-                        obj = HANDAL_IMG(
-                            img,
-                            obj_type=obj_type,
-                            aff_mask_dict={str(aff_type): aff_mask},
-                            # obj_mask=obj_mask,
-                            # visible_mask=visib_mask,
+                        # 获取该目录下所有 jpg 和 png 文件并排序
+                        img_files = sorted(
+                            f for f in os.listdir(rgb_dir)
+                            if f.lower().endswith('.jpg') or f.lower().endswith('.png')
                         )
-                        print(f'loading IMG: {img_path}')
-                        yield obj
-                        count += 1
-                        if count > 7:
-                            break
+
+                        # 每 20 张取一张，最多取 8 张
+                        count = 0
+                        for idx in range(0, len(img_files), 20):
+                            fname = os.path.basename(img_files[idx])
+                            o_id = os.path.splitext(fname)[0]
+
+                            img_path = os.path.join(rgb_dir, fname)
+                            img = cv2.imread(img_path)
+                            if img is None:
+                                continue
+
+                            aff_path = os.path.join(base_path, 'mask_parts', f'{o_id}_000000_handle.png')
+                            aff_mask = cv2.imread(aff_path, cv2.IMREAD_GRAYSCALE)
+                            if aff_mask is None:
+                                continue
+
+                            obj = HANDAL_IMG(
+                                img,
+                                obj_type=mapped_obj,
+                                aff_mask_dict={str(aff_type): aff_mask},
+                            )
+                            print(f'loading IMG: {img_path}')
+                            yield obj
+                            count += 1
+                            if count > 7:
+                                break
+
+            # 自动模式：dir_path 为根目录，遍历映射表中所有子目录
+            root_name = os.path.basename(os.path.abspath(dir_path))
+            if root_name in cls.directory_to_category:
+                mapped_obj = obj_type or cls.directory_to_category[root_name]
+                yield from _iter_one_dir(dir_path, mapped_obj)
+            else:
+                for folder, category in cls.directory_to_category.items():
+                    one_dir = os.path.join(dir_path, folder)
+                    if not os.path.isdir(one_dir):
+                        continue
+                    mapped_obj = obj_type or category
+                    yield from _iter_one_dir(one_dir, mapped_obj)
 
         return iterator()
 
     @classmethod
-    def load_and_save(cls, input_root, output_root, obj_type, aff_type='grasp', **kwargs):
+    def load_and_save(cls, input_root, output_root, obj_type=None, aff_type='grasp', **kwargs):
         for img in cls.load_all(input_root, obj_type=obj_type, aff_type=aff_type, **kwargs):
             dir_path = os.path.join(output_root, img.obj_type, 'Image')
             img.save_to(dir_path)
@@ -477,8 +497,12 @@ if __name__ == "__main__":
                     case None:
                         Image.load_and_save(input_dir, output_dir, keep_id=keep_id)
                     case 'HANDAL':
-                        assert args.obj_type is not None and args.aff_type is not None
-                        HANDAL_IMG.load_and_save(input_dir, output_dir, obj_type=args.obj_type, aff_type=args.aff_type)
+                        HANDAL_IMG.load_and_save(
+                            input_dir,
+                            output_dir,
+                            obj_type=args.obj_type,
+                            aff_type=args.aff_type or 'grasp',
+                        )
                     case 'RAGNet':
                         RAGNet.load_and_save(input_dir, output_dir)
                     case 'AGD20K' | 'AGD20k': ...
