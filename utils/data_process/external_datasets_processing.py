@@ -5,16 +5,155 @@
 
 import sys
 import os
+import csv
+import json
+import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import cv2
 from collections import defaultdict
-from base_dataset import Instruction, Image, PointCloud, SplitManager, load_info, save_info, create_info_dict
+from base_dataset import Instruction, Image, PointCloud, load_info, save_info, create_info_dict
 from common import resolve_path
 
 # 全局参数
 DEFAULT_OUTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 输出的数据集位置（用于数据转换，训练推理时可忽略）
 DEFAULT_INPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 加载的数据集位置（输入数据位置，或转换数据集的输入位置）
+
+
+def _extract_id_from_name(name: str):
+    """从文件名中提取样本 id，如 Mug_12_grasp.png / Mug_12.csv -> 12。"""
+    m = re.search(r'_(\d+)(?:_|$)', name)
+    return int(m.group(1)) if m else None
+
+
+def save_train_split_from_disk(dataset_root: str):
+    """
+    轻量生成 train-only 分割文件（train.json + metadata.json）。
+    直接扫描已保存到磁盘的数据，不依赖内存中的 Modality 对象，适配 load_and_save 流式处理。
+    """
+    dataset_root = os.path.abspath(dataset_root)
+    train_ids = {
+        "Instruction": defaultdict(lambda: defaultdict(set)),
+        "Image": defaultdict(lambda: defaultdict(set)),
+        "PointCloud": defaultdict(lambda: defaultdict(set)),
+    }
+
+    for obj_type in sorted(os.listdir(dataset_root)):
+        obj_dir = os.path.join(dataset_root, obj_type)
+        if not os.path.isdir(obj_dir):
+            continue
+
+        # 1) Instruction.csv -> (obj, aff) -> [ins_id]
+        ins_csv = os.path.join(obj_dir, "Instruction.csv")
+        if os.path.exists(ins_csv):
+            with open(ins_csv, "r", newline="", encoding="utf-8") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    aff = (row.get("aff_type") or "").strip()
+                    sid = row.get("id")
+                    if not aff or sid is None:
+                        continue
+                    try:
+                        sid = int(sid)
+                    except ValueError:
+                        continue
+                    train_ids["Instruction"][obj_type][aff].add(sid)
+
+        # 2) Image/mask/<aff>/*.png -> (obj, aff) -> [img_id]
+        mask_root = os.path.join(obj_dir, "Image", "mask")
+        if os.path.isdir(mask_root):
+            for aff in os.listdir(mask_root):
+                aff_dir = os.path.join(mask_root, aff)
+                if not os.path.isdir(aff_dir):
+                    continue
+                for fn in os.listdir(aff_dir):
+                    if not fn.lower().endswith(".png"):
+                        continue
+                    sid = _extract_id_from_name(os.path.splitext(fn)[0])
+                    if sid is not None:
+                        train_ids["Image"][obj_type][aff].add(sid)
+
+        # 3) PointCloud/*.csv 表头的 aff 列 -> (obj, aff) -> [pc_id]
+        pc_root = os.path.join(obj_dir, "PointCloud")
+        if os.path.isdir(pc_root):
+            for fn in os.listdir(pc_root):
+                if not fn.lower().endswith(".csv"):
+                    continue
+                sid = _extract_id_from_name(os.path.splitext(fn)[0])
+                if sid is None:
+                    continue
+                file_path = os.path.join(pc_root, fn)
+                try:
+                    with open(file_path, "r", encoding="utf-8") as f:
+                        first = f.readline().strip()
+                except OSError:
+                    continue
+                if first.startswith("#"):
+                    first = first[1:].strip()
+                header = [h.strip() for h in first.split(",") if h.strip()]
+                for aff in header[3:]:
+                    train_ids["PointCloud"][obj_type][aff].add(sid)
+
+    # set -> sorted list, 并过滤空项
+    train_json = {}
+    for modality in ("Instruction", "Image", "PointCloud"):
+        train_json[modality] = {}
+        for obj, aff_map in train_ids[modality].items():
+            cleaned = {aff: sorted(list(ids)) for aff, ids in aff_map.items() if ids}
+            if cleaned:
+                train_json[modality][obj] = cleaned
+
+    def _counts(split_ids):
+        out = {}
+        for modality in ("Instruction", "Image", "PointCloud"):
+            mod_counts = {"total": 0}
+            for obj, aff_map in split_ids.get(modality, {}).items():
+                obj_counts = {"total": 0}
+                for aff, ids in aff_map.items():
+                    obj_counts[aff] = len(ids)
+                    obj_counts["total"] += len(ids)
+                mod_counts[obj] = obj_counts
+                mod_counts["total"] += obj_counts["total"]
+            out[modality] = mod_counts
+        return out
+
+    def _count_paired_samples(split_ids):
+        ins_ids = split_ids.get("Instruction", {})
+        img_ids = split_ids.get("Image", {})
+        pc_ids = split_ids.get("PointCloud", {})
+        total = 0
+        all_obj = set(ins_ids.keys()) | set(img_ids.keys()) | set(pc_ids.keys())
+        for obj in all_obj:
+            all_aff = set(ins_ids.get(obj, {}).keys()) | set(img_ids.get(obj, {}).keys()) | set(pc_ids.get(obj, {}).keys())
+            for aff in all_aff:
+                total += max(
+                    len(ins_ids.get(obj, {}).get(aff, [])),
+                    len(img_ids.get(obj, {}).get(aff, [])),
+                    len(pc_ids.get(obj, {}).get(aff, [])),
+                )
+        return total
+
+    n_train = _count_paired_samples(train_json)
+    metadata = {
+        "total_sample": n_train,
+        "train_sample": n_train,
+        "val_sample": 0,
+        "test_sample": 0,
+        "train_ratio": 1.0,
+        "val_ratio": 0.0,
+        "test_ratio": 0.0,
+        "obj_aff_count_by_split": {
+            "train": _counts(train_json),
+            "val": {"Instruction": {"total": 0}, "Image": {"total": 0}, "PointCloud": {"total": 0}},
+            "test": {"Instruction": {"total": 0}, "Image": {"total": 0}, "PointCloud": {"total": 0}},
+        },
+    }
+
+    with open(os.path.join(dataset_root, "train.json"), "w", encoding="utf-8") as f:
+        json.dump(train_json, f, ensure_ascii=False, indent=2)
+    with open(os.path.join(dataset_root, "metadata.json"), "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+    print(f"train-only 分割文件已保存: {dataset_root}/train.json, {dataset_root}/metadata.json")
 
 
 """  ----------------------------------------------- PointCloud classes ----------------------------------------------  """
@@ -519,8 +658,8 @@ if __name__ == "__main__":
     save_info(output_dir, info_dict)
 
     # 处理完成后生成分割文件：train=1, val=0, test=0（整库作为训练集）
+    # 采用磁盘直读方式，避免 load_and_save 流式处理导致的内存对象不完整问题。
     if not args.show and args.save_split and err is None:
-        sm = SplitManager(output_dir)
-        sm.split(train_ratio=1.0, val_ratio=0.0, test_ratio=0.0, keep_id=True)
+        save_train_split_from_disk(output_dir)
 
     if err: raise err

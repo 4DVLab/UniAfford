@@ -92,9 +92,9 @@ def save_info(output_dir: str, info_dict: Dict[str, Dict[str, Dict[str, int]]] =
    
     # 转换 defaultdict 为普通 dict 以便 JSON 序列化
     serializable_dict = {}
-    for modality, obj_dict in info_dict.items():
+    for modality in ['Image', 'PointCloud', 'Instruction']:
         serializable_dict[modality] = {}
-        for obj_type, aff_dict in obj_dict.items():
+        for obj_type, aff_dict in info_dict[modality].items():
             serializable_dict[modality][obj_type] = dict(aff_dict)
    
     file_path = os.path.join(output_dir, 'info.json')
