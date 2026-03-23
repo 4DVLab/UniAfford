@@ -149,8 +149,32 @@ def save_train_split_from_disk(dataset_root: str):
         },
     }
 
+    def _dump_split_part(part: dict, f) -> None:
+        """对齐 base_dataset：每个 aff 的 ids 列表保持在同一行。"""
+        lines = ['{']
+        mod_items = [(k, v) for k, v in part.items() if v]
+        for mod_i, (mod_name, mod_data) in enumerate(mod_items):
+            obj_items = [(k, {a: v for a, v in aff_map.items() if v}) for k, aff_map in mod_data.items()]
+            obj_items = [(k, v) for k, v in obj_items if v]
+            if not obj_items:
+                continue
+            lines.append(f'  "{mod_name}": {{')
+            for obj_i, (obj_name, obj_data) in enumerate(obj_items):
+                lines.append(f'    "{obj_name}": {{')
+                aff_items = [(a, lst) for a, lst in obj_data.items() if lst]
+                for aff_i, (aff_name, aff_list) in enumerate(aff_items):
+                    ids_str = json.dumps(aff_list, ensure_ascii=False)
+                    comma = ',' if aff_i < len(aff_items) - 1 else ''
+                    lines.append(f'      "{aff_name}": {ids_str}{comma}')
+                obj_comma = ',' if obj_i < len(obj_items) - 1 else ''
+                lines.append(f'    }}{obj_comma}')
+            mod_comma = ',' if mod_i < len(mod_items) - 1 else ''
+            lines.append(f'  }}{mod_comma}')
+        lines.append('}')
+        f.write('\n'.join(lines))
+
     with open(os.path.join(dataset_root, "train.json"), "w", encoding="utf-8") as f:
-        json.dump(train_json, f, ensure_ascii=False, indent=2)
+        _dump_split_part(train_json, f)
     with open(os.path.join(dataset_root, "metadata.json"), "w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
     print(f"train-only 分割文件已保存: {dataset_root}/train.json, {dataset_root}/metadata.json")
