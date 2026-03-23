@@ -9,7 +9,15 @@ import shutil
 import json
 from common import clean_quotes
 from tqdm import tqdm
-from ..base_dataset import create_info_dict, load_info, save_info
+from ..base_dataset import (
+    create_info_dict,
+    save_info,
+    JointDataset,
+    SplitManager,
+    Instruction,
+    Image,
+    PointCloud,
+)
 
 
 if __name__ == '__main__':
@@ -17,6 +25,7 @@ if __name__ == '__main__':
     parser.add_argument('-i', '--input', type=str, nargs="+", help='输入数据集的根目录，按照物体-模态分类')
     parser.add_argument('-o', '--output', type=str, help='输出位置', default='/mnt/data/datasets/2D-3D-JointAffordance/merged')
     parser.add_argument('-f', '--filter', action='store_true', help='仅保留包含三元组的数据', default=False)
+    parser.add_argument('--save_split', action='store_true', default=True, help='合并后额外分割数据集并保存分割文件 json')
 
     args = parser.parse_args()
 
@@ -88,7 +97,7 @@ if __name__ == '__main__':
                         for key, v in vals.items():
                             info_dict[m][obj_type][key] = max(info_dict[m][obj_type][key], v)
 
-    # 2) 根据是否启用 filter 决定复制逻辑，并在启用 filter 时裁剪 info_dict
+    # 2) 根据是否启用 filter 决定过滤逻辑，并在启用 filter 时裁剪 info_dict
     if args.filter:
         print("正在收集物体模态信息并进行过滤...")
 
@@ -154,6 +163,10 @@ if __name__ == '__main__':
 
     # 3) 最终保存合并后的 info.json
     save_info(args.output, info_dict)
+
+    # 可选保存分割文件
+    if args.save_split:
+        SplitManager(args.output).split(train_ratio=0.95, val_ratio=0.05, test_ratio=0.0, keep_id=True)
 
     print("数据处理完成!")
     print(f"输出目录: {args.output}")

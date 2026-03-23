@@ -87,16 +87,56 @@ dataset_root/
 
 ## 数据分割策略
 
-`SplitManager.split()` 先构建分组，再按比例切分：
+数据分割由 `utils/base_dataset.py` 中的 `SplitManager.split()` 执行，核心流程如下：
 
-- 图文对：按 `Instruction.aff_type` 与同 id 的 `Image` 精确配对
-- 点云对：按点云 `aff_mask_dict` 的 aff_type 拆成 `(pc_id, mask_idx)` 列表（mask_idx 仅用于兼容旧格式，配对时以 aff_type 为准）
-- 每个 `(obj_type, aff_type)` 分组内去重、打乱、再切分
+1. **构建分组（按 `obj_type + aff_type`）**
+   - **图文分组**：遍历 `Instruction`，使用同 id 的 `Image` 做配对，得到 `(ins_id, img_id)`。
+   - **点云分组**：遍历 `PointCloud.aff_mask_dict`，按 aff 拆分为 `((pc_id, mask_idx),)` 的中间结构（`mask_idx` 仅兼容旧数据格式，后续以 aff 语义为准）。
 
-小样本组保护：
+2. **组内处理**
+   - 每个 `(obj_type, aff_type)` 组先去重、再打乱。
+   - 可选采样：
+     - `sample_rate`：按比例采样；
+     - `min_sample_per_group`：每组最低保留；
+     - `max_sample_per_group`：每组上限裁剪。
 
-- 当分组样本数较小且 `val/test` 比例大于 0 时，至少为 `val/test` 分配 5 条（可行时）
-- 防止 `val/test` 长期为 0 或极少样本导致评估失真
+3. **按比例切分 train/val/test**
+   - 对每个分组独立按 `train_ratio / val_ratio / test_ratio` 切分。
+   - 当 `val/test` 启用时，代码会尽量保证每组 `val/test` 至少有基本样本数（当前实现中最小目标为 5），并在样本不足时做回退调整。
+   - 过小分组（当前实现中 `n_total <= 20`）会被跳过，避免极小样本噪声影响评估。
+
+4. **写出分割文件**
+   - 输出 `train.json / val.json / test.json`，结构为：
+     - `Instruction: {obj: {aff: [ins_id, ...]}}`
+     - `Image: {obj: {aff: [img_id, ...]}}`
+     - `PointCloud: {obj: {aff: [pc_id, ...]}}`
+   - 同时写出 `metadata.json`，包含：
+     - `train_sample / val_sample / test_sample / total_sample`
+     - 分割比例、随机种子
+     - 各 split 下按模态与 `obj-aff` 的计数统计（`obj_aff_count_by_split`）。
+
+> 说明：`JointDataset(split_file='train.json'|'val.json'|'test.json')` 会按对应 split 独立加载数据，并在 `pair_samples()` 中统一按 aff 语义对齐三模态样本。
+
+### Train-only 分割（整库作为训练集）
+
+当前 `SplitManager.split()` 支持将整个数据集只切分为训练集：
+
+- `train_ratio=1.0, val_ratio=0.0, test_ratio=0.0`
+- 或者等价地让 `val/test` 为 `0`
+
+在该模式下：
+
+- 不再强制 `val/test` 的最小样本数
+- 不再触发 holdout 场景的小样本跳过逻辑
+- 仅写出 `train.json`（以及 `metadata.json`），不会额外输出 `val.json/test.json`
+
+### data_process 与分割文件
+
+- `utils/data_process/external_datasets_processing.py`
+  - 在 `load_and_save` 处理完成后，会默认调用 `SplitManager(...).split(train=1,val=0,test=0)` 生成 train-only 分割文件。
+- `utils/data_process/merge_datasets.py`
+  - 合并后会重新加载并重写数据（重新编号、排序）。
+  - 可选 `--save_split` 生成 train-only 分割文件。
 
 # Pipeline
 

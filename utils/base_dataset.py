@@ -1341,7 +1341,7 @@ class SplitManager:
 
     def split(
         self,
-        train_ratio: float = None,
+        train_ratio: float = 1.0,
         val_ratio: float = None,
         test_ratio: float = None,
         sample_rate: float = None,
@@ -1430,21 +1430,32 @@ class SplitManager:
                     n_total = len(unique_ids)
                     unique_ids = _apply_sampling(unique_ids, n_total, obj_type_name, aff_type_name)
                     n_total = len(unique_ids)
-                    assert test_ratio > 0 and val_ratio > 0, "test_ratio 和 val_ratio 不能为0"
-                    if n_total <= 20:
+
+                    # 仅在需要划分 val/test 时启用小样本过滤；train-only 场景保留全部样本
+                    needs_holdout = (val_ratio > 0 or test_ratio > 0)
+                    if needs_holdout and n_total <= 20:
                         print(f"{obj_type_name}-{aff_type_name} 样本数量过少: {n_total}，跳过该数据")
                         continue
-                    else:
+
+                    if test_ratio > 0:
                         n_test = max(5, int(round(n_total * test_ratio)))
+                    else:
+                        n_test = 0
+                    if val_ratio > 0:
                         n_val = max(5, int(round(n_total * val_ratio)))
-                    if n_test + n_val >= n_total:
-                        overflow = n_test + n_val - (n_total - 10)
+                    else:
+                        n_val = 0
+
+                    # 确保至少保留 1 个样本到 train（只在需要 holdout 时）
+                    if needs_holdout and n_test + n_val >= n_total:
+                        overflow = n_test + n_val - (n_total - 1)
                         while overflow > 0 and (n_val > 0 or n_test > 0):
                             if n_val >= n_test and n_val > 0:
                                 n_val -= 1
                             elif n_test > 0:
                                 n_test -= 1
                             overflow -= 1
+
                     test_list = unique_ids[:n_test]
                     val_list = unique_ids[n_test:n_test + n_val]
                     train_list = unique_ids[n_test + n_val:]
@@ -1483,7 +1494,6 @@ class SplitManager:
 
         def _collect_obj_aff_counts(split_ids):
             split_counts = {}
-            total = 0 
             for modality in ("Instruction", "Image", "PointCloud"):
                 modality_counts = {"total": 0}
                 modality_ids = split_ids.get(modality, {})
@@ -1494,13 +1504,32 @@ class SplitManager:
                         obj_counts["total"] += len(entries)
                     modality_counts[obj_type_name] = obj_counts
                     modality_counts["total"] += obj_counts["total"]
-                total += obj_counts["total"]
                 split_counts[modality] = modality_counts
-            return total, split_counts
+            return split_counts
 
-        n_train, train_counts = _collect_obj_aff_counts(train_ids)
-        n_val, val_counts = _collect_obj_aff_counts(val_ids)
-        n_test, test_counts = _collect_obj_aff_counts(test_ids)
+        def _count_samples_from_ids(sample_ids: dict) -> int:
+            """从 sample_ids 估计聚合样本数（与 pair_samples 的 max_len 对齐）。"""
+            ins_ids = sample_ids.get("ins", sample_ids.get("Instruction", {}))
+            img_ids = sample_ids.get("img", sample_ids.get("Image", {}))
+            pc_ids = sample_ids.get("pc", sample_ids.get("PointCloud", {}))
+            total = 0
+            all_obj = set(ins_ids.keys()) | set(img_ids.keys()) | set(pc_ids.keys())
+            for o in all_obj:
+                all_aff = set(ins_ids.get(o, {}).keys()) | set(img_ids.get(o, {}).keys()) | set(pc_ids.get(o, {}).keys())
+                for a in all_aff:
+                    total += max(
+                        len(ins_ids.get(o, {}).get(a, [])),
+                        len(img_ids.get(o, {}).get(a, [])),
+                        len(pc_ids.get(o, {}).get(a, [])),
+                    )
+            return total
+
+        n_train = _count_samples_from_ids(train_ids)
+        n_val = _count_samples_from_ids(val_ids)
+        n_test = _count_samples_from_ids(test_ids)
+        train_counts = _collect_obj_aff_counts(train_ids)
+        val_counts = _collect_obj_aff_counts(val_ids)
+        test_counts = _collect_obj_aff_counts(test_ids)
         metadata = {
             'total_sample': n_train + n_val + n_test,
             'train_sample': n_train,
@@ -1526,6 +1555,9 @@ class SplitManager:
             'val': {k: val_ids[k] for k in ('Instruction', 'Image', 'PointCloud')},
             'test': {k: test_ids[k] for k in ('Instruction', 'Image', 'PointCloud')}
         }
+        split_names = [n for n, r in (("train", train_ratio), ("val", val_ratio), ("test", test_ratio)) if r > 0]
+        if not split_names:
+            split_names = ["train"]
 
         for t in split_data.keys():
             if t == 'metadata':
@@ -1566,7 +1598,9 @@ class SplitManager:
             os.makedirs(save_dir, exist_ok=True)
             with open(os.path.join(save_dir, 'metadata.json'), 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, ensure_ascii=False, indent=2)
-            for name, ids in [('train', train_ids), ('val', val_ids), ('test', test_ids)]:
+            split_to_ids = {'train': train_ids, 'val': val_ids, 'test': test_ids}
+            for name in split_names:
+                ids = split_to_ids[name]
                 part = {}
                 for k in ('Instruction', 'Image', 'PointCloud'):
                     mod_data = ids.get(k, {})
@@ -1579,7 +1613,8 @@ class SplitManager:
                             part[k][obj][aff] = list(entries)
                 with open(os.path.join(save_dir, f'{name}.json'), 'w', encoding='utf-8') as f:
                     _dump_split_part(part, f)
-            print(f"分割结果已保存至: {save_dir} (metadata.json, train.json, val.json, test.json)")
+            saved = ", ".join([f"{n}.json" for n in split_names])
+            print(f"分割结果已保存至: {save_dir} (metadata.json, {saved})")
 
         save_split_json(self.dataset_root)
 

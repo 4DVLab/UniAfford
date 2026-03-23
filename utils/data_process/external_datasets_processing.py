@@ -9,7 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import cv2
 from collections import defaultdict
-from base_dataset import Instruction, Image, PointCloud, load_info, save_info, create_info_dict
+from base_dataset import Instruction, Image, PointCloud, SplitManager, load_info, save_info, create_info_dict
 from common import resolve_path
 
 # 全局参数
@@ -139,9 +139,10 @@ class PIADv2_PC(PointCloud):
             dataset_root_path: PIADv2数据集的位置，下层目录为 Seen,Unseen_aff,Unseen_obj(任一）
         """
         def iterator():
-            for s in ['Seen', 'Unseen_aff', 'Unseen_obj']:
+            # PIADv2的Seen,Unseen_aff,Unseen_obj三个数据集只是同一个数据集的不同划分，根据需要处理一个就行
+            for s in ['Seen']: #, 'Unseen_aff', 'Unseen_obj']:
                 if not os.path.isdir(os.path.join(dataset_root_path, s)): continue
-                for t in ['test', 'train', 'val']:
+                for t in ['train', 'val']:#, 'test']:
                     dirpath = os.path.join(dataset_root_path, s, 'Point', t)
                     if not os.path.isdir(dirpath): continue
 
@@ -155,8 +156,6 @@ class PIADv2_PC(PointCloud):
                                     if os.path.isfile(file_path) and file.endswith('.npy'):
                                         print(f'loading PC{file_path}')
                                         yield cls.load_file(file_path, obj_type=obj_type, aff_type=aff)
-
-                break # PIADv2的Seen,Unseen_aff,Unseen_obj三个数据集只是同一个数据集的不同划分，任意处理一个就行
         return iterator()
 
 # discard
@@ -252,7 +251,6 @@ class HANDAL_IMG(Image):
             visible_mask: 可见部分mask
             **kwargs: 其他传递给父类的参数
         """
-        aff_mask_dict = kwargs.pop("aff_mask_dict", aff_mask_dict) or {}
         super().__init__(
             img=img,
             obj_type=obj_type,
@@ -276,7 +274,7 @@ class HANDAL_IMG(Image):
         """
         def iterator():
             """需要手动指定种类和文件目录"""
-            for t in ['test', 'train']:
+            for t in ['train',]:# 'test']:
                 path = os.path.join(dir_path, t)
                 if not os.path.isdir(path):
                     continue
@@ -292,8 +290,9 @@ class HANDAL_IMG(Image):
                         if f.lower().endswith('.jpg') or f.lower().endswith('.png')
                     )
 
-                    # 每 15 张取一张（约 8~9 张），按排序顺序抽取
-                    for idx in range(0, len(img_files), 15):
+                    # 每 15 张取一张（约 6 张），按排序顺序抽取
+                    count = 0
+                    for idx in range(0, len(img_files), 20):
                         fname = os.path.basename(img_files[idx])
                         o_id = os.path.splitext(fname)[0]
 
@@ -322,6 +321,9 @@ class HANDAL_IMG(Image):
                         )
                         print(f'loading IMG: {img_path}')
                         yield obj
+                        count += 1
+                        if count > 7:
+                            break
 
         return iterator()
 
@@ -406,6 +408,8 @@ if __name__ == "__main__":
     parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
     parser.add_argument("-t", "--obj_type", type=str, help="物体类型", default=None)
     parser.add_argument('-s', '--show', type=str, nargs="+", help='直接渲染点云文件的路径，选择时只执行渲染操作', default=[])
+    parser.add_argument('--save_split', action='store_true', default=True,
+                        help='处理完成后自动生成分割文件（默认开启）')
 
     args = parser.parse_args()
 
@@ -489,5 +493,10 @@ if __name__ == "__main__":
 
     """  ----------------------------------- 保存信息文件 -------------------------------------  """
     save_info(output_dir, info_dict)
+
+    # 处理完成后生成分割文件：train=1, val=0, test=0（整库作为训练集）
+    if not args.show and args.save_split and err is None:
+        sm = SplitManager(output_dir)
+        sm.split(train_ratio=1.0, val_ratio=0.0, test_ratio=0.0, keep_id=True)
 
     if err: raise err
