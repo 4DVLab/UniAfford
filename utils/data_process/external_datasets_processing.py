@@ -5,9 +5,6 @@
 
 import sys
 import os
-import csv
-import json
-import re
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import cv2
@@ -211,7 +208,78 @@ class LASO_PC(PointCloud):
 
         return iterator()
 
-class AffNet_PC(PointCloud):...
+class AffordanceNet3D_PC(PointCloud):
+    """
+    适配 3DAffordanceNet/dataset/AffordanceNet.py 的 full-shape pkl 格式：
+    - full_shape_{split}_data.pkl
+    - 每条样本包含 shape_id / semantic class / affordance / full_shape
+    - full_shape 内包含 coordinate [N,3] 与 label(dict: aff -> [N])
+    """
+
+    @staticmethod
+    def _normalize_obj_type(name):
+        return str(name).strip() if name is not None else "Unknown"
+
+    @classmethod
+    def _iter_split_data(cls, dataset_root_path, split):
+        import pickle as pkl
+        pkl_path = os.path.join(dataset_root_path, f"full_shape_{split}_data.pkl")
+        if not os.path.isfile(pkl_path):
+            return []
+        with open(pkl_path, "rb") as f:
+            data = pkl.load(f)
+        return data if isinstance(data, list) else []
+
+    @classmethod
+    def load_all(cls, dataset_root_path, split='all', aff_type=None, **kwargs):
+        """
+        Args:
+            dataset_root_path: 3DAffordanceNet 数据目录
+            split: 'all'/'train'/'val'/'test'，默认 all
+            aff_type: 可选，只保留指定 affordance（str 或 list）
+        """
+        if split in (None, 'all'):
+            splits = ['train', 'val', 'test']
+        else:
+            splits = [str(split)]
+        aff_set = set([str(aff_type)]) if isinstance(aff_type, str) else (set(map(str, aff_type)) if aff_type is not None else None)
+
+        def iterator():
+            for sp in splits:
+                samples = cls._iter_split_data(dataset_root_path, sp)
+                if not samples:
+                    continue
+                for info in samples:
+                    full_shape = info.get("full_shape", {})
+                    coords = full_shape.get("coordinate", None)
+                    label_dict = full_shape.get("label", {})
+                    if coords is None:
+                        continue
+                    points = np.asarray(coords, dtype=np.float32)
+                    if points.ndim != 2 or points.shape[1] != 3:
+                        continue
+
+                    aff_names = info.get("affordance", [])
+                    if not isinstance(aff_names, (list, tuple)):
+                        aff_names = list(label_dict.keys())
+                    if aff_set is not None:
+                        aff_names = [a for a in aff_names if str(a) in aff_set]
+
+                    aff_mask_dict = {}
+                    for aff in aff_names:
+                        mask = label_dict.get(aff)
+                        if mask is None:
+                            continue
+                        arr = np.asarray(mask, dtype=np.float32).reshape(-1)
+                        if arr.shape[0] != points.shape[0]:
+                            continue
+                        aff_mask_dict[str(aff)] = arr
+
+                    obj_type = cls._normalize_obj_type(info.get("semantic class", "Unknown"))
+                    print(f'loading PC {sp}: shape_id={info.get("shape_id", "N/A")}, obj={obj_type}')
+                    yield cls(points=points, obj_type=obj_type, aff_mask_dict=aff_mask_dict)
+
+        return iterator()
 
 
 """  ----------------------------------------------- Image classes ----------------------------------------------  """
@@ -428,7 +496,7 @@ if __name__ == "__main__":
     parser.add_argument("-m", "--modality", type=str, nargs="+", help="手动添加数据的模态，可选一个或多个",
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
     parser.add_argument("-d", "--dataset", type=str, help="按照预设定数据集整理",
-                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'LASO'])
+                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'LASO', 'AffordanceNet3D'])
     parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
     parser.add_argument("-t", "--obj_type", type=str, help="物体类型", default=None)
     parser.add_argument('-s', '--show', type=str, nargs="+", help='直接渲染点云文件的路径，选择时只执行渲染操作', default=[])
@@ -493,6 +561,8 @@ if __name__ == "__main__":
                         ...
                     case 'LASO':
                         LASO_PC.load_and_save(input_dir, output_dir)
+                    case 'AffordanceNet3D':
+                        AffordanceNet3D_PC.load_and_save(input_dir, output_dir)
                     case e:
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
@@ -525,7 +595,10 @@ if __name__ == "__main__":
     # 处理完成后生成分割文件：train=1, val=0, test=0（整库作为训练集）
     # 采用磁盘直读方式，避免 load_and_save 流式处理导致的内存对象不完整问题。
     if not args.show and args.save_split and err is None:
-        from .create_split import save_train_split_from_disk
-        save_train_split_from_disk(output_dir)
+        try:
+            from .create_split import save_split_from_disk
+        except ImportError:
+            from create_split import save_split_from_disk
+        save_split_from_disk(output_dir, train_ratio=1.0, val_ratio=0.0, test_ratio=0.0)
 
     if err: raise err
