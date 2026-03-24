@@ -137,14 +137,23 @@ class JointAffordanceModel(nn.Module):
                 aff_dict = self._extract_aff_from_output_ids(
                     hidden_states, output_ids, self.id_to_token_info
                 )
-                # 每样本所有 token 的 emb 做 mean pool，得到 [B, C] 供 decoder；无 token 则零向量
-                img_emb = hidden_states.new_zeros(B, C)
-                pc_emb = hidden_states.new_zeros(B, C)
+                # 每样本所有 token 的 emb 做 mean pool，得到 [B, C] 供 decoder；
+                # 注意避免使用 new_zeros + in-place 赋值，确保 2D/3D loss 可回传到 MLLM hidden_states。
+                img_emb_list = []
+                pc_emb_list = []
                 for i in range(B):
                     if aff_dict["img"][i]:
-                        img_emb[i] = torch.stack([p[1] for p in aff_dict["img"][i]]).mean(dim=0)
+                        img_emb_i = torch.stack([p[1] for p in aff_dict["img"][i]], dim=0).mean(dim=0)
+                    else:
+                        img_emb_i = hidden_states.new_zeros(C)
                     if aff_dict["pc"][i]:
-                        pc_emb[i] = torch.stack([p[1] for p in aff_dict["pc"][i]]).mean(dim=0)
+                        pc_emb_i = torch.stack([p[1] for p in aff_dict["pc"][i]], dim=0).mean(dim=0)
+                    else:
+                        pc_emb_i = hidden_states.new_zeros(C)
+                    img_emb_list.append(img_emb_i)
+                    pc_emb_list.append(pc_emb_i)
+                img_emb = torch.stack(img_emb_list, dim=0)
+                pc_emb = torch.stack(pc_emb_list, dim=0)
                 # 供 validate 的 per-sample 列表：img-aff + pc-aff
 
                 aff_token_pairs = [
