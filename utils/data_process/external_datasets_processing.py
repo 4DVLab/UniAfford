@@ -80,8 +80,8 @@ class AGPIL_PC(PointCloud):
         def iterator():
             for obj_type in list(cls.all):
                 for view in os.listdir(dataset_root_path):
-                    for s in ['Seen', 'Unseen']:
-                        for t in ['Test', 'Train']:
+                    for s in ['Seen']: #, 'Unseen']:
+                        for t in ['Train']: #, 'Test']:
                             files_dir = os.path.join(dataset_root_path, view, s, 'Point', t, obj_type)
                             if not os.path.isdir(files_dir):
                                 continue
@@ -231,21 +231,17 @@ class AffordanceNet3D_PC(PointCloud):
         return data if isinstance(data, list) else []
 
     @classmethod
-    def load_all(cls, dataset_root_path, split='all', aff_type=None, **kwargs):
+    def load_all(cls, dataset_root_path, aff_type=None, **kwargs):
         """
         Args:
             dataset_root_path: 3DAffordanceNet 数据目录
             split: 'all'/'train'/'val'/'test'，默认 all
             aff_type: 可选，只保留指定 affordance（str 或 list）
         """
-        if split in (None, 'all'):
-            splits = ['train', 'val', 'test']
-        else:
-            splits = [str(split)]
         aff_set = set([str(aff_type)]) if isinstance(aff_type, str) else (set(map(str, aff_type)) if aff_type is not None else None)
 
         def iterator():
-            for sp in splits:
+            for sp in ['train', 'val']:#, 'test']:
                 samples = cls._iter_split_data(dataset_root_path, sp)
                 if not samples:
                     continue
