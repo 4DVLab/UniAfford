@@ -568,7 +568,7 @@ class PointCloud(Modality):
         """根据hash值去重合并数据"""
         for obj_type, ls in tqdm(cls.all.items(), desc='去重PointCloud'):
             loaded = dict()
-            for pc in tqdm(ls, leave=False):
+            for pc in tqdm(ls):
                 loaded[pc] = pc._merge(loaded.get(pc, None))
 
 class Image(Modality):

@@ -12,13 +12,56 @@ from tqdm import tqdm
 from ..base_dataset import (
     create_info_dict,
     save_info,
-    JointDataset,
     SplitManager,
-    Instruction,
-    Image,
-    PointCloud,
 )
 
+
+def copy_obj(obj_path, obj_name):
+    """复制单个物体的数据到输出目录"""
+    obj_output_path = os.path.join(args.output, obj_name)
+    os.makedirs(obj_output_path, exist_ok=True)
+
+    for m in os.listdir(obj_path):
+        m_path = os.path.join(obj_path, m)
+
+        if os.path.isdir(m_path):  # Point和Image目录可以直接复制
+            dest_path = os.path.join(obj_output_path, m)
+            if os.path.exists(dest_path):
+                # 如果目标已存在，合并内容
+                for item in os.listdir(m_path):
+                    src_item = os.path.join(m_path, item)
+                    dst_item = os.path.join(dest_path, item)
+                    if os.path.isdir(src_item):
+                        if os.path.exists(dst_item):
+                            shutil.rmtree(dst_item)
+                        shutil.copytree(src_item, dst_item)
+                    else:
+                        shutil.copy2(src_item, dst_item)
+            else:
+                shutil.copytree(m_path, dest_path)
+
+        elif m.endswith('.csv'):
+            # 处理CSV文件
+            output_csv = os.path.join(obj_output_path, m)
+            fieldnames = ['ins', 'obj_type', 'aff_type', 'id']
+
+            # 如果输出CSV已存在，追加模式；否则创建新文件
+            mode = 'a' if os.path.exists(output_csv) else 'w'
+            with open(output_csv, mode, newline='', encoding='utf-8') as output_f:
+                writer = csv.DictWriter(output_f, fieldnames=fieldnames)
+                if mode == 'w':
+                    writer.writeheader()
+
+                with open(m_path, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        processed_row = {
+                            'ins': clean_quotes(row.get("ins", "")),  # 兼容之前的问题
+                            'obj_type': row.get('obj_type', ''),
+                            'aff_type': row.get('aff_type', ''),
+                            'id': row.get('id', '')
+                        }
+                        writer.writerow(processed_row)
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="将dataset.py处理的不同位置数据整合为同一个数据集（合并所有的Ins.csv）")
@@ -31,55 +74,6 @@ if __name__ == '__main__':
 
     # 确保输出目录存在
     os.makedirs(args.output, exist_ok=True)
-
-
-    def copy_obj(obj_path, obj_name):
-        """复制单个物体的数据到输出目录"""
-        obj_output_path = os.path.join(args.output, obj_name)
-        os.makedirs(obj_output_path, exist_ok=True)
-
-        for m in os.listdir(obj_path):
-            m_path = os.path.join(obj_path, m)
-
-            if os.path.isdir(m_path):  # Point和Image目录可以直接复制
-                dest_path = os.path.join(obj_output_path, m)
-                if os.path.exists(dest_path):
-                    # 如果目标已存在，合并内容
-                    for item in os.listdir(m_path):
-                        src_item = os.path.join(m_path, item)
-                        dst_item = os.path.join(dest_path, item)
-                        if os.path.isdir(src_item):
-                            if os.path.exists(dst_item):
-                                shutil.rmtree(dst_item)
-                            shutil.copytree(src_item, dst_item)
-                        else:
-                            shutil.copy2(src_item, dst_item)
-                else:
-                    shutil.copytree(m_path, dest_path)
-
-            elif m.endswith('.csv'):
-                # 处理CSV文件
-                output_csv = os.path.join(obj_output_path, m)
-                fieldnames = ['ins', 'obj_type', 'aff_type', 'id']
-
-                # 如果输出CSV已存在，追加模式；否则创建新文件
-                mode = 'a' if os.path.exists(output_csv) else 'w'
-                with open(output_csv, mode, newline='', encoding='utf-8') as output_f:
-                    writer = csv.DictWriter(output_f, fieldnames=fieldnames)
-                    if mode == 'w':
-                        writer.writeheader()
-
-                    with open(m_path, 'r', newline='', encoding='utf-8') as f:
-                        reader = csv.DictReader(f)
-                        for row in reader:
-                            processed_row = {
-                                'ins': clean_quotes(row.get("ins", "")),  # 兼容之前的问题
-                                'obj_type': row.get('obj_type', ''),
-                                'aff_type': row.get('aff_type', ''),
-                                'id': row.get('id', '')
-                            }
-                            writer.writerow(processed_row)
-
 
     # 收集物体模态信息 & 合并 info
     obj_modalities = defaultdict(set)
