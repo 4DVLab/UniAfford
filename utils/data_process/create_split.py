@@ -373,15 +373,24 @@ def save_split_from_memory(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="统一数据集分割工具（支持 disk / memory 两种 ID 来源）")
     parser.add_argument("-d", "--dataset_root", type=str, required=True, help="数据集根目录")
-    parser.add_argument("--train_ratio", type=float, default=1.0, help="训练集比例，默认 1.0")
-    parser.add_argument("--val_ratio", type=float, default=0.0, help="验证集比例，默认 0.0")
+    parser.add_argument("--train_ratio", type=float, default=0.95, help="训练集比例，默认 0.95")
+    parser.add_argument("--val_ratio", type=float, default=0.05, help="验证集比例，默认 0.05")
     parser.add_argument("--test_ratio", type=float, default=0.0, help="测试集比例，默认 0.0")
     parser.add_argument("--id_source", type=str, choices=["disk", "memory"], default="disk", help="ID 来源，默认 disk")
     parser.add_argument("--seed", type=int, default=114514, help="随机种子")
     parser.add_argument("--sample_rate", type=float, default=None, help="组内采样比例 (0,1]，默认不采样")
-    parser.add_argument("--max_sample_per_group", type=int, default=None, help="每组最大保留样本数")
-    parser.add_argument("--min_sample_per_group", type=int, default=10, help="每组采样最小保留")
-    parser.add_argument("--min_holdout_per_group", type=int, default=5, help="启用 val/test 时每组最小 holdout 样本")
+    parser.add_argument(
+        "--max_sample_per_group", type=int, default=None,
+        help="每个 group 最大保留样本数；group 定义为 (modality, obj_type, aff_type) 的一个子集",
+    )
+    parser.add_argument(
+        "--min_sample_per_group", type=int, default=10,
+        help="按 sample_rate 采样时，每个 group 至少保留的样本数；group 定义同上",
+    )
+    parser.add_argument(
+        "--min_holdout_per_group", type=int, default=5,
+        help="启用 val/test 时，每个 group 在 holdout 集（val+test）中尽量预留的最小样本数；holdout 指从 train 划出的验证/测试样本",
+    )
     args = parser.parse_args()
 
     SplitManager(args.dataset_root).split(
