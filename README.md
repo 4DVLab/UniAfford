@@ -224,10 +224,34 @@ dataset_root/
     "pc_valid_lengths": Tensor[B],
     "pc_gt_tensor": Tensor[B, N] | None,
 
-    "obj_type": [str, ...],   # 用于解析 obj-aff token
+    "obj_type": [str, ...],   # 样本元信息（记录/分析）
     "aff_type": [str, ...],
 }
 ```
+
+### 软路由（Router）分支策略
+
+当前模型在 `JointAffordanceModel` 中采用 **text/img/pc 三路软路由**，用于让 `MLLM last_hidden_state` 自适应选择下游分支：
+
+1. **路由预测**
+   - 对每个 token 的隐藏向量 `h[b, l, :]` 通过 `route_head` 得到 `route_logits[b, l, 3]`；
+   - `softmax` 得到 `route_probs`，三类分别对应 `text / img / pc`。
+
+2. **分支专用头 + 软聚合**
+   - 所有 token 同时经过 `img_branch_head` 与 `pc_branch_head`；
+   - 用 `route_probs[..., img]`、`route_probs[..., pc]` 对 token 级特征做加权平均，得到样本级 `img_emb` 与 `pc_emb`；
+   - `img_emb` 输入 `image_decoder`，`pc_emb` 输入 `point_decoder`。
+
+3. **占位 token 回写（保持顺序）**
+   - 仅用于输出记录：按 `hard_route=argmax(route_logits)` 保持原 token 顺序回写 `token_ids`；
+   - 路由到 img 的位置替换为 `<img_aff>`，路由到 pc 的位置替换为 `<pc_aff>`；
+   - 不再依赖 `<img_obj_aff>/<pc_obj_aff>` 这类按类别展开 token。
+
+4. **路由监督与稳定性**
+   - 训练文本中显式保留 `<img_aff>/<pc_aff>` 作为 token-level 路由标签；
+   - 损失由 `L_route`（路由 CE）与 `L_bal`（负载均衡）提供，避免路由塌缩到单一路径。
+
+> 说明：Router 负责“分流与聚合”，具体 2D/3D 解码仍在各自 decoder 中执行；这种解耦更利于维护与调试。
 
 ### 模型输出（`JointAffordanceModel.forward`）
 
@@ -236,8 +260,10 @@ dataset_root/
 {
     "image_logits": Tensor[B, H, W] | None,   # 2D 分割 logits
     "point_logits": Tensor[B, N] | None,      # 3D 分割 logits
-    "token_ids": Tensor[B, L] | None,         # 语言模型 argmax(logits)
+    "token_ids": Tensor[B, L] | None,         # 路由后 token ids（img/pc 位置回写为 <img_aff>/<pc_aff>）
     "ce_loss": Tensor | None,                  # 语言建模交叉熵（传入 labels 时）
+    "route_logits": Tensor[B, L, 3] | None,   # text/img/pc 路由 logits
+    "route_probs": Tensor[B, L, 3] | None,    # 路由概率
     "hidden_states": Tensor | None,           # 仅 return_hidden_states=True 时
     "output": MLLMOutput | None,               # 仅 return_mllm_output=True 时
 }

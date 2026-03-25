@@ -7,6 +7,7 @@ from typing import Dict, Tuple, Optional, List
     img_pred/gt.shape = [Batch, height, width]
     pc_pred/gt.shape = [Batch, num_points]
 """
+IGNORE_INDEX = -100
 
 """ -------------------------------------- 辅助函数 ------------------------------------- """
 # Blue Archwve I and you ~ QAQ
@@ -231,6 +232,99 @@ def pc_loss(
     return mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss
 
 
+def _build_route_targets(
+    labels: torch.Tensor,
+    img_placeholder_id: int,
+    pc_placeholder_id: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    由语言监督标签构造 router 的 token-level 监督：
+    - 默认 text 类（0）
+    - label == <img_aff> -> img 类（1）
+    - label == <pc_aff>  -> pc 类（2）
+    - label == IGNORE_INDEX 的位置不参与监督
+    """
+    targets = torch.zeros_like(labels, dtype=torch.long)
+    valid_mask = labels.ne(IGNORE_INDEX)
+    targets = torch.where(labels.eq(int(img_placeholder_id)), torch.ones_like(targets), targets)
+    targets = torch.where(labels.eq(int(pc_placeholder_id)), torch.full_like(targets, 2), targets)
+    return targets, valid_mask
+
+
+def route_supervision_loss(
+    route_logits: Optional[torch.Tensor],
+    labels: Optional[torch.Tensor],
+    img_placeholder_id: Optional[int],
+    pc_placeholder_id: Optional[int],
+    device: torch.device,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """
+    L_route: token-level 路由监督损失（CE）。
+    """
+    zero = torch.tensor(0.0, device=device)
+    if (
+        route_logits is None
+        or labels is None
+        or img_placeholder_id is None
+        or pc_placeholder_id is None
+    ):
+        return zero, None, None
+
+    bsz, seq_len, num_routes = route_logits.shape
+    if num_routes != 3:
+        return zero, None, None
+    if labels.dim() != 2:
+        return zero, None, None
+
+    use_len = min(seq_len, labels.shape[1])
+    route_logits = route_logits[:, :use_len, :]
+    labels_cut = labels[:, :use_len]
+    targets, valid_mask = _build_route_targets(labels_cut, img_placeholder_id, pc_placeholder_id)
+    if not valid_mask.any():
+        return zero, targets, valid_mask
+
+    token_loss = F.cross_entropy(
+        route_logits.reshape(-1, num_routes),
+        targets.reshape(-1),
+        reduction="none",
+    )
+    valid_flat = valid_mask.reshape(-1).to(route_logits.dtype)
+    loss = (token_loss * valid_flat).sum() / valid_flat.sum().clamp_min(1.0)
+    return loss, targets, valid_mask
+
+
+def route_balance_loss(
+    route_probs: Optional[torch.Tensor],
+    route_targets: Optional[torch.Tensor],
+    valid_mask: Optional[torch.Tensor],
+    device: torch.device,
+) -> torch.Tensor:
+    """
+    L_bal: 路由负载均衡损失。
+    使用监督 token 上的平均路由概率，拉近到“激活专家均匀分布”先验，防止塌缩到 text。
+    """
+    zero = torch.tensor(0.0, device=device)
+    if route_probs is None or route_targets is None or valid_mask is None:
+        return zero
+
+    bsz, seq_len, num_routes = route_probs.shape
+    if num_routes != 3 or route_targets.shape[:2] != (bsz, seq_len):
+        return zero
+    if not valid_mask.any():
+        return zero
+
+    mask_f = valid_mask.to(route_probs.dtype).unsqueeze(-1)  # [B,L,1]
+    mean_probs = (route_probs * mask_f).sum(dim=(0, 1)) / mask_f.sum().clamp_min(1.0)  # [3]
+
+    # text 专家始终激活；img/pc 仅在 batch 中出现对应标签时激活
+    active = torch.zeros(3, device=device, dtype=route_probs.dtype)
+    active[0] = 1.0
+    active[1] = (route_targets.eq(1) & valid_mask).any().to(route_probs.dtype)
+    active[2] = (route_targets.eq(2) & valid_mask).any().to(route_probs.dtype)
+    prior = active / active.sum().clamp_min(1.0)
+    return torch.sum((mean_probs - prior) ** 2)
+
+
 def compute_losses(
     output_dict: Dict,
     input_dict: Dict,
@@ -245,6 +339,9 @@ def compute_losses(
     pc_dice_loss_weight: Optional[float] = None,
     # ---- LLM CE ----
     ce_loss_weight: float = 1.0,
+    # ---- Router losses ----
+    route_loss_weight: float = 1.0,
+    route_bal_loss_weight: float = 0.05,
 ) -> Dict[str, torch.Tensor]:
     """
     统一计算所有损失，返回损失字典。训练与验证共用。
@@ -267,12 +364,15 @@ def compute_losses(
         bce_loss_weight: 3D BCE 权重
         pc_dice_loss_weight: 3D Dice 权重（None 时复用 dice_loss_weight）
         ce_loss_weight: 语言模型 CE 权重
+        route_loss_weight: token-level 路由监督损失权重
+        route_bal_loss_weight: 路由负载均衡损失权重
 
     Returns:
         Dict[str, Tensor]: 统一损失字典，始终包含以下键（缺失的分支为 0）:
             "loss", "ce_loss",
             "img_focal_loss", "img_dice_loss", "img_loss",
-            "pc_bce_loss", "pc_dice_loss", "pc_loss"
+            "pc_bce_loss", "pc_dice_loss", "pc_loss",
+            "route_loss", "route_bal_loss"
     """
     zero = torch.tensor(0.0, device=device)
     pc_dice_w = pc_dice_loss_weight if pc_dice_loss_weight is not None else dice_loss_weight
@@ -310,8 +410,34 @@ def compute_losses(
     if not isinstance(ce, torch.Tensor):
         ce = torch.tensor(float(ce), device=device)
 
+    # ---------- Router 损失 ----------
+    route_logits = output_dict.get("route_logits")
+    route_probs = output_dict.get("route_probs")
+    labels = output_dict.get("labels", input_dict.get("labels"))
+    img_placeholder_id = output_dict.get("img_placeholder_id")
+    pc_placeholder_id = output_dict.get("pc_placeholder_id")
+    route_ce, route_targets, route_valid = route_supervision_loss(
+        route_logits=route_logits,
+        labels=labels,
+        img_placeholder_id=img_placeholder_id,
+        pc_placeholder_id=pc_placeholder_id,
+        device=device,
+    )
+    route_bal = route_balance_loss(
+        route_probs=route_probs,
+        route_targets=route_targets,
+        valid_mask=route_valid,
+        device=device,
+    )
+
     # ---------- 总损失 ----------
-    total_loss = ce_loss_weight * ce + img_total + pc_total
+    total_loss = (
+        ce_loss_weight * ce
+        + img_total
+        + pc_total
+        + route_loss_weight * route_ce
+        + route_bal_loss_weight * route_bal
+    )
 
     return {
         "loss": total_loss,
@@ -324,6 +450,9 @@ def compute_losses(
         "pc_bce_loss": pc_bce,
         "pc_dice_loss": pc_dice,
         "pc_loss": pc_total,
+        # Router 分项
+        "route_loss": route_ce,
+        "route_bal_loss": route_bal,
     }
 
 

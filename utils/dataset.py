@@ -17,26 +17,20 @@ from utils.common import resolve_dtype, FUNCTIONAL_TOKENS, IGNORE_INDEX
 
 def build_functional_tokens_from_samples(samples: List[JointDataSample]) -> Dict[str, Dict[str, str]]:
     """
-    依据样本真实模态构建功能 token（仅注册会被实际使用的 token）。
+    兼容保留：router 架构下不再按 obj-aff 动态扩展功能 token。
+    仅返回通用占位 token，避免继续注入 <img_obj_aff>/<pc_obj_aff>。
 
     Returns:
         {
-            "img": {token_name: token_str, ...},
-            "pc":  {token_name: token_str, ...},
+            "img": {"img_aff_token": "<img_aff>"},
+            "pc":  {"pc_aff_token": "<pc_aff>"},
         }
     """
-    token_map: Dict[str, Dict[str, str]] = {"img": {}, "pc": {}}
-    for sample in samples:
-        obj_type = sample.obj_type
-        aff_type = sample.aff_type
-        pair_key = f"{obj_type}_{aff_type}"
-        if sample.img is not None:
-            img_name = f"img_{pair_key}"
-            token_map["img"][img_name] = f"<{img_name}>"
-        if sample.pc is not None:
-            pc_name = f"pc_{pair_key}"
-            token_map["pc"][pc_name] = f"<{pc_name}>"
-    return token_map
+    _ = samples
+    return {
+        "img": {"img_aff_token": "<img_aff>"},
+        "pc": {"pc_aff_token": "<pc_aff>"},
+    }
 
 
 class JointAffordanceTorchDataset(Dataset):
@@ -78,13 +72,14 @@ class JointAffordanceTorchDataset(Dataset):
         return self._build_sample(self.samples[index])
 
     def _build_text(self, sample: JointDataSample, has_image: bool, has_pc: bool, instruction: str) -> tuple[str, str]:
-        """HACK: 目前先使用预置模版构建回答，之后尝试使用VLM的能力构建回答。
-        2D 与 3D 使用不同 token：<img_obj_aff> 与 <pc_obj_aff>，便于下游分支区分。"""
+        """使用通用占位 token 构建回答，作为 router 的 token-level 监督标签。
+        - 2D 分支占位：<img_aff>
+        - 3D 分支占位：<pc_aff>
+        不再在训练文本中使用 <img_obj_aff>/<pc_obj_aff> 这类按类别展开 token。"""
         obj_type = sample.obj_type
         aff_type = sample.aff_type
-        obj_aff_key = f"{obj_type}_{aff_type}"
-        img_token = f"<img_{obj_aff_key}>"
-        pc_token = f"<pc_{obj_aff_key}>"
+        img_token = "<img_aff>"
+        pc_token = "<pc_aff>"
         question = instruction or f"Please identify the {aff_type} affordance region of the {obj_type}."
 
         answer_parts = []

@@ -11,8 +11,6 @@ from model.pointcept import PointCloudHiddenStateDecoder
 from model.segment_anything import ImageHiddenStateDecoder
 from model.qwenvl import MLLMBackbone
 
-from utils.debug import decode_token_ids
-
 
 class JointAffordanceModel(nn.Module):
     """模型管理基座，负责加载配置并组织各模块。"""
@@ -24,11 +22,36 @@ class JointAffordanceModel(nn.Module):
         self.mllm = MLLMBackbone(self.config.mllm)
         self.functional_tokens = self.mllm.functional_tokens
         self.functional_token_ids = self.mllm.functional_token_ids
-        # 双向映射：token_id -> {name, modality}，用于从 output_ids 中快速查找功能 token
-        self.id_to_token_info = getattr(self.mllm, "id_to_token_info", {})
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
         self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
+
+        hidden_size = int(self.config.mllm.hidden_size)
+        # text/img/pc 三路 router：不再依赖 <img-obj-aff>/<pc-obj-aff> 字符串规则
+        self.route_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, 3),
+        )
+        # 两个分支专用头（低风险改造：位于 JointAffordance，不侵入 Qwen 内核）
+        self.img_branch_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+        self.pc_branch_head = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.GELU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+
+        self.route_text_idx = 0
+        self.route_img_idx = 1
+        self.route_pc_idx = 2
+        self.img_placeholder_token = "<img_aff>"
+        self.pc_placeholder_token = "<pc_aff>"
+        self.img_placeholder_id = self._resolve_token_id(self.img_placeholder_token)
+        self.pc_placeholder_id = self._resolve_token_id(self.pc_placeholder_token)
 
 
     @property
@@ -37,42 +60,84 @@ class JointAffordanceModel(nn.Module):
     @property
     def processor(self): return self.mllm.processor
 
-    def _extract_aff_from_output_ids(
+    def _resolve_token_id(self, token: str) -> int:
+        token_id = self.tokenizer.convert_tokens_to_ids(token)
+        unk_id = getattr(self.tokenizer, "unk_token_id", None)
+        if token_id is None or (unk_id is not None and int(token_id) == int(unk_id)):
+            raise ValueError(f"占位 token 未注册到 tokenizer: {token}")
+        return int(token_id)
+
+    def _route_hidden_states(
         self,
         hidden_states: torch.Tensor,
-        output_ids: torch.Tensor,
-        id_to_token_info: dict,
-    ) -> Dict[str, List[List[Tuple[str, torch.Tensor]]]]:
-        """
-        从 output_ids 中按顺序查找功能 token（在 id_to_token_info 中），提取 hidden state。
-        按模态分组，下游 2D/3D 分支对其对应所有 token 推理。
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # route_logits/probs: [B, L, 3]，三类分别为 text/img/pc
+        route_logits = self.route_head(hidden_states)
+        route_probs = torch.softmax(route_logits, dim=-1)
+        hard_route = route_logits.argmax(dim=-1)
+        if attention_mask is not None:
+            valid = attention_mask.bool()
+            hard_route = torch.where(valid, hard_route, torch.full_like(hard_route, self.route_text_idx))
+            route_probs = route_probs * valid.unsqueeze(-1).to(route_probs.dtype)
+        return route_logits, route_probs, hard_route
 
-        Returns:
-            Dict[str, List[List[Tuple[str, Tensor]]]]:
-                - "img": 每样本 [(token_str, emb), ...] 该样本所有 img 模态 token
-                - "pc": 每样本 [(token_str, emb), ...] 该样本所有 pc 模态 token
-        """
-        B, L, C = hidden_states.shape
-        aff_emb_dict: Dict[str, List[List[Tuple[str, torch.Tensor]]]] = {
-            "img": [[] for _ in range(B)],
-            "pc": [[] for _ in range(B)],
-        }
+    def _build_branch_embeddings(
+        self,
+        hidden_states: torch.Tensor,
+        route_probs: torch.Tensor,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # 软路由聚合，保证路由器与专用头可从下游损失获得梯度
+        img_token_emb = self.img_branch_head(hidden_states)  # [B, L, C]
+        pc_token_emb = self.pc_branch_head(hidden_states)    # [B, L, C]
 
+        img_w = route_probs[:, :, self.route_img_idx:self.route_img_idx + 1]  # [B, L, 1]
+        pc_w = route_probs[:, :, self.route_pc_idx:self.route_pc_idx + 1]      # [B, L, 1]
+
+        img_den = img_w.sum(dim=1).clamp_min(1e-6)
+        pc_den = pc_w.sum(dim=1).clamp_min(1e-6)
+        img_emb = (img_token_emb * img_w).sum(dim=1) / img_den
+        pc_emb = (pc_token_emb * pc_w).sum(dim=1) / pc_den
+        return img_emb, pc_emb, img_token_emb, pc_token_emb
+
+    def _build_routed_token_ids(
+        self,
+        base_token_ids: Optional[torch.Tensor],
+        hard_route: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
+        if base_token_ids is None:
+            return None
+        routed = base_token_ids.clone()
+        routed = torch.where(
+            hard_route == self.route_img_idx,
+            torch.full_like(routed, self.img_placeholder_id),
+            routed,
+        )
+        routed = torch.where(
+            hard_route == self.route_pc_idx,
+            torch.full_like(routed, self.pc_placeholder_id),
+            routed,
+        )
+        return routed
+
+    def _build_aff_token_pairs(
+        self,
+        hard_route: torch.Tensor,
+        img_token_emb: torch.Tensor,
+        pc_token_emb: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+    ) -> List[List[Tuple[str, torch.Tensor]]]:
+        B, L = hard_route.shape
+        aff_token_pairs: List[List[Tuple[str, torch.Tensor]]] = [[] for _ in range(B)]
         for i in range(B):
-            seq_len = min(L, output_ids.shape[1])
+            seq_len = int(attention_mask[i].sum().item()) if attention_mask is not None else L
             for pos in range(seq_len):
-                tid = int(output_ids[i, pos].item())
-                if tid not in id_to_token_info:
-                    continue
-                info = id_to_token_info[tid]
-                emb = hidden_states[i, pos, :]
-                pair = (info["token"], emb)
-                modality = info.get("modality", "pc")
-                if modality not in aff_emb_dict:
-                    continue
-                aff_emb_dict[modality][i].append(pair)
-
-        return aff_emb_dict
+                rid = int(hard_route[i, pos].item())
+                if rid == self.route_img_idx:
+                    aff_token_pairs[i].append((self.img_placeholder_token, img_token_emb[i, pos, :]))
+                elif rid == self.route_pc_idx:
+                    aff_token_pairs[i].append((self.pc_placeholder_token, pc_token_emb[i, pos, :]))
+        return aff_token_pairs
 
     def forward(
         self,
@@ -111,59 +176,39 @@ class JointAffordanceModel(nn.Module):
         output_obj = mllm_out.get("output")
         B,L,C = hidden_states.shape
 
-        # output_ids 选择策略：
-        # - 训练：优先使用 logits_token_ids，缺失时允许回退到 input_ids（teacher-forcing 更稳定）
-        # - 推理：仅使用 logits_token_ids，不回退用户输入
         logits_token_ids = None
+        routed_token_ids = None
         ce_loss = None
         if output_obj is not None:
-            # 1）从 logits 中取出 token_ids，供下游 [SEG] / [AFF] token 提取使用
+            # 从 logits 中取 token_ids（用于可视化与占位 token 回写，不参与路由决策）
             if getattr(output_obj, "logits", None) is not None:
                 logits_token_ids = output_obj.logits.argmax(dim=-1)
-            # 2）若传入了 labels，Qwen 的 output.loss 即为语言模型交叉熵损失
+            # 传入 labels 时，Qwen output.loss 即语言模型 CE
             if getattr(output_obj, "loss", None) is not None:
-                # 注意：这里不做缩放，交由 calculator.compute_losses 中的 ce_loss_weight 控制
                 ce_loss = output_obj.loss
         
         image_logits = None
         point_logits = None
+        route_logits = None
+        route_probs = None
 
         if hidden_states is not None:
-            if self.training:
-                output_ids = logits_token_ids if logits_token_ids is not None else input_ids
-            else:
-                output_ids = logits_token_ids
-            if output_ids is not None and self.id_to_token_info:
-                aff_dict = self._extract_aff_from_output_ids(
-                    hidden_states, output_ids, self.id_to_token_info
-                )
-                # 每样本所有 token 的 emb 做 mean pool，得到 [B, C] 供 decoder；
-                # 注意避免使用 new_zeros + in-place 赋值，确保 2D/3D loss 可回传到 MLLM hidden_states。
-                img_emb_list = []
-                pc_emb_list = []
-                for i in range(B):
-                    if aff_dict["img"][i]:
-                        img_emb_i = torch.stack([p[1] for p in aff_dict["img"][i]], dim=0).mean(dim=0)
-                    else:
-                        img_emb_i = hidden_states.new_zeros(C)
-                    if aff_dict["pc"][i]:
-                        pc_emb_i = torch.stack([p[1] for p in aff_dict["pc"][i]], dim=0).mean(dim=0)
-                    else:
-                        pc_emb_i = hidden_states.new_zeros(C)
-                    img_emb_list.append(img_emb_i)
-                    pc_emb_list.append(pc_emb_i)
-                img_emb = torch.stack(img_emb_list, dim=0)
-                pc_emb = torch.stack(pc_emb_list, dim=0)
-                # 供 validate 的 per-sample 列表：img-aff + pc-aff
-
-                aff_token_pairs = [
-                    aff_dict["img"][i] + aff_dict["pc"][i]
-                    for i in range(B)
-                ]
-            else:
-                img_emb = hidden_states.new_zeros(B, C)
-                pc_emb = hidden_states.new_zeros(B, C)
-                aff_token_pairs = [[] for _ in range(B)]
+            route_logits, route_probs, hard_route = self._route_hidden_states(
+                hidden_states=hidden_states,
+                attention_mask=attention_mask,
+            )
+            img_emb, pc_emb, img_token_emb, pc_token_emb = self._build_branch_embeddings(
+                hidden_states=hidden_states,
+                route_probs=route_probs,
+            )
+            # 路由后 token_ids 仅基于模型 logits，避免回退到输入文本造成评估/可视化偏差
+            routed_token_ids = self._build_routed_token_ids(logits_token_ids, hard_route)
+            aff_token_pairs = self._build_aff_token_pairs(
+                hard_route=hard_route,
+                img_token_emb=img_token_emb,
+                pc_token_emb=pc_token_emb,
+                attention_mask=attention_mask,
+            )
 
             image_pred_emb = self.image_decoder.project_hidden_states(img_emb)
             point_pred_emb = self.point_decoder.project_hidden_states(pc_emb)
@@ -199,7 +244,7 @@ class JointAffordanceModel(nn.Module):
             "hidden_states": None,
             "image_logits": image_logits,
             "point_logits": point_logits,
-            "token_ids": logits_token_ids,
+            "token_ids": routed_token_ids,
             "labels": labels,
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
             "ce_loss": ce_loss,
@@ -207,6 +252,11 @@ class JointAffordanceModel(nn.Module):
             # 用于下游分支的 token 名称与向量（供 validate 等记录）
             # 格式: List[List[Tuple[str, Tensor]]]，每样本 [("<img-x>", emb), ("<pc-x>", emb), ...]
             "aff_token_pairs": None,
+            # 路由监督辅助输出
+            "route_logits": route_logits,
+            "route_probs": route_probs,
+            "img_placeholder_id": self.img_placeholder_id,
+            "pc_placeholder_id": self.pc_placeholder_id,
         }
 
         if hidden_states is not None:

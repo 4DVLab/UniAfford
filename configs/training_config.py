@@ -246,6 +246,8 @@ class TrainingConfig(Configs):
         bce_loss_weight=2.0,
         pc_dice_loss_weight=0.5,
         ce_loss_weight=1.0,
+        route_loss_weight=1.0,
+        route_bal_loss_weight=0.05,
         
         # 高级配置
         exclude_val=False,
@@ -335,6 +337,8 @@ class TrainingConfig(Configs):
             bce_loss_weight = bce_loss_weight,
             pc_dice_loss_weight = pc_dice_loss_weight,
             ce_loss_weight = ce_loss_weight,
+            route_loss_weight = route_loss_weight,
+            route_bal_loss_weight = route_bal_loss_weight,
 
             # 高级配置
             exclude_val = exclude_val,
