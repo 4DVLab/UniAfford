@@ -3,13 +3,16 @@
 """
 import csv
 import os
+import sys
 import argparse
 from collections import defaultdict
 import shutil
 import json
-from common import clean_quotes
 from tqdm import tqdm
-from ..base_dataset import (
+
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
+from utils.common import clean_quotes
+from utils.base_dataset import (
     create_info_dict,
     save_info,
     SplitManager,
