@@ -45,7 +45,7 @@ dataset_root/
 
 ## 分割配置文件
 
-分割由 `SplitManager` 执行，生成四个文件：`metadata.json`、`train.json`、`val.json`、`test.json`。`JointDataset` 通过 `split_file='train.json'` 等形式加载对应分割。
+分割由 `utils/data_process/create_split.py` 中的 `SplitManager` 执行，生成四个文件：`metadata.json`、`train.json`、`val.json`、`test.json`。`JointDataset` 通过 `split_file='train.json'` 等形式加载对应分割。
 
 `train.json` / `val.json` / `test.json` 各自为独立结构，示例（以 train.json 为例）：
 
@@ -87,7 +87,7 @@ dataset_root/
 
 ## 数据分割策略
 
-数据分割由 `utils/base_dataset.py` 中的 `SplitManager.split()` 执行，核心流程如下：
+数据分割由 `utils/data_process/create_split.py` 中的 `SplitManager.split()` 执行，核心流程如下（默认从磁盘扫描 IDs，也可切换到内存 IDs 来源）：
 
 1. **构建分组（按 `obj_type + aff_type`）**
    - **图文分组**：遍历 `Instruction`，使用同 id 的 `Image` 做配对，得到 `(ins_id, img_id)`。
@@ -133,7 +133,7 @@ dataset_root/
 ### data_process 与分割文件
 
 - `utils/data_process/external_datasets_processing.py`
-  - 在 `load_and_save` 处理完成后，会默认调用 `SplitManager(...).split(train=1,val=0,test=0)` 生成 train-only 分割文件。
+  - 在 `load_and_save` 处理完成后，会默认调用 `create_split.save_split_from_disk(..., train=1,val=0,test=0)` 生成 train-only 分割文件。
 - `utils/data_process/merge_datasets.py`
   - 合并后会重新加载并重写数据（重新编号、排序）。
   - 可选 `--save_split` 生成 train-only 分割文件。

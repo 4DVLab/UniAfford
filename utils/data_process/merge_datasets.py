@@ -15,8 +15,8 @@ from utils.common import clean_quotes
 from utils.base_dataset import (
     create_info_dict,
     save_info,
-    SplitManager,
 )
+from utils.data_process.create_split import SplitManager
 
 
 def copy_obj(obj_path, obj_name):
@@ -163,7 +163,7 @@ if __name__ == '__main__':
 
     # 可选保存分割文件
     if args.save_split:
-        SplitManager(args.output).split(train_ratio=0.95, val_ratio=0.05, test_ratio=0.0, keep_id=True)
+        SplitManager(args.output).split(train_ratio=0.95, val_ratio=0.05, test_ratio=0.0, id_source="disk")
 
     print("数据处理完成!")
     print(f"输出目录: {args.output}")
