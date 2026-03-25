@@ -243,10 +243,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="将数据集分割为训练集、验证集和测试集，并保存分割文件")
     parser.add_argument('-d', '--dataset_root', type=str, required=True,
                         help='数据集根目录')
-    parser.add_argument('--train_ratio', type=float, default=1.0,
-                        help='训练集比例，默认 1.0')
-    parser.add_argument('--val_ratio', type=float, default=0.0,
-                        help='验证集比例，默认 0.0')
+    parser.add_argument('--train_ratio', type=float, default=0.95,
+                        help='训练集比例，默认 0.95')
+    parser.add_argument('--val_ratio', type=float, default=0.05,
+                        help='验证集比例，默认 0.05')
     parser.add_argument('--test_ratio', type=float, default=0.0,
                         help='测试集比例，默认 0.0')
     args = parser.parse_args()
