@@ -301,7 +301,8 @@ def route_balance_loss(
 ) -> torch.Tensor:
     """
     L_bal: 路由负载均衡损失。
-    使用监督 token 上的平均路由概率，拉近到“激活专家均匀分布”先验，防止塌缩到 text。
+    使用监督 token 的真实标签分布作为先验（而非均匀先验），
+    避免在单模态样本占优时把路由错误地推向 img/pc 分支。
     """
     zero = torch.tensor(0.0, device=device)
     if route_probs is None or route_targets is None or valid_mask is None:
@@ -316,12 +317,13 @@ def route_balance_loss(
     mask_f = valid_mask.to(route_probs.dtype).unsqueeze(-1)  # [B,L,1]
     mean_probs = (route_probs * mask_f).sum(dim=(0, 1)) / mask_f.sum().clamp_min(1.0)  # [3]
 
-    # text 专家始终激活；img/pc 仅在 batch 中出现对应标签时激活
-    active = torch.zeros(3, device=device, dtype=route_probs.dtype)
-    active[0] = 1.0
-    active[1] = (route_targets.eq(1) & valid_mask).any().to(route_probs.dtype)
-    active[2] = (route_targets.eq(2) & valid_mask).any().to(route_probs.dtype)
-    prior = active / active.sum().clamp_min(1.0)
+    target_counts = torch.zeros(3, device=device, dtype=route_probs.dtype)
+    valid_targets = route_targets[valid_mask]  # [Nv]
+    if valid_targets.numel() == 0:
+        return zero
+    for c in range(3):
+        target_counts[c] = (valid_targets == c).sum().to(route_probs.dtype)
+    prior = target_counts / target_counts.sum().clamp_min(1.0)
     return torch.sum((mean_probs - prior) ** 2)
 
 

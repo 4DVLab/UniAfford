@@ -462,6 +462,7 @@ def main():
         training_cfg, model_cfg, infer_cfg, processor=model.mllm.processor
     )
     tokenizer = processor.tokenizer
+    lm_head = model.mllm.model.get_output_embeddings()
     IGNORE_INDEX = -100
 
     # 指标 & 验证循环
@@ -541,17 +542,22 @@ def main():
                     record["pred_token_ids"] = "[]"
                     record["pred_text"] = ""
 
-                # ---- 下游分支 token 名称与向量（JointAffordance 提取，格式 [("<img-x>", emb), ("<pc-x>", emb), ...]）----
+                # ---- 路由到 <aff> token 的 hidden state 通过文本解码头反投影为 token ----
+                # 用于观察这些跨模态路由位置是否可以被解释为“文本语义”。
                 aff_pairs = output_dict.get("aff_token_pairs")
-                if aff_pairs is not None and i < len(aff_pairs):
+                if aff_pairs is not None and i < len(aff_pairs) and lm_head is not None:
                     pairs_i = aff_pairs[i]
-                    tokens = [p[0] for p in pairs_i]
-                    embs = [[round(x, 6) for x in p[1].detach().float().cpu().tolist()] for p in pairs_i]
-                    record["aff_token_names"] = json.dumps(tokens)
-                    record["aff_token_embeddings"] = json.dumps(embs)
+                    if pairs_i:
+                        emb_stack = torch.stack([p[1] for p in pairs_i], dim=0)
+                        emb_stack = emb_stack.to(device=next(lm_head.parameters()).device, dtype=next(lm_head.parameters()).dtype)
+                        aff_logits = lm_head(emb_stack)  # [K, V]
+                        aff_ids = aff_logits.argmax(dim=-1).detach().cpu().tolist()
+                        aff_text_tokens = [tokenizer.convert_ids_to_tokens(int(tid)) for tid in aff_ids]
+                        record["aff_token_names"] = json.dumps(aff_text_tokens, ensure_ascii=False)
+                    else:
+                        record["aff_token_names"] = "[]"
                 else:
                     record["aff_token_names"] = "[]"
-                    record["aff_token_embeddings"] = "[]"
 
                 # ---- 逐样本 2D/3D 指标（与总体一致：giou_2d, ciou_2d, iou_3d=aiou20, auc_3d 等）----
                 sample_metrics = compute_sample_metrics(
@@ -604,7 +610,7 @@ def main():
         "sample_id", "obj_type", "aff_type",
         "text_id", "img_id", "pc_id",
         "pred_token_ids", "pred_text", "gt_text",
-        "aff_token_names", "aff_token_embeddings",
+        "aff_token_names",
         "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d",
     ]
     csv_path = os.path.join(out_dir, "validation_samples.csv")

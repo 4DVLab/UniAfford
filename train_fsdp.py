@@ -170,12 +170,14 @@ def train_one_epoch(
         if (batch_idx + 1) % config.print_freq == 0 or (batch_idx + 1) == len(train_loader):
             lr_dict = get_current_lr(scheduler, optimizer)
             lr_text = ", ".join([f"{k}={v:.2e}" for k, v in lr_dict.items()])
+            ignored_cnt = int(output_dict.get("ce_ignored_token_count", 0) or 0)
             log_msg = (
                 f"  [{batch_idx + 1}/{len(train_loader)}] "
                 f"loss={loss_dict['loss'].item():.6f} "
                 f"(ce={loss_dict['ce_loss'].item():.6f}, "
                 f"img={loss_dict['img_loss'].item():.6f}, "
-                f"pc={loss_dict['pc_loss'].item():.6f})"
+                f"pc={loss_dict['pc_loss'].item():.6f}, "
+                f"ce_ignore_aff_tok={ignored_cnt})"
                 + (f" lr=({lr_text})" if lr_text else "")
             )
             logger.info(log_msg)
@@ -195,6 +197,7 @@ def train_one_epoch(
             #         )
             if local_rank == 0 and writer is not None:
                 batch_log = {k: loss_dict[k].item() for k in loss_dict}
+                batch_log["ce_ignored_token_count"] = float(ignored_cnt)
                 for k, v in lr_dict.items():
                     batch_log[f"lr/{k}"] = v
                 if lr_dict:
@@ -302,6 +305,7 @@ def main():
 
         data_objects = [train_samples_local, val_samples_local, pair_token_map]
         logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
+    dist.barrier()  # 防止加载训练数据过久导致崩溃
     dist.broadcast_object_list(data_objects, src=0)
     train_samples, val_samples, pair_token_map = data_objects
 

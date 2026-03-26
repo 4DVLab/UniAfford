@@ -250,8 +250,42 @@ dataset_root/
 4. **路由监督与稳定性**
    - 训练文本中显式保留 `<img_aff>/<pc_aff>` 作为 token-level 路由标签；
    - 损失由 `L_route`（路由 CE）与 `L_bal`（负载均衡）提供，避免路由塌缩到单一路径。
+   - 语言 CE 会忽略 `<img_aff>/<pc_aff>` 标签位，这些位置主要由 router + 下游分割损失学习。
 
 > 说明：Router 负责“分流与聚合”，具体 2D/3D 解码仍在各自 decoder 中执行；这种解耦更利于维护与调试。
+
+### 与旧方案对比（按 token_id 提取 seg token）
+
+旧方案（token_id 提取）：
+
+- **做法**：先在词表注册 `<img_obj_aff>/<pc_obj_aff>` 等功能 token，再在输出 token_ids 中查找这些 token 的位置提取 hidden state。
+- **优点**：
+  - 规则直观、可解释性强（“看到某 token 就走某分支”）；
+  - 早期调试方便（可直接对齐 token 字符串）。
+- **缺点**：
+  - 强依赖固定 token 设计，扩展到新对象/新语义需要持续注入 token；
+  - 对开放词汇泛化较弱（未注册 token 无法路由）；
+  - 训练容易变成“背 token 模板”而非学习跨模态语义分流。
+
+当前方案（软路由）：
+
+- **做法**：不再依赖 `<img_obj_aff>/<pc_obj_aff>` 的字符串匹配，直接由 `last_hidden_state -> route_head` 学习 token 级分流。
+- **优点**：
+  - 不绑定固定功能 token，任意语义 token 都可被路由到 2D/3D 分支；
+  - 更利于跨对象、跨表达方式的泛化；
+  - 路由决策可结合上下文（自注意力后的 hidden state）而非单 token 规则。
+- **缺点**：
+  - 训练稳定性更依赖损失设计（`L_route`/`L_bal`）与日志监控；
+  - 可解释性相对下降，需要额外记录路由统计与 token 分析。
+
+### Router 如何知道 `<Aff>` 位置
+
+`<Aff>` 位置信号来自数据构造与标签对齐，而不是推理时字符串匹配：
+
+1. `utils/dataset.py::_build_text()` 在 assistant 答案中写入 `<img_aff>/<pc_aff>` 占位；
+2. `_build_qwen_inputs()` 仅对 assistant 片段赋监督标签（其余位置为 `IGNORE_INDEX`）；
+3. 模型里 `_build_route_mask_from_labels()` 使用与验证一致的 next-token 对齐规则（标签位置 `p` 对应预测位置 `p-1`）构造路由监督位置；
+4. `L_route` 在这些位置监督 text/img/pc 路由类别，`L_bal` 约束分布稳定；同时 CE 忽略 `<img_aff>/<pc_aff>` 标签位，避免语言头硬性学习占位 token。
 
 ### 模型输出（`JointAffordanceModel.forward`）
 
