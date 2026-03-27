@@ -276,10 +276,14 @@ def route_supervision_loss(
     if labels.dim() != 2:
         return zero, None, None
 
-    use_len = min(seq_len, labels.shape[1])
-    route_logits = route_logits[:, :use_len, :]
-    labels_cut = labels[:, :use_len]
-    targets, valid_mask = _build_route_targets(labels_cut, img_placeholder_id, pc_placeholder_id)
+    # 与 Causal LM 对齐：hidden_states[t] / logits[t] 预测 labels[t+1]
+    # 因此路由监督也应基于 shift 后的 labels（而非同位 labels）。
+    if labels.shape[1] <= 1:
+        return zero, None, None
+    pred_len = min(seq_len, labels.shape[1] - 1)
+    route_logits = route_logits[:, :pred_len, :]
+    labels_shift = labels[:, 1 : 1 + pred_len]
+    targets, valid_mask = _build_route_targets(labels_shift, img_placeholder_id, pc_placeholder_id)
     if not valid_mask.any():
         return zero, targets, valid_mask
 
@@ -309,8 +313,14 @@ def route_balance_loss(
         return zero
 
     bsz, seq_len, num_routes = route_probs.shape
-    if num_routes != 3 or route_targets.shape[:2] != (bsz, seq_len):
+    if num_routes != 3 or route_targets.shape[0] != bsz or valid_mask.shape[0] != bsz:
         return zero
+    use_len = min(seq_len, route_targets.shape[1], valid_mask.shape[1])
+    if use_len <= 0:
+        return zero
+    route_probs = route_probs[:, :use_len, :]
+    route_targets = route_targets[:, :use_len]
+    valid_mask = valid_mask[:, :use_len]
     if not valid_mask.any():
         return zero
 

@@ -553,11 +553,16 @@ def main():
                         aff_logits = lm_head(emb_stack)  # [K, V]
                         aff_ids = aff_logits.argmax(dim=-1).detach().cpu().tolist()
                         aff_text_tokens = [tokenizer.convert_ids_to_tokens(int(tid)) for tid in aff_ids]
-                        record["aff_token_names"] = json.dumps(aff_text_tokens, ensure_ascii=False)
+                        # aff_token_names 中同时写入 token 与 id，便于和 pred_token_ids 对齐排查
+                        aff_token_infos = [
+                            {"token": tok, "id": int(tid)}
+                            for tok, tid in zip(aff_text_tokens, aff_ids)
+                        ]
+                        record["aff_token_names"] = json.dumps(aff_token_infos, ensure_ascii=False)[1:-1]
                     else:
-                        record["aff_token_names"] = "[]"
+                        record["aff_token_names"] = ""
                 else:
-                    record["aff_token_names"] = "[]"
+                    record["aff_token_names"] = ""
 
                 # ---- 逐样本 2D/3D 指标（与总体一致：giou_2d, ciou_2d, iou_3d=aiou20, auc_3d 等）----
                 sample_metrics = compute_sample_metrics(
