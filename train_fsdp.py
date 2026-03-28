@@ -14,6 +14,7 @@ import argparse
 import os
 from functools import partial
 from typing import Dict
+import datetime
 
 import torch
 import torch.distributed as dist
@@ -274,7 +275,7 @@ def main():
 
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=3600))
 
     logger = setup_logger(training_configs.log_dir, local_rank)
     logger.info("=" * 80)
