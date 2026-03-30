@@ -59,6 +59,8 @@ def parse_args():
     parser.add_argument("--vision_pretrained", type=str, default=None, help="SAM 权重路径")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
+    parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
+    parser.add_argument("--fixed_save_interval", type=int, default=100, help="固定长周期保存 checkpoint 的间隔，用于保存收敛状态。")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
     return parser.parse_known_args()[0]
 
@@ -272,6 +274,8 @@ def main():
         training_configs.dataset_dir = args.dataset_dir
     if args.log_dir:
         training_configs.log_dir = args.log_dir
+    if args.update_epoch is not None:
+        training_configs.update_epoch = max(1, int(args.update_epoch))
 
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
@@ -475,12 +479,16 @@ def main():
     global_step = 0
     best_metric = float("inf")
     best_epoch = -1
+    update_epoch = max(1, int(getattr(training_configs, "update_epoch", 1)))
     ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints_fsdp")
     os.makedirs(ckpt_dir, exist_ok=True)
     config_json_path = os.path.join(ckpt_dir, "training_config.json")
     if local_rank == 0:
         training_configs.save_json(config_json_path)
         logger.info(f"配置已导出: {config_json_path}")
+        logger.info(
+            f"Checkpoint 保存策略: latest 每 {update_epoch} epoch，固定存档每 {args.fixed_save_interval} epoch，best 按最优 val loss 更新"
+        )
 
     for epoch in range(training_configs.epochs):
         logger.info(f"----- Epoch [{epoch + 1}/{training_configs.epochs}] -----")
@@ -498,48 +506,68 @@ def main():
             loss_kwargs=loss_kwargs,
         )
 
-        monitor = val_results.get("loss", train_results.get("loss", float("inf")))
-        if monitor < best_metric:
+        monitor = float(val_results.get("loss", train_results.get("loss", float("inf"))))
+        current_epoch = epoch + 1
+        is_best = monitor < best_metric
+        if is_best:
             best_metric = monitor
-            best_epoch = epoch + 1
-            # 使用 FullStateDict 保存单卡完整权重（仅 rank0）
-            if local_rank == 0:
-                with FSDP.state_dict_type(
-                    model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-                ):
-                    state_dict = model_fsdp.state_dict()
+            best_epoch = current_epoch
+
+        should_save_latest = (current_epoch % update_epoch == 0) or (current_epoch == training_configs.epochs)
+        should_save_fixed = (current_epoch % args.fixed_save_interval == 0)
+
+        # 保存完整训练权重，按照best、latest(加大update_epoch避免训练过快导致频繁保存)、fixed(固定长周期)三种策略保存权重
+        if local_rank == 0 and (is_best or should_save_latest or should_save_fixed):
+            with FSDP.state_dict_type(
+                model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            ):
+                state_dict = model_fsdp.state_dict()
+
+            if is_best:
                 torch.save(
                     {
                         "epoch": best_epoch,
-                        "model_state_dict": state_dict,
+                        "global_step": global_step,
                         "best_val_loss": best_metric,
+                        "model_state_dict": state_dict,
                     },
-                    os.path.join(ckpt_dir, f"best_fsdp.pth"),
+                    os.path.join(ckpt_dir, "best_fsdp.pth"),
                 )
-                training_configs.save_json(config_json_path)
                 logger.info(f"Best FSDP checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
 
-    # 训练结束，保存 latest
-    if local_rank == 0:
-        with FSDP.state_dict_type(
-            model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        ):
-            final_state = model_fsdp.state_dict()
-        torch.save(
-            {
-                "epoch": training_configs.epochs,
-                "global_step": global_step,
-                "best_epoch": best_epoch,
-                "best_val_loss": best_metric,
-                "model_state_dict": final_state,
-            },
-            os.path.join(ckpt_dir, "latest_fsdp.pth"),
-        )
-        training_configs.save_json(config_json_path)
-        logger.info(
-            f"Latest FSDP checkpoint 已保存: "
-            f"epoch={training_configs.epochs}, best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
-        )
+            if should_save_latest:
+                torch.save(
+                    {
+                        "epoch": current_epoch,
+                        "global_step": global_step,
+                        "best_epoch": best_epoch,
+                        "best_val_loss": best_metric,
+                        "val_loss": monitor,
+                        "model_state_dict": state_dict,
+                    },
+                    os.path.join(ckpt_dir, "latest_fsdp.pth"),
+                )
+                logger.info(
+                    f"Latest FSDP checkpoint 已保存: "
+                    f"epoch={current_epoch}, best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
+                )
+
+            if should_save_fixed:
+                fixed_path = os.path.join(ckpt_dir, f"epoch_{current_epoch:04d}_fsdp.pth")
+                torch.save(
+                    {
+                        "epoch": current_epoch,
+                        "global_step": global_step,
+                        "best_epoch": best_epoch,
+                        "best_val_loss": best_metric,
+                        "val_loss": monitor,
+                        "model_state_dict": state_dict,
+                    },
+                    fixed_path,
+                )
+                logger.info(f"固定周期 checkpoint 已保存: {fixed_path}")
+
+            training_configs.save_json(config_json_path)
 
     logger.info("=" * 80)
     logger.info("FSDP 训练结束")
