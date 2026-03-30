@@ -283,6 +283,8 @@ def main():
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="nccl", timeout=datetime.timedelta(seconds=3600))
+    # object 广播走 CPU(gloo) 通道，避免 NCCL object collective 占用大量显存
+    cpu_obj_group = dist.new_group(backend="gloo")
 
     logger = setup_logger(training_configs.log_dir, local_rank)
     logger.info("=" * 80)
@@ -311,7 +313,8 @@ def main():
         data_objects = [train_samples_local, val_samples_local, pair_token_map]
         logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
     dist.barrier()  # 防止加载训练数据过久导致崩溃
-    dist.broadcast_object_list(data_objects, src=0)
+    # 保持“仅 rank0 加载一次 + 广播”策略，但改为 CPU 对象广播，避免大数据集时显存峰值
+    dist.broadcast_object_list(data_objects, src=0, group=cpu_obj_group)
     train_samples, val_samples, pair_token_map = data_objects
 
     # 构造按模态分组的 token 注册表（先传 token 字符串给 MLLM，随后会映射到 token_id）
@@ -416,7 +419,8 @@ def main():
         batch_size=training_configs.batch_size,
         sampler=train_sampler,
         num_workers=training_configs.workers,
-        pin_memory=False,
+        pin_memory=True,
+        persistent_workers=training_configs.workers > 0,
         collate_fn=data_collator,
     )
     val_loader = DataLoader(
@@ -424,7 +428,8 @@ def main():
         batch_size=training_configs.val_batch_size,
         sampler=val_sampler,
         num_workers=training_configs.workers,
-        pin_memory=False,
+        pin_memory=True,
+        persistent_workers=training_configs.workers > 0,
         collate_fn=data_collator,
     )
 
