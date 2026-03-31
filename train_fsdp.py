@@ -12,6 +12,7 @@ Joint Affordance 训练脚本（FSDP 版本，基于 Qwen MLLM）
 
 import argparse
 import os
+import json
 from functools import partial
 from typing import Dict
 import datetime
@@ -24,6 +25,7 @@ from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     StateDictType,
     FullStateDictConfig,
+    ShardedStateDictConfig,
 )
 from peft import get_peft_model
 from transformers import get_cosine_schedule_with_warmup
@@ -514,8 +516,33 @@ def main():
         training_configs.save_json(config_json_path)
         logger.info(f"配置已导出: {config_json_path}")
         logger.info(
-            f"Checkpoint 保存策略: latest 每 {update_epoch} epoch，固定存档每 {args.fixed_save_interval} epoch，best 按最优 val loss 更新"
+            f"Checkpoint 保存策略: 多卡分片保存（best/latest/fixed），latest 每 {update_epoch} epoch，固定存档每 {args.fixed_save_interval} epoch"
         )
+
+    def _save_sharded_checkpoint(tag: str, meta: Dict):
+        """
+        多卡分片保存：每个 rank 落盘自己的 shard，避免 rank0 聚合完整权重造成长时间阻塞。
+        """
+        tag_dir = os.path.join(ckpt_dir, tag)
+        os.makedirs(tag_dir, exist_ok=True)
+        with FSDP.state_dict_type(
+            model_fsdp, StateDictType.SHARDED_STATE_DICT, ShardedStateDictConfig(offload_to_cpu=True)
+        ):
+            shard_state = model_fsdp.state_dict()
+
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+        shard_file = os.path.join(tag_dir, f"rank{rank:05d}.pth")
+        payload = {
+            **meta,
+            "rank": rank,
+            "world_size": world_size,
+            "model_state_dict": shard_state,
+        }
+        torch.save(payload, shard_file)
+        if local_rank == 0:
+            with open(os.path.join(tag_dir, "meta.json"), "w", encoding="utf-8") as f:
+                json.dump({**meta, "world_size": world_size}, f, ensure_ascii=False, indent=2)
 
     for epoch in range(training_configs.epochs):
         logger.info(f"----- Epoch [{epoch + 1}/{training_configs.epochs}] -----")
@@ -543,58 +570,59 @@ def main():
         should_save_latest = (current_epoch % update_epoch == 0) or (current_epoch == training_configs.epochs)
         should_save_fixed = (current_epoch % args.fixed_save_interval == 0)
 
-        # 保存完整训练权重，按照best、latest(加大update_epoch避免训练过快导致频繁保存)、fixed(固定长周期)三种策略保存权重
-        if local_rank == 0 and (is_best or should_save_latest or should_save_fixed):
-            with FSDP.state_dict_type(
-                model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-            ):
-                state_dict = model_fsdp.state_dict()
+        # 由 rank0 决策，然后广播给所有 rank；保证分片保存的触发条件一致
+        save_flags = [False, False, False]  # [best, latest, fixed]
+        if local_rank == 0:
+            save_flags = [bool(is_best), bool(should_save_latest), bool(should_save_fixed)]
+        dist.broadcast_object_list(save_flags, src=0, group=cpu_obj_group)
+        is_best_save, is_latest_save, is_fixed_save = save_flags
 
-            if is_best:
-                torch.save(
-                    {
-                        "epoch": best_epoch,
-                        "global_step": global_step,
-                        "best_val_loss": best_metric,
-                        "model_state_dict": state_dict,
-                    },
-                    os.path.join(ckpt_dir, "best_fsdp.pth"),
-                )
-                logger.info(f"Best FSDP checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
+        if is_best_save or is_latest_save or is_fixed_save:
+            common_meta = {
+                "epoch": current_epoch,
+                "global_step": global_step,
+                "best_epoch": best_epoch,
+                "best_val_loss": float(best_metric),
+                "val_loss": float(monitor),
+            }
+            if is_best_save:
+                _save_sharded_checkpoint("best_fsdp_sharded", common_meta)
+                if local_rank == 0:
+                    logger.info(f"Best 分片 checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
+            if is_latest_save:
+                _save_sharded_checkpoint("latest_fsdp_sharded", common_meta)
+                if local_rank == 0:
+                    logger.info(
+                        f"Latest 分片 checkpoint 已保存: "
+                        f"epoch={current_epoch}, best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
+                    )
+            if is_fixed_save:
+                fixed_tag = f"epoch_{current_epoch:04d}_fsdp_sharded"
+                _save_sharded_checkpoint(fixed_tag, common_meta)
+                if local_rank == 0:
+                    logger.info(f"固定周期分片 checkpoint 已保存: {os.path.join(ckpt_dir, fixed_tag)}")
+            if local_rank == 0:
+                training_configs.save_json(config_json_path)
 
-            if should_save_latest:
-                torch.save(
-                    {
-                        "epoch": current_epoch,
-                        "global_step": global_step,
-                        "best_epoch": best_epoch,
-                        "best_val_loss": best_metric,
-                        "val_loss": monitor,
-                        "model_state_dict": state_dict,
-                    },
-                    os.path.join(ckpt_dir, "latest_fsdp.pth"),
-                )
-                logger.info(
-                    f"Latest FSDP checkpoint 已保存: "
-                    f"epoch={current_epoch}, best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
-                )
+        dist.barrier() # 防止保存模型过久导致崩溃
 
-            if should_save_fixed:
-                fixed_path = os.path.join(ckpt_dir, f"epoch_{current_epoch:04d}_fsdp.pth")
-                torch.save(
-                    {
-                        "epoch": current_epoch,
-                        "global_step": global_step,
-                        "best_epoch": best_epoch,
-                        "best_val_loss": best_metric,
-                        "val_loss": monitor,
-                        "model_state_dict": state_dict,
-                    },
-                    fixed_path,
-                )
-                logger.info(f"固定周期 checkpoint 已保存: {fixed_path}")
-
-            training_configs.save_json(config_json_path)
+    # 训练结束后可选导出一次完整 latest，便于直接推理/验证加载
+    if local_rank == 0:
+        with FSDP.state_dict_type(
+            model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        ):
+            final_state = model_fsdp.state_dict()
+        torch.save(
+            {
+                "epoch": training_configs.epochs,
+                "global_step": global_step,
+                "best_epoch": best_epoch,
+                "best_val_loss": best_metric,
+                "model_state_dict": final_state,
+            },
+            os.path.join(ckpt_dir, "latest_fsdp.pth"),
+        )
+        logger.info("训练结束：已额外导出完整 latest 权重 latest_fsdp.pth")
 
     logger.info("=" * 80)
     logger.info("FSDP 训练结束")
