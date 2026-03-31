@@ -62,6 +62,7 @@ def parse_args():
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
     parser.add_argument("--fixed_save_interval", type=int, default=100, help="固定长周期保存 checkpoint 的间隔，用于保存收敛状态。")
+    parser.add_argument("--lazy_load", dest="lazy_load", action="store_true", help="启用懒加载（默认启用）",default=True)
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
     return parser.parse_known_args()[0]
 
@@ -299,8 +300,7 @@ def main():
 
     # ---------- 加载数据集 ----------
     logger.info("加载数据集...")
-    lazy_load = bool(getattr(training_configs, "dataset_lazy_load", True))
-    if lazy_load:
+    if args.lazy_load:
         # 懒加载模式：各 rank 仅构建轻量索引（不广播 dataset/samples 大对象）
         train_samples = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json', lazy_load=True)
         val_samples = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json', lazy_load=True)
