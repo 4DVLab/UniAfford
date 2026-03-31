@@ -214,6 +214,7 @@ class SplitManager:
         max_sample_per_group: Optional[int] = None,
         min_sample_per_group: int = 10,
         min_holdout_per_group: int = 5,
+        balance_modalities: bool = False,
         id_source: Literal["disk", "memory"] = "disk",
         sample_ids: Optional[Dict] = None,
     ):
@@ -235,6 +236,39 @@ class SplitManager:
             all_json = self.collect_ids_from_memory(sample_ids=sample_ids)
         else:
             raise ValueError(f"id_source 必须为 'disk' 或 'memory'，当前: {id_source}")
+
+        def _balance_one_split_part(part: Dict[str, Dict[str, Dict[str, list[int]]]]) -> None:
+            """
+            可选平衡（默认关闭，不推荐启用）：
+            在同一 split 内，对每个 (obj_type, aff_type) 将图文分支(Instruction/Image)
+            与 PointCloud 分支数量做对齐。通过有放回复制较小分支实现，会引入重复样本。
+            """
+            ins_mod = part.get("Instruction", {})
+            img_mod = part.get("Image", {})
+            pc_mod = part.get("PointCloud", {})
+            all_obj = set(ins_mod.keys()) | set(pc_mod.keys())
+            for obj in all_obj:
+                common_aff = set(ins_mod.get(obj, {}).keys()) & set(pc_mod.get(obj, {}).keys())
+                for aff in common_aff:
+                    ins_ids = list(ins_mod.get(obj, {}).get(aff, []))
+                    img_ids = list(img_mod.get(obj, {}).get(aff, []))
+                    pc_ids = list(pc_mod.get(obj, {}).get(aff, []))
+                    if not ins_ids or not pc_ids:
+                        continue
+                    target = max(len(ins_ids), len(pc_ids))
+                    if target <= 0:
+                        continue
+                    # 同步扩展 ins/img，保持图文配对关系
+                    if len(ins_ids) < target:
+                        pair_idx = list(range(len(ins_ids)))
+                        ext_idx = pair_idx + [random.choice(pair_idx) for _ in range(target - len(pair_idx))]
+                        ins_mod.setdefault(obj, {})[aff] = [ins_ids[i] for i in ext_idx]
+                        if img_ids:
+                            img_mod.setdefault(obj, {})[aff] = [img_ids[i] for i in ext_idx]
+                    # 扩展 pc
+                    if len(pc_ids) < target:
+                        ext_pc = pc_ids + [random.choice(pc_ids) for _ in range(target - len(pc_ids))]
+                        pc_mod.setdefault(obj, {})[aff] = ext_pc
 
         split_json = {
             "train": {"Instruction": {}, "Image": {}, "PointCloud": {}},
@@ -297,6 +331,11 @@ class SplitManager:
                     if te:
                         split_json["test"].setdefault(modality, {}).setdefault(obj, {})[aff] = te
 
+        if balance_modalities:
+            _balance_one_split_part(split_json["train"])
+            _balance_one_split_part(split_json["val"])
+            _balance_one_split_part(split_json["test"])
+
         n_train = self._count_paired_samples(split_json["train"])
         n_val = self._count_paired_samples(split_json["val"])
         n_test = self._count_paired_samples(split_json["test"])
@@ -310,6 +349,7 @@ class SplitManager:
             "test_ratio": test_ratio,
             "random_seed": random_seed,
             "id_source": id_source,
+            "balance_modalities": bool(balance_modalities),
             "obj_aff_count_by_split": {
                 "train": self._counts(split_json["train"]),
                 "val": self._counts(split_json["val"]),
@@ -391,6 +431,11 @@ if __name__ == "__main__":
         "--min_holdout_per_group", type=int, default=5,
         help="启用 val/test 时，每个 group 在 holdout 集（val+test）中尽量预留的最小样本数；holdout 指从 train 划出的验证/测试样本",
     )
+    parser.add_argument(
+        "--balance_modalities",
+        action="store_true",
+        help="可选：在 split 内按 (obj_type, aff_type) 对齐图文与点云样本数（通过重复采样）。默认关闭，且不推荐启用。",
+    )
     args = parser.parse_args()
 
     SplitManager(args.dataset_root).split(
@@ -402,5 +447,6 @@ if __name__ == "__main__":
         max_sample_per_group=args.max_sample_per_group,
         min_sample_per_group=args.min_sample_per_group,
         min_holdout_per_group=args.min_holdout_per_group,
+        balance_modalities=args.balance_modalities,
         id_source=args.id_source,
     )

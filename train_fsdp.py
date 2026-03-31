@@ -300,8 +300,8 @@ def main():
     logger.info("加载数据集...")
     data_objects = [None, None, None]
     if local_rank == 0:
-        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json').load_all_data()
-        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json').load_all_data()
+        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json', lazy_load=True)
+        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json', lazy_load=True)
         train_samples_local = train_data.samples
         val_samples_local = val_data.samples
         # 仅按真实样本中存在的模态注册 token，避免未使用 token 注入词表
