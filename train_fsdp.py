@@ -37,6 +37,7 @@ from utils.dataset import (
     JointAffordanceTrainDataset,
     joint_affordance_collate_fn,
     build_functional_tokens_from_samples,
+    build_functional_tokens_from_sample_ids,
 )
 from utils.common import dict_to_cuda, setup_logger, FUNCTIONAL_TOKENS
 from utils import calculator as calc
@@ -298,21 +299,41 @@ def main():
 
     # ---------- 加载数据集 ----------
     logger.info("加载数据集...")
-    data_objects = [None, None, None]
-    if local_rank == 0:
-        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json', lazy_load=True)
-        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json', lazy_load=True)
-        train_samples_local = train_data.samples
-        val_samples_local = val_data.samples
-        # 仅按真实样本中存在的模态注册 token，避免未使用 token 注入词表
-        pair_token_map = build_functional_tokens_from_samples(train_samples_local + val_samples_local)
+    lazy_load = bool(getattr(training_configs, "dataset_lazy_load", True))
+    if lazy_load:
+        # 懒加载模式：各 rank 仅构建轻量索引（不广播 dataset/samples 大对象）
+        train_samples = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json', lazy_load=True)
+        val_samples = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json', lazy_load=True)
 
-        data_objects = [train_samples_local, val_samples_local, pair_token_map]
-        logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
-    dist.barrier()  # 防止加载训练数据过久导致崩溃
-    # 保持“仅 rank0 加载一次 + 广播”策略，但改为 CPU 对象广播，避免大数据集时显存峰值
-    dist.broadcast_object_list(data_objects, src=0, group=cpu_obj_group)
-    train_samples, val_samples, pair_token_map = data_objects
+        token_obj = [None]
+        if local_rank == 0:
+            merged_ids = {"ins": {}, "img": {}, "pc": {}}
+            for mod_key in ("ins", "img", "pc"):
+                for ds in (train_samples, val_samples):
+                    for obj, aff_map in ds.sample_ids.get(mod_key, {}).items():
+                        merged_ids[mod_key].setdefault(obj, {})
+                        for aff, ids in aff_map.items():
+                            merged_ids[mod_key][obj].setdefault(aff, [])
+                            merged_ids[mod_key][obj][aff].extend(list(ids))
+            token_obj[0] = build_functional_tokens_from_sample_ids(merged_ids)
+            logger.info(f"训练集 {len(train_samples)} 条, 验证集 {len(val_samples)} 条")
+        dist.barrier()
+        dist.broadcast_object_list(token_obj, src=0, group=cpu_obj_group)
+        pair_token_map = token_obj[0] or {"img": {}, "pc": {}}
+    else:
+        data_objects = [None, None, None]
+        if local_rank == 0:
+            train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json', lazy_load=False).load_all_data()
+            val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json', lazy_load=False).load_all_data()
+            train_payload = train_data.samples
+            val_payload = val_data.samples
+            pair_token_map = build_functional_tokens_from_samples(train_payload + val_payload)
+            data_objects = [train_payload, val_payload, pair_token_map]
+            logger.info(f"训练集 {len(train_payload)} 条, 验证集 {len(val_payload)} 条")
+        dist.barrier()  # 防止加载训练数据过久导致崩溃
+        # 非懒加载模式：保持“仅 rank0 加载一次 + 广播样本列表”策略
+        dist.broadcast_object_list(data_objects, src=0, group=cpu_obj_group)
+        train_samples, val_samples, pair_token_map = data_objects
 
     # 构造按模态分组的 token 注册表（先传 token 字符串给 MLLM，随后会映射到 token_id）
     functional_tokens = {

@@ -39,12 +39,35 @@ def build_functional_tokens_from_samples(samples: List[JointDataSample]) -> Dict
     return token_map
 
 
+def build_functional_tokens_from_sample_ids(sample_ids: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    """
+    从 split/sample_ids 结构构建功能 token（无需加载大样本到内存）。
+    仅根据是否存在对应模态 id 判断是否注册 img/pc token。
+    """
+    token_map: Dict[str, Dict[str, str]] = {"img": {}, "pc": {}}
+    ins_map = sample_ids.get("Instruction", sample_ids.get("ins", {})) or {}
+    img_map = sample_ids.get("Image", sample_ids.get("img", {})) or {}
+    pc_map = sample_ids.get("PointCloud", sample_ids.get("pc", {})) or {}
+    all_obj = set(ins_map.keys()) | set(img_map.keys()) | set(pc_map.keys())
+    for obj_type in all_obj:
+        all_aff = set(ins_map.get(obj_type, {}).keys()) | set(img_map.get(obj_type, {}).keys()) | set(pc_map.get(obj_type, {}).keys())
+        for aff_type in all_aff:
+            pair_key = f"{obj_type}_{aff_type}"
+            if len(img_map.get(obj_type, {}).get(aff_type, [])) > 0:
+                img_name = f"img_{pair_key}"
+                token_map["img"][img_name] = f"<{img_name}>"
+            if len(pc_map.get(obj_type, {}).get(aff_type, [])) > 0:
+                pc_name = f"pc_{pair_key}"
+                token_map["pc"][pc_name] = f"<{pc_name}>"
+    return token_map
+
+
 class JointAffordanceTorchDataset(Dataset):
     """将 JointDataSample 预构建为 CPU 张量样本。"""
 
     def __init__(
         self,
-        samples: List[JointDataSample],
+        samples,
         processor,
         image_size=(1024, 1024),
         num_points: int = 2048,
@@ -61,6 +84,13 @@ class JointAffordanceTorchDataset(Dataset):
         self.mllm_precision = resolve_dtype(mllm_precision) or torch.bfloat16
         self.image_precision = resolve_dtype(image_precision) or torch.float32
         self.point_precision = resolve_dtype(point_precision) or torch.float32
+        # 懒加载源（如 JointDataset.lazy_load=True）下，禁止预缓存，避免初始化阶段全量读盘
+        if getattr(samples, "lazy_load", False) and use_sample_cache:
+            warnings.warn(
+                "检测到 lazy_load 数据源，已自动禁用 use_sample_cache，避免初始化阶段全量加载。",
+                UserWarning,
+            )
+            use_sample_cache = False
         self.use_sample_cache = use_sample_cache
         self.merge_size = getattr(processor.image_processor, "merge_size", 2)
         self._sample_cache = {}
@@ -77,11 +107,9 @@ class JointAffordanceTorchDataset(Dataset):
             return self._sample_cache[index]
         return self._build_sample(self.samples[index])
 
-    def _build_text(self, sample: JointDataSample, has_image: bool, has_pc: bool, instruction: str) -> tuple[str, str]:
+    def _build_text(self, obj_type: str, aff_type: str, has_image: bool, has_pc: bool, instruction: str) -> tuple[str, str]:
         """HACK: 目前先使用预置模版构建回答，之后尝试使用VLM的能力构建回答。
         2D 与 3D 使用不同 token：<img_obj_aff> 与 <pc_obj_aff>，便于下游分支区分。"""
-        obj_type = sample.obj_type
-        aff_type = sample.aff_type
         obj_aff_key = f"{obj_type}_{aff_type}"
         img_token = f"<img_{obj_aff_key}>"
         pc_token = f"<pc_{obj_aff_key}>"
@@ -226,7 +254,7 @@ class JointAffordanceTorchDataset(Dataset):
             out["image_grid_thw"] = [g.cpu() for g in grid] if isinstance(grid, (list, tuple)) else grid.cpu()
         return out
 
-    def _build_sample(self, sample: JointDataSample) -> Dict[str, Any]:
+    def _build_sample(self, sample: Any) -> Dict[str, Any]:
         """
         构建 JointAffordanceModel 的单样本输入，并统一返回 CPU 张量。
 
@@ -245,17 +273,21 @@ class JointAffordanceTorchDataset(Dataset):
                 "pc_gt (可选)":              3D 分支监督掩码                                 [N] point_precision
             }
         """
-        data = sample.get_data()
+        is_joint_sample = hasattr(sample, "get_data")
+        data = sample.get_data() if is_joint_sample else sample
         has_image = data["img"] is not None
         has_pc = data["pc"] is not None
 
         result = {}
         # 供验证/可视化阶段直接使用的样本级元信息
-        result["sample_id"] = sample.id
-        result["obj_type"] = sample.obj_type
-        result["aff_type"] = sample.aff_type
+        obj_type = sample.obj_type if is_joint_sample else data.get("obj_type")
+        aff_type = sample.aff_type if is_joint_sample else data.get("aff_type")
+        sample_id = sample.id if is_joint_sample else data.get("sample_id", data.get("index", -1))
+        result["sample_id"] = sample_id
+        result["obj_type"] = obj_type
+        result["aff_type"] = aff_type
 
-        question, answer = self._build_text(sample, has_image, has_pc, data.get("ins") or "")
+        question, answer = self._build_text(obj_type, aff_type, has_image, has_pc, data.get("ins") or "")
 
         # ZeRO-3 兼容：始终给 Qwen 提供一张图片
         if has_image:
