@@ -101,13 +101,11 @@ class JointAffordanceTorchDataset(Dataset):
             return self._sample_cache[index]
         return self._build_sample(self.samples[index])
 
-    def _build_text(self, sample: JointDataSample, has_image: bool, has_pc: bool, instruction: str) -> tuple[str, str]:
+    def _build_text(self, obj_type, aff_type, has_image: bool, has_pc: bool, instruction: str) -> tuple[str, str]:
         """使用通用占位 token 构建回答，作为 router 的 token-level 监督标签。
         - 2D 分支占位：<img_aff>
         - 3D 分支占位：<pc_aff>
         不再在训练文本中使用 <img_obj_aff>/<pc_obj_aff> 这类按类别展开 token。"""
-        obj_type = sample.obj_type
-        aff_type = sample.aff_type
         img_token = "<img_aff>"
         pc_token = "<pc_aff>"
         question = instruction or f"Please identify the {aff_type} affordance region of the {obj_type}."
@@ -284,7 +282,7 @@ class JointAffordanceTorchDataset(Dataset):
         result["obj_type"] = obj_type
         result["aff_type"] = aff_type
 
-        question, answer = self._build_text(sample, has_image, has_pc, data.get("ins") or "")
+        question, answer = self._build_text(obj_type, aff_type, has_image, has_pc, data.get("ins") or "")
 
         # ZeRO-3 兼容：始终给 Qwen 提供一张图片
         if has_image:
