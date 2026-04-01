@@ -122,6 +122,25 @@ def get_current_lr(scheduler, optimizer):
     return lr_dict
 
 
+def _to_serializable_metrics(metrics: Dict) -> Dict:
+    """将指标字典转成可 JSON/ckpt 持久化的标量字典。"""
+    out = {}
+    for k, v in (metrics or {}).items():
+        if isinstance(v, torch.Tensor):
+            if v.numel() == 1:
+                out[k] = float(v.detach().cpu().item())
+            else:
+                out[k] = [float(x) for x in v.detach().cpu().view(-1).tolist()]
+        elif isinstance(v, (int, float, str, bool)) or v is None:
+            out[k] = v
+        else:
+            try:
+                out[k] = float(v)
+            except Exception:
+                out[k] = str(v)
+    return out
+
+
 def train_one_epoch(
     train_loader, model_fsdp, optimizer, scheduler, config,
     epoch, global_step, writer, logger, local_rank,
@@ -508,6 +527,7 @@ def main():
     global_step = 0
     best_metric = float("inf")
     best_epoch = -1
+    last_val_metrics: Dict = {}
     update_epoch = max(1, int(getattr(training_configs, "update_epoch", 1)))
     ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints_fsdp")
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -559,6 +579,7 @@ def main():
             val_loader, model_fsdp, training_configs, epoch, writer, logger, local_rank,
             loss_kwargs=loss_kwargs,
         )
+        last_val_metrics = _to_serializable_metrics(val_results)
 
         monitor = float(val_results.get("loss", train_results.get("loss", float("inf"))))
         current_epoch = epoch + 1
@@ -584,6 +605,8 @@ def main():
                 "best_epoch": best_epoch,
                 "best_val_loss": float(best_metric),
                 "val_loss": float(monitor),
+                # 记录完整评估指标（含 2D/3D 分支），便于横向比较 checkpoint
+                "val_metrics": last_val_metrics,
             }
             if is_best_save:
                 _save_sharded_checkpoint("best_fsdp_sharded", common_meta)
@@ -618,6 +641,7 @@ def main():
                 "global_step": global_step,
                 "best_epoch": best_epoch,
                 "best_val_loss": best_metric,
+                "val_metrics": last_val_metrics,
                 "model_state_dict": final_state,
             },
             os.path.join(ckpt_dir, "latest_fsdp.pth"),
