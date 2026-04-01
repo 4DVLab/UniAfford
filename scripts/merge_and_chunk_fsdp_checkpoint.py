@@ -2,9 +2,11 @@ import argparse
 import hashlib
 import json
 import os
+import tempfile
 from typing import Any, Dict, List, Sequence, Tuple
 
 import torch
+import torch.distributed as dist
 
 
 def _sorted_rank_files(sharded_dir: str) -> List[str]:
@@ -16,6 +18,85 @@ def _sorted_rank_files(sharded_dir: str) -> List[str]:
     if not files:
         raise FileNotFoundError(f"未找到 rank*.pth: {sharded_dir}")
     return files
+
+
+def _init_default_process_group_for_cpu() -> Tuple[bool, str]:
+    """
+    初始化默认 process group（单进程 CPU/gloo）。
+    某些 FSDP 分片对象（如 ShardedTensor）反序列化/访问时要求默认 PG 已初始化。
+    Returns:
+        (created, init_file_path)
+    """
+    if dist.is_available() and not dist.is_initialized():
+        tmp = tempfile.NamedTemporaryFile(prefix="fsdp_merge_pg_", suffix=".tmp", delete=False)
+        init_file = tmp.name
+        tmp.close()
+        dist.init_process_group(
+            backend="gloo",
+            init_method=f"file://{init_file}",
+            rank=0,
+            world_size=1,
+        )
+        return True, init_file
+    return False, ""
+
+
+def _extract_full_from_sharded_tensor(values: Sequence[Any]) -> Tuple[bool, torch.Tensor]:
+    """
+    从多个 rank 的 ShardedTensor 对象重建完整 tensor（CPU）。
+    """
+    first = values[0]
+    if not hasattr(first, "local_shards") or not hasattr(first, "metadata"):
+        return False, torch.empty(0)
+    try:
+        meta = first.metadata()
+        full_shape = tuple(meta.size)
+        shards_meta = list(meta.shards_metadata)
+    except Exception:
+        return False, torch.empty(0)
+
+    # 找到一个本地分片作为 dtype/device 参考
+    ref_tensor = None
+    for v in values:
+        try:
+            ls = v.local_shards()
+            if ls:
+                ref_tensor = ls[0].tensor
+                break
+        except Exception:
+            continue
+    if ref_tensor is None:
+        return False, torch.empty(0)
+
+    full = torch.zeros(full_shape, dtype=ref_tensor.dtype, device="cpu")
+    # 汇总所有 rank 的本地 shard（world_size=1 时每个对象都在当前进程内）
+    all_local = []
+    for v in values:
+        try:
+            all_local.extend(list(v.local_shards()))
+        except Exception:
+            continue
+
+    # local_shards 的顺序通常对应 shards_metadata，若不一致再做 shape/offset 回退匹配
+    used = [False] * len(all_local)
+    for sm in shards_meta:
+        offs = list(sm.shard_offsets)
+        sizes = list(sm.shard_sizes)
+        placed = False
+        for i, local in enumerate(all_local):
+            if used[i]:
+                continue
+            t = local.tensor.detach().to("cpu")
+            if list(t.shape) == sizes:
+                slices = tuple(slice(o, o + s) for o, s in zip(offs, sizes))
+                full[slices] = t
+                used[i] = True
+                placed = True
+                break
+        if not placed:
+            # 无法匹配某个 shard，则认为重建失败
+            return False, torch.empty(0)
+    return True, full
 
 
 def _try_concat_tensors(values: Sequence[torch.Tensor]) -> Tuple[bool, torch.Tensor]:
@@ -57,6 +138,10 @@ def _try_concat_tensors(values: Sequence[torch.Tensor]) -> Tuple[bool, torch.Ten
 
 def _merge_value(values: Sequence[Any]) -> Any:
     first = values[0]
+    # 优先处理 ShardedTensor（FSDP SHARDED_STATE_DICT 常见）
+    ok_sharded, merged_sharded = _extract_full_from_sharded_tensor(values)
+    if ok_sharded:
+        return merged_sharded
     if isinstance(first, torch.Tensor):
         ok, merged = _try_concat_tensors(values)  # type: ignore[arg-type]
         if ok:
@@ -75,39 +160,48 @@ def _merge_value(values: Sequence[Any]) -> Any:
 
 
 def merge_sharded_checkpoints(sharded_dir: str, output_pth: str) -> str:
-    rank_files = _sorted_rank_files(sharded_dir)
-    payloads = [torch.load(p, map_location="cpu") for p in rank_files]
+    created_pg, init_file = _init_default_process_group_for_cpu()
+    try:
+        rank_files = _sorted_rank_files(sharded_dir)
+        payloads = [torch.load(p, map_location="cpu", weights_only=False) for p in rank_files]
 
-    # 兼容两种结构：{..., model_state_dict=...} 或直接 state_dict
-    state_dicts: List[Dict[str, Any]] = []
-    for p in payloads:
-        if isinstance(p, dict) and "model_state_dict" in p and isinstance(p["model_state_dict"], dict):
-            state_dicts.append(p["model_state_dict"])
-        elif isinstance(p, dict):
-            state_dicts.append(p)
+        # 兼容两种结构：{..., model_state_dict=...} 或直接 state_dict
+        state_dicts: List[Dict[str, Any]] = []
+        for p in payloads:
+            if isinstance(p, dict) and "model_state_dict" in p and isinstance(p["model_state_dict"], dict):
+                state_dicts.append(p["model_state_dict"])
+            elif isinstance(p, dict):
+                state_dicts.append(p)
+            else:
+                raise TypeError(f"不支持的 rank payload 类型: {type(p)}")
+
+        keys = list(state_dicts[0].keys())
+        merged_state: Dict[str, Any] = {}
+        for k in keys:
+            vals = [sd[k] for sd in state_dicts if k in sd]
+            if not vals:
+                continue
+            merged_state[k] = _merge_value(vals)
+
+        rank0 = payloads[0]
+        if isinstance(rank0, dict) and "model_state_dict" in rank0:
+            merged_payload = dict(rank0)
+            merged_payload["model_state_dict"] = merged_state
+            merged_payload["merged_from_shards"] = True
+            merged_payload["num_shards"] = len(rank_files)
         else:
-            raise TypeError(f"不支持的 rank payload 类型: {type(p)}")
+            merged_payload = merged_state
 
-    keys = list(state_dicts[0].keys())
-    merged_state: Dict[str, Any] = {}
-    for k in keys:
-        vals = [sd[k] for sd in state_dicts if k in sd]
-        if not vals:
-            continue
-        merged_state[k] = _merge_value(vals)
-
-    rank0 = payloads[0]
-    if isinstance(rank0, dict) and "model_state_dict" in rank0:
-        merged_payload = dict(rank0)
-        merged_payload["model_state_dict"] = merged_state
-        merged_payload["merged_from_shards"] = True
-        merged_payload["num_shards"] = len(rank_files)
-    else:
-        merged_payload = merged_state
-
-    os.makedirs(os.path.dirname(os.path.abspath(output_pth)), exist_ok=True)
-    torch.save(merged_payload, output_pth)
-    return output_pth
+        os.makedirs(os.path.dirname(os.path.abspath(output_pth)), exist_ok=True)
+        torch.save(merged_payload, output_pth)
+        return output_pth
+    finally:
+        if created_pg:
+            try:
+                dist.destroy_process_group()
+            finally:
+                if init_file and os.path.exists(init_file):
+                    os.remove(init_file)
 
 
 def _sha256_file(path: str) -> str:
