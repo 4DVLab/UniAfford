@@ -294,7 +294,8 @@ class JointAffordanceTorchDataset(Dataset):
             qwen_img_rgb = cv2.cvtColor(qwen_img, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(qwen_img_rgb)
         else:
-            pil_img = Image.new("RGB", (28, 28), color=(0, 0, 0))
+            # 无图样本也使用与训练一致的分辨率，避免同一 batch 内视觉 token 长度不一致
+            pil_img = Image.new("RGB", (self.image_size[0], self.image_size[1]), color=(0, 0, 0))
 
         result.update(self._build_qwen_inputs(question, answer, pil_img))
 
@@ -503,18 +504,29 @@ def joint_affordance_collate_fn(
         )
         fallback_grid_thw = torch.ones(1, 3, dtype=torch.long)
 
-    fixed_pixel_values = [
-        (pv if pv is not None else fallback_pixel_values)
-        for pv in pixel_values_list
-    ]
+    ref_pv_shape = tuple(fallback_pixel_values.shape[1:])
+    ref_grid_shape = tuple(fallback_grid_thw.shape[1:])
+    fixed_pixel_values = []
+    for pv in pixel_values_list:
+        if pv is None or tuple(pv.shape[1:]) != ref_pv_shape:
+            fixed_pixel_values.append(fallback_pixel_values)
+        else:
+            fixed_pixel_values.append(pv)
     fixed_grid_thw = []
     for g in image_grid_thw_list:
         if g is None:
             fixed_grid_thw.append(fallback_grid_thw)
         elif isinstance(g, (list, tuple)):
-            fixed_grid_thw.append(torch.cat(g, dim=0))
+            g_cat = torch.cat(g, dim=0)
+            if tuple(g_cat.shape[1:]) != ref_grid_shape:
+                fixed_grid_thw.append(fallback_grid_thw)
+            else:
+                fixed_grid_thw.append(g_cat)
         else:
-            fixed_grid_thw.append(g)
+            if tuple(g.shape[1:]) != ref_grid_shape:
+                fixed_grid_thw.append(fallback_grid_thw)
+            else:
+                fixed_grid_thw.append(g)
     batch_out["pixel_values"] = torch.cat(fixed_pixel_values, dim=0)
     batch_out["image_grid_thw"] = torch.cat(fixed_grid_thw, dim=0)
 
