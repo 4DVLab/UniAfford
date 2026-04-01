@@ -106,6 +106,8 @@ class JointAffordanceModel(nn.Module):
             attention_mask=attention_mask,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
+            point_clouds=point_clouds,
+            pc_valid_lengths=pc_valid_lengths,
         )
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
         output_obj = mllm_out.get("output")
