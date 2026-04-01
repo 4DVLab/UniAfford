@@ -504,29 +504,18 @@ def joint_affordance_collate_fn(
         )
         fallback_grid_thw = torch.ones(1, 3, dtype=torch.long)
 
-    ref_pv_shape = tuple(fallback_pixel_values.shape[1:])
-    ref_grid_shape = tuple(fallback_grid_thw.shape[1:])
-    fixed_pixel_values = []
-    for pv in pixel_values_list:
-        if pv is None or tuple(pv.shape[1:]) != ref_pv_shape:
-            fixed_pixel_values.append(fallback_pixel_values)
-        else:
-            fixed_pixel_values.append(pv)
+    fixed_pixel_values = [
+        (pv if pv is not None else fallback_pixel_values)
+        for pv in pixel_values_list
+    ]
     fixed_grid_thw = []
     for g in image_grid_thw_list:
         if g is None:
             fixed_grid_thw.append(fallback_grid_thw)
         elif isinstance(g, (list, tuple)):
-            g_cat = torch.cat(g, dim=0)
-            if tuple(g_cat.shape[1:]) != ref_grid_shape:
-                fixed_grid_thw.append(fallback_grid_thw)
-            else:
-                fixed_grid_thw.append(g_cat)
+            fixed_grid_thw.append(torch.cat(g, dim=0))
         else:
-            if tuple(g.shape[1:]) != ref_grid_shape:
-                fixed_grid_thw.append(fallback_grid_thw)
-            else:
-                fixed_grid_thw.append(g)
+            fixed_grid_thw.append(g)
     batch_out["pixel_values"] = torch.cat(fixed_pixel_values, dim=0)
     batch_out["image_grid_thw"] = torch.cat(fixed_grid_thw, dim=0)
 
