@@ -4,6 +4,8 @@ from transformers import AutoProcessor
 import torch
 import torch.nn as nn
 from configs import MLLMConfigs
+from model.pointcept import PointCloudPrefixEncoder
+from utils.common import IGNORE_INDEX
 
 
 class MLLMBackbone(nn.Module):
@@ -40,6 +42,14 @@ class MLLMBackbone(nn.Module):
         if self.config.vocab_size != self.vocab_size:
             print(f"Warning: vocab_size mismatch, config={self.config.vocab_size}, model={self.vocab_size}")
             self.config.vocab_size = self.vocab_size
+
+        self.point_prefix_encoder = None
+        if getattr(self.config, "enable_pc_prefix", False):
+            self.point_prefix_encoder = PointCloudPrefixEncoder(
+                out_hidden_size=self.hidden_size,
+                compute_dtype=self.config.compute_dtype,
+                backbone_kwargs=getattr(self.config, "point_prefix_backbone_kwargs", None),
+            )
 
         self.to(dtype=self.config.compute_dtype)
 
@@ -155,6 +165,48 @@ class MLLMBackbone(nn.Module):
         
         return model
 
+    def _compute_multimodal_position_ids(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        image_grid_thw: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """
+        使用 Qwen-VL 内部 get_rope_index 计算位置编码。
+
+        说明：
+        - 为了满足“仅 inputs_embeds 前向”的要求，这里在外部先计算好 position_ids，
+          然后传给 self.model(...)，避免内部在缺少 input_ids 时退化为纯文本位置策略。
+        - 这样可以保留图像 token 的 3D 视觉位置建模（time/height/width）。
+        """
+        vl_core = getattr(self.model, "model", None)
+        if vl_core is None or not hasattr(vl_core, "get_rope_index"):
+            return None
+
+        try:
+            # Qwen2-VL / Qwen3-VL 接口（不含 second_per_grid_ts）
+            position_ids, rope_deltas = vl_core.get_rope_index(
+                input_ids=input_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=None,
+                attention_mask=attention_mask,
+            )
+        except TypeError:
+            # Qwen2.5-VL 接口（含 second_per_grid_ts）
+            position_ids, rope_deltas = vl_core.get_rope_index(
+                input_ids=input_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=None,
+                second_per_grid_ts=None,
+                attention_mask=attention_mask,
+            )
+            
+
+        # 与官方实现保持一致：缓存 rope_deltas 供后续增量推理使用。
+        if hasattr(vl_core, "rope_deltas"):
+            vl_core.rope_deltas = rope_deltas
+        return position_ids
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -162,12 +214,86 @@ class MLLMBackbone(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         pixel_values: Optional[torch.Tensor] = None,
         image_grid_thw: Optional[torch.Tensor] = None,
+        point_clouds: Optional[torch.Tensor] = None,
+        pc_valid_lengths: Optional[torch.Tensor] = None,
     ) -> dict:
-        # 构建 Qwen 模型输入，自动过滤 None 值
+        # 统一约束：始终走 inputs_embeds 路径，保证多模态缺失/齐全时前向形式一致。
+        # 与之前不同：不再把 input_ids 直接传入 self.model(...)，而是仅用于外部构造 embedding 与位置编码。
+        if input_ids is None:
+            raise ValueError("MLLMBackbone.forward 统一使用 inputs_embeds 模式时，input_ids 不能为空。")
+
+        # 1) 基础文本 embedding（无论是否有点云，都会构建）
+        #    这一步确保即便纯文本/文本+图像样本，也和点云样本共享同一前向入口。
+        token_embeds = self.model.get_input_embeddings()(input_ids)
+
+        # 2) attention_mask 兜底（若外部未提供）
+        #    - 有 pad_token_id: 以非 pad 位置为有效 token
+        #    - 无 pad_token_id: 退化为全 1
+        if attention_mask is None:
+            if self.tokenizer.pad_token_id is not None:
+                attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
+            else:
+                attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+
+        # 默认不加前缀：保持 inputs_embeds 与 input_ids 序列对齐
+        final_input_ids = input_ids
+        final_inputs_embeds = token_embeds
+        final_attention_mask = attention_mask
+        final_labels = labels
+
+        # 3) 点云前缀（可选）：若编码器可用且传入点云，则把前缀拼到序列前面。
+        #    即使某个样本无有效点云，prefix_mask 会把该样本前缀位标记为无效（attention=0）。
+        if self.point_prefix_encoder is not None and point_clouds is not None:
+            prefix_embeds, prefix_mask = self.point_prefix_encoder(
+                point_clouds=point_clouds,
+                pc_valid_lengths=pc_valid_lengths,
+            )
+            if prefix_embeds is not None and prefix_mask is not None:
+                # 对齐 dtype，避免 cat 时精度不一致。
+                token_embeds = token_embeds.to(dtype=prefix_embeds.dtype)
+                final_inputs_embeds = torch.cat([prefix_embeds, token_embeds], dim=1)
+
+                # attention_mask 前缀位由 prefix_mask 控制（有效前缀=1，无效填充前缀=0）
+                prefix_attn = prefix_mask.to(dtype=attention_mask.dtype)
+                final_attention_mask = torch.cat([prefix_attn, attention_mask], dim=1)
+
+                # labels 前缀位统一忽略，不参与语言建模 CE。
+                if labels is not None:
+                    prefix_labels = torch.full(
+                        (labels.shape[0], prefix_embeds.shape[1]),
+                        IGNORE_INDEX,
+                        device=labels.device,
+                        dtype=labels.dtype,
+                    )
+                    final_labels = torch.cat([prefix_labels, labels], dim=1)
+
+                # Qwen-VL 仍依赖 input_ids 识别图像占位 token。
+                # 前缀对应位置填充为 pad/eos，不会命中功能 token 与 image token。
+                pad_id = self.tokenizer.pad_token_id
+                if pad_id is None:
+                    pad_id = self.tokenizer.eos_token_id if self.tokenizer.eos_token_id is not None else 0
+                prefix_ids = torch.full(
+                    (input_ids.shape[0], prefix_embeds.shape[1]),
+                    int(pad_id),
+                    device=input_ids.device,
+                    dtype=input_ids.dtype,
+                )
+                final_input_ids = torch.cat([prefix_ids, input_ids], dim=1)
+
+        # 4) 计算多模态 position_ids（保留视觉 RoPE 建模）。
+        #    注意这里用的是 final_input_ids（可能带前缀 pad），确保位置与最终序列长度一致。
+        position_ids = self._compute_multimodal_position_ids(
+            input_ids=final_input_ids,
+            attention_mask=final_attention_mask,
+            image_grid_thw=image_grid_thw,
+        )
+
+        # 5) 统一封装模型输入：只传 inputs_embeds，不传 input_ids。
         model_inputs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "labels": labels,
+            "inputs_embeds": final_inputs_embeds,
+            "attention_mask": final_attention_mask,
+            "position_ids": position_ids,
+            "labels": final_labels,
             "pixel_values": pixel_values,
             "image_grid_thw": image_grid_thw,
         }

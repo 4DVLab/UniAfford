@@ -66,6 +66,8 @@ class MLLMConfigs(Configs):
         train_mask_decoder: bool = True,
         out_dim: int = 256,
         functional_tokens: dict = FUNCTIONAL_TOKENS,
+        enable_pc_prefix: bool = True,
+        point_prefix_backbone_kwargs: Optional[Dict] = None,
         **kwargs,
     ):
         # 在fp32的时候禁用 flash_attention_2，因为flash_attention_2只支持bf16，在fp32的时候使用默认的attn_implementation
@@ -82,6 +84,8 @@ class MLLMConfigs(Configs):
             train_mask_decoder=train_mask_decoder,
             out_dim=out_dim,
             functional_tokens=functional_tokens,
+            enable_pc_prefix=enable_pc_prefix,
+            point_prefix_backbone_kwargs=point_prefix_backbone_kwargs,
             **kwargs,
         )
 

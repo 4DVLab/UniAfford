@@ -37,6 +37,7 @@ from utils.dataset import (
     JointAffordanceTrainDataset,
     joint_affordance_collate_fn,
     build_functional_tokens_from_samples,
+    build_functional_tokens_from_sample_ids,
 )
 from utils.common import dict_to_cuda, setup_logger, FUNCTIONAL_TOKENS
 from utils import calculator as calc
@@ -61,6 +62,7 @@ def parse_args():
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
     parser.add_argument("--fixed_save_interval", type=int, default=100, help="固定长周期保存 checkpoint 的间隔，用于保存收敛状态。")
+    parser.add_argument("--lazy_load", dest="lazy_load", action="store_true", help="启用懒加载（默认启用）",default=True)
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
     return parser.parse_known_args()[0]
 
@@ -116,6 +118,25 @@ def get_current_lr(scheduler, optimizer):
             group_name = "lr" if len(optimizer.param_groups) == 1 else f"group_{idx}"
         lr_dict[group_name] = float(lr_list[idx])
     return lr_dict
+
+
+def _to_serializable_metrics(metrics: Dict) -> Dict:
+    """将指标字典转成可 JSON/ckpt 持久化的标量字典。"""
+    out = {}
+    for k, v in (metrics or {}).items():
+        if isinstance(v, torch.Tensor):
+            if v.numel() == 1:
+                out[k] = float(v.detach().cpu().item())
+            else:
+                out[k] = [float(x) for x in v.detach().cpu().view(-1).tolist()]
+        elif isinstance(v, (int, float, str, bool)) or v is None:
+            out[k] = v
+        else:
+            try:
+                out[k] = float(v)
+            except Exception:
+                out[k] = str(v)
+    return out
 
 
 def train_one_epoch(
@@ -301,21 +322,40 @@ def main():
 
     # ---------- 加载数据集 ----------
     logger.info("加载数据集...")
-    data_objects = [None, None, None]
-    if local_rank == 0:
-        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json').load_all_data()
-        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json').load_all_data()
-        train_samples_local = train_data.samples
-        val_samples_local = val_data.samples
-        # 仅按真实样本中存在的模态注册 token，避免未使用 token 注入词表
-        pair_token_map = build_functional_tokens_from_samples(train_samples_local + val_samples_local)
+    if args.lazy_load:
+        # 懒加载模式：各 rank 仅构建轻量索引（不广播 dataset/samples 大对象）
+        train_samples = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json', lazy_load=True)
+        val_samples = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json', lazy_load=True)
 
-        data_objects = [train_samples_local, val_samples_local, pair_token_map]
-        logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
-    dist.barrier()  # 防止加载训练数据过久导致崩溃
-    # 保持“仅 rank0 加载一次 + 广播”策略，但改为 CPU 对象广播，避免大数据集时显存峰值
-    dist.broadcast_object_list(data_objects, src=0, group=cpu_obj_group)
-    train_samples, val_samples, pair_token_map = data_objects
+        token_obj = [None]
+        if local_rank == 0:
+            merged_ids = {"ins": {}, "img": {}, "pc": {}}
+            for mod_key in ("ins", "img", "pc"):
+                for ds in (train_samples, val_samples):
+                    for obj, aff_map in ds.sample_ids.get(mod_key, {}).items():
+                        merged_ids[mod_key].setdefault(obj, {})
+                        for aff, ids in aff_map.items():
+                            merged_ids[mod_key][obj].setdefault(aff, [])
+                            merged_ids[mod_key][obj][aff].extend(list(ids))
+            token_obj[0] = build_functional_tokens_from_sample_ids(merged_ids)
+            logger.info(f"训练集 {len(train_samples)} 条, 验证集 {len(val_samples)} 条")
+        dist.barrier()
+        dist.broadcast_object_list(token_obj, src=0, group=cpu_obj_group)
+        pair_token_map = token_obj[0] or {"img": {}, "pc": {}}
+    else:
+        data_objects = [None, None, None]
+        if local_rank == 0:
+            train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json', lazy_load=False).load_all_data()
+            val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json', lazy_load=False).load_all_data()
+            train_payload = train_data.samples
+            val_payload = val_data.samples
+            pair_token_map = build_functional_tokens_from_samples(train_payload + val_payload)
+            data_objects = [train_payload, val_payload, pair_token_map]
+            logger.info(f"训练集 {len(train_payload)} 条, 验证集 {len(val_payload)} 条")
+        dist.barrier()  # 防止加载训练数据过久导致崩溃
+        # 非懒加载模式：保持“仅 rank0 加载一次 + 广播样本列表”策略
+        dist.broadcast_object_list(data_objects, src=0, group=cpu_obj_group)
+        train_samples, val_samples, pair_token_map = data_objects
 
     # 构造按模态分组的 token 注册表（先传 token 字符串给 MLLM，随后会映射到 token_id）
     functional_tokens = {
@@ -490,6 +530,7 @@ def main():
     global_step = 0
     best_metric = float("inf")
     best_epoch = -1
+    last_val_metrics: Dict = {}
     update_epoch = max(1, int(getattr(training_configs, "update_epoch", 1)))
     ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints_fsdp")
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -498,8 +539,25 @@ def main():
         training_configs.save_json(config_json_path)
         logger.info(f"配置已导出: {config_json_path}")
         logger.info(
-            f"Checkpoint 保存策略: latest 每 {update_epoch} epoch，固定存档每 {args.fixed_save_interval} epoch，best 按最优 val loss 更新"
+            f"Checkpoint 保存策略: 直接保存完整 .pth（best/latest/fixed），latest 每 {update_epoch} epoch，固定存档每 {args.fixed_save_interval} epoch"
         )
+
+    def _save_full_checkpoint(filename: str, meta: Dict):
+        """
+        标准 FSDP 完整权重保存：
+        - 所有 rank 参与 state_dict 聚合（rank0_only=True）
+        - 仅 rank0 落盘 .pth，可直接用于评估/推理加载
+        """
+        with FSDP.state_dict_type(
+            model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        ):
+            full_state = model_fsdp.state_dict()
+        if local_rank == 0:
+            payload = {
+                **meta,
+                "model_state_dict": full_state,
+            }
+            torch.save(payload, os.path.join(ckpt_dir, filename))
 
     for epoch in range(training_configs.epochs):
         logger.info(f"----- Epoch [{epoch + 1}/{training_configs.epochs}] -----")
@@ -516,6 +574,7 @@ def main():
             val_loader, model_fsdp, training_configs, epoch, writer, logger, local_rank,
             loss_kwargs=loss_kwargs,
         )
+        last_val_metrics = _to_serializable_metrics(val_results)
 
         monitor = float(val_results.get("loss", train_results.get("loss", float("inf"))))
         current_epoch = epoch + 1
@@ -527,58 +586,67 @@ def main():
         should_save_latest = (current_epoch % update_epoch == 0) or (current_epoch == training_configs.epochs)
         should_save_fixed = (current_epoch % args.fixed_save_interval == 0)
 
-        # 保存完整训练权重，按照best、latest(加大update_epoch避免训练过快导致频繁保存)、fixed(固定长周期)三种策略保存权重
-        if local_rank == 0 and (is_best or should_save_latest or should_save_fixed):
-            with FSDP.state_dict_type(
-                model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-            ):
-                state_dict = model_fsdp.state_dict()
+        # 由 rank0 决策，然后广播给所有 rank；保证保存触发条件一致
+        save_flags = [False, False, False]  # [best, latest, fixed]
+        if local_rank == 0:
+            save_flags = [bool(is_best), bool(should_save_latest), bool(should_save_fixed)]
+        dist.broadcast_object_list(save_flags, src=0, group=cpu_obj_group)
+        is_best_save, is_latest_save, is_fixed_save = save_flags
 
-            if is_best:
-                torch.save(
-                    {
-                        "epoch": best_epoch,
-                        "global_step": global_step,
-                        "best_val_loss": best_metric,
-                        "model_state_dict": state_dict,
-                    },
-                    os.path.join(ckpt_dir, "best_fsdp.pth"),
-                )
-                logger.info(f"Best FSDP checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
+        did_save = False
+        if is_best_save or is_latest_save or is_fixed_save:
+            common_meta = {
+                "epoch": current_epoch,
+                "global_step": global_step,
+                "best_epoch": best_epoch,
+                "best_val_loss": float(best_metric),
+                "val_loss": float(monitor),
+                # 记录完整评估指标（含 2D/3D 分支），便于横向比较 checkpoint
+                "val_metrics": last_val_metrics,
+            }
+            if is_best_save:
+                _save_full_checkpoint("best_fsdp.pth", common_meta)
+                if local_rank == 0:
+                    logger.info(f"Best checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
+                did_save = True
+            if is_latest_save:
+                _save_full_checkpoint("latest_fsdp.pth", common_meta)
+                if local_rank == 0:
+                    logger.info(
+                        f"Latest checkpoint 已保存: "
+                        f"epoch={current_epoch}, best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
+                    )
+                did_save = True
+            if is_fixed_save:
+                fixed_name = f"epoch_{current_epoch:04d}_fsdp.pth"
+                _save_full_checkpoint(fixed_name, common_meta)
+                if local_rank == 0:
+                    logger.info(f"固定周期 checkpoint 已保存: {os.path.join(ckpt_dir, fixed_name)}")
+                did_save = True
+            if local_rank == 0:
+                training_configs.save_json(config_json_path)
+        # 仅在发生保存时同步，避免每个 epoch 都阻塞等待
+        if did_save:
+            dist.barrier()
 
-            if should_save_latest:
-                torch.save(
-                    {
-                        "epoch": current_epoch,
-                        "global_step": global_step,
-                        "best_epoch": best_epoch,
-                        "best_val_loss": best_metric,
-                        "val_loss": monitor,
-                        "model_state_dict": state_dict,
-                    },
-                    os.path.join(ckpt_dir, "latest_fsdp.pth"),
-                )
-                logger.info(
-                    f"Latest FSDP checkpoint 已保存: "
-                    f"epoch={current_epoch}, best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
-                )
-
-            if should_save_fixed:
-                fixed_path = os.path.join(ckpt_dir, f"epoch_{current_epoch:04d}_fsdp.pth")
-                torch.save(
-                    {
-                        "epoch": current_epoch,
-                        "global_step": global_step,
-                        "best_epoch": best_epoch,
-                        "best_val_loss": best_metric,
-                        "val_loss": monitor,
-                        "model_state_dict": state_dict,
-                    },
-                    fixed_path,
-                )
-                logger.info(f"固定周期 checkpoint 已保存: {fixed_path}")
-
-            training_configs.save_json(config_json_path)
+    # 训练结束后可选导出一次完整 latest（与训练中 latest 保持一致，可用于最终覆盖）
+    if local_rank == 0:
+        with FSDP.state_dict_type(
+            model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        ):
+            final_state = model_fsdp.state_dict()
+        torch.save(
+            {
+                "epoch": training_configs.epochs,
+                "global_step": global_step,
+                "best_epoch": best_epoch,
+                "best_val_loss": best_metric,
+                "val_metrics": last_val_metrics,
+                "model_state_dict": final_state,
+            },
+            os.path.join(ckpt_dir, "latest_fsdp.pth"),
+        )
+        logger.info("训练结束：已额外导出完整 latest 权重 latest_fsdp.pth")
 
     logger.info("=" * 80)
     logger.info("FSDP 训练结束")

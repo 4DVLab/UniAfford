@@ -1341,8 +1341,8 @@ class JointDataset:
                  obj_type: list[str] = None,
                  aff_type: list[str] = None,
                  keep_id: bool = True,
-                 balance_data: bool = False,
-                 split_file: Optional[str] = None):
+                 split_file: Optional[str] = None,
+                 lazy_load: bool = False):
         """
         初始化数据集。
 
@@ -1352,14 +1352,15 @@ class JointDataset:
             obj_type: 需要加载的物体类型列表，None 时加载所有
             aff_type: 需要加载的 affordance 类型列表，None 时加载所有
             keep_id: 是否保持原有的 id
-            balance_data: 是否平衡数据（不建议启用）
             split_file: 分割 JSON 文件名，如 'train.json'、'val.json'、'test.json'。指定时从该文件加载 sample_ids 并自动执行 load_all_data
+            lazy_load: 是否启用懒加载。True 时 __getitem__ 按需从硬盘读取；False 时配合 load_all_data 从内存读取
         """
         self.dataset_root = os.path.abspath(dataset_root)
         self.obj_type = obj_type
         self.aff_type = aff_type
         self.keep_id = keep_id
         self.split_file = split_file
+        self.lazy_load = lazy_load
 
         if sample_ids is not None:
             self.sample_ids = sample_ids
@@ -1371,10 +1372,154 @@ class JointDataset:
                 self.sample_ids = create_info_dict()
         else:
             self.sample_ids = create_info_dict()
-        assert not balance_data, "balance_data 不建议启用，容易引起数据分布的改变从而影响模型的训练和评估"
-        if balance_data: self.balance_data()
             
         self.samples = []
+        self._lazy_sample_index: List[Dict[str, Any]] = []
+        self._instruction_cache: Dict[str, Dict[int, Dict[str, Any]]] = {}
+        if self.lazy_load:
+            self._lazy_sample_index = self._build_lazy_sample_index()
+
+    @staticmethod
+    def _entry_primary_id(entry):
+        """从 split entry 中提取主 id（兼容 int / [id, ...] / (id, ...)）。"""
+        if isinstance(entry, (list, tuple)):
+            return int(entry[0]) if len(entry) > 0 else None
+        if entry is None:
+            return None
+        return int(entry)
+
+    def _build_lazy_sample_index(self) -> List[Dict[str, Any]]:
+        """根据 sample_ids 构建轻量样本索引，不加载图像/点云本体。"""
+        sample_index: List[Dict[str, Any]] = []
+        all_obj_types = set()
+        for modality in ['ins', 'img', 'pc']:
+            if modality in self.sample_ids:
+                all_obj_types.update(self.sample_ids[modality].keys())
+
+        for obj_type in all_obj_types:
+            all_aff_types = set()
+            for modality in ['ins', 'img', 'pc']:
+                if modality in self.sample_ids and obj_type in self.sample_ids[modality]:
+                    all_aff_types.update(self.sample_ids[modality][obj_type].keys())
+
+            for aff_type in all_aff_types:
+                ins_ids = self.sample_ids.get('ins', {}).get(obj_type, {}).get(aff_type, [])
+                img_ids = self.sample_ids.get('img', {}).get(obj_type, {}).get(aff_type, [])
+                pc_ids = self.sample_ids.get('pc', {}).get(obj_type, {}).get(aff_type, [])
+
+                max_len = max(len(ins_ids), len(img_ids), len(pc_ids))
+                if max_len == 0:
+                    continue
+
+                for i in range(max_len):
+                    ins_entry = ins_ids[i] if i < len(ins_ids) else None
+                    img_entry = img_ids[i] if i < len(img_ids) else None
+                    pc_entry = pc_ids[i] if i < len(pc_ids) else None
+                    # 至少一个模态可用才纳入索引
+                    if ins_entry is None and img_entry is None and pc_entry is None:
+                        continue
+                    sample_index.append(
+                        {
+                            "obj_type": obj_type,
+                            "aff_type": aff_type,
+                            "ins_entry": ins_entry,
+                            "img_entry": img_entry,
+                            "pc_entry": pc_entry,
+                        }
+                    )
+        return sample_index
+
+    def _load_instruction_by_id(self, obj_type: str, ins_id: Optional[int], aff_type: str) -> Optional[str]:
+        """按 id 读取单条 instruction，带对象级缓存避免重复扫描 CSV。"""
+        if ins_id is None:
+            return None
+        if obj_type not in self._instruction_cache:
+            file_path = os.path.join(self.dataset_root, obj_type, "Instruction.csv")
+            obj_map: Dict[int, Dict[str, Any]] = {}
+            if os.path.exists(file_path):
+                with open(file_path, 'r', newline='', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        try:
+                            rid = int(row.get('id', -1))
+                        except (TypeError, ValueError):
+                            continue
+                        obj_map[rid] = row
+            self._instruction_cache[obj_type] = obj_map
+        row = self._instruction_cache[obj_type].get(int(ins_id))
+        if row is None:
+            return None
+        # aff_type 不一致时也返回文本（兼容历史数据），仅做轻提示过滤逻辑
+        return row.get("ins")
+
+    def _load_image_by_id(self, obj_type: str, img_id: Optional[int], aff_type: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """按 id 读取单张 RGB 与指定 aff 的 mask。"""
+        if img_id is None:
+            return None, None
+        rgb_dir = os.path.join(self.dataset_root, obj_type, "Image", "rgb")
+        rgb_path = None
+        for ext in ('.png', '.jpg', '.jpeg'):
+            candidate = os.path.join(rgb_dir, f"{obj_type}_{img_id}{ext}")
+            if os.path.exists(candidate):
+                rgb_path = candidate
+                break
+        if rgb_path is None:
+            return None, None
+
+        img = cv2.imread(rgb_path)
+        if img is None:
+            return None, None
+
+        mask_path = os.path.join(
+            self.dataset_root,
+            obj_type,
+            "Image",
+            "mask",
+            str(aff_type),
+            f"{obj_type}_{img_id}_{aff_type}.png",
+        )
+        img_mask = None
+        if os.path.exists(mask_path):
+            img_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        return img, img_mask
+
+    def _load_point_cloud_by_id(
+        self,
+        obj_type: str,
+        pc_entry: Any,
+        aff_type: str,
+    ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """按 id 读取点云及指定 aff 的 mask。兼容旧 split 的 (pc_id, mask_idx) 结构。"""
+        pc_id = self._entry_primary_id(pc_entry)
+        if pc_id is None:
+            return None, None
+        pc_path = os.path.join(self.dataset_root, obj_type, "PointCloud", f"{obj_type}_{pc_id}.csv")
+        if not os.path.exists(pc_path):
+            return None, None
+
+        with open(pc_path, 'r', encoding='utf-8') as f:
+            first_line = f.readline().strip()
+            header = first_line.split(',') if first_line else []
+            data = np.loadtxt(f, delimiter=',')
+        if data.ndim == 1:
+            data = np.expand_dims(data, axis=0)
+
+        points = data[:, :3] if data.shape[1] >= 3 else None
+        pc_mask = None
+        if len(header) > 3 and data.shape[1] > 3:
+            labels = header[3:]
+            mask_mat = data[:, 3:]
+            if aff_type in labels:
+                pc_mask = mask_mat[:, labels.index(aff_type)]
+            elif isinstance(pc_entry, (list, tuple)) and len(pc_entry) > 1:
+                # 兼容旧格式：entry[1] 存的是 mask 列索引
+                try:
+                    mask_idx = int(pc_entry[1])
+                    if 0 <= mask_idx < mask_mat.shape[1]:
+                        pc_mask = mask_mat[:, mask_idx]
+                except (TypeError, ValueError):
+                    pass
+        return points, pc_mask
 
     
     @staticmethod
@@ -1657,6 +1802,8 @@ class JointDataset:
     
     def __len__(self) -> int:
         """返回数据集总样本数"""
+        if self.lazy_load:
+            return len(self._lazy_sample_index)
         return len(self.samples)
     
     def __getitem__(self, index: int) -> Dict[str, Any]:
@@ -1675,11 +1822,40 @@ class JointDataset:
         if index < 0:
             index = len(self) + index
 
+        if self.lazy_load:
+            if index < 0 or index >= len(self._lazy_sample_index):
+                raise IndexError(f"索引 {index} 超出范围 [0, {len(self._lazy_sample_index)})")
+            meta = self._lazy_sample_index[index]
+            obj_type = meta["obj_type"]
+            aff_type = meta["aff_type"]
+            ins_id = self._entry_primary_id(meta.get("ins_entry"))
+            img_id = self._entry_primary_id(meta.get("img_entry"))
+
+            ins_text = self._load_instruction_by_id(obj_type, ins_id, aff_type)
+            img, img_gt = self._load_image_by_id(obj_type, img_id, aff_type)
+            pc, pc_gt = self._load_point_cloud_by_id(obj_type, meta.get("pc_entry"), aff_type)
+
+            return {
+                "ins": ins_text,
+                "img": img,
+                "pc": pc,
+                "img_gt": img_gt,
+                "pc_gt": pc_gt,
+                "data_source_id": {
+                    "ins_id": ins_id,
+                    "img_id": img_id,
+                    "pc_id": self._entry_primary_id(meta.get("pc_entry")),
+                    "aff_type": aff_type,
+                },
+                "index": index,
+                "obj_type": obj_type,
+                "aff_type": aff_type,
+            }
+
         if index < 0 or index >= len(self.samples):
             raise IndexError(f"索引 {index} 超出范围 [0, {len(self.samples)})")
 
         sample = self.samples[index]
-        
         data = sample.get_data()
         data['index'] = index
         data['obj_type'] = sample.obj_type
@@ -1729,104 +1905,13 @@ class JointDataset:
                 batch_data.append(data)
             
             yield batch_data
-      
-    def balance_data(self):
-        # 平衡数据集中的 pc 和图文数据
-        def _balance_by_copy(data_list: list, target_count: int) -> list:
-            """
-            通过随机复制将数据列表扩展到目标数量
-            """
-            if len(data_list) >= target_count:
-                return data_list[:target_count]
-            
-            result = data_list.copy()
-            need_count = target_count - len(data_list)
-            for _ in range(need_count):
-                selected = random.choice(data_list)
-                result.append(selected)
-            
-            return result
-
-        print("平衡各分割集中的 pc 和图文数据...")  # Note: 是否必要？
-        
-        # 遍历所有 obj_type 和 aff_type 组合
-        all_obj_types = set(self.sample_ids['ins'].keys()) | set(self.sample_ids['pc'].keys())
-        
-        for obj_type in tqdm(all_obj_types, desc='平衡数据'):
-            # 获取该 obj_type 下所有的 aff_type
-            ins_aff_types = set(self.sample_ids['ins'].get(obj_type, {}).keys())
-            pc_aff_types = set(self.sample_ids['pc'].get(obj_type, {}).keys())
-            all_aff_types = ins_aff_types & pc_aff_types  # NOTE: 只平衡公共aff的数量
-            
-            for aff_type in tqdm(all_aff_types, leave=False):
-                # 获取当前分割中的 ins/img 和 pc 数量
-                ins_list = self.sample_ids['ins'].get(obj_type, {}).get(aff_type, [])
-                img_list = self.sample_ids['img'].get(obj_type, {}).get(aff_type, [])
-                pc_list = self.sample_ids['pc'].get(obj_type, {}).get(aff_type, [])
-                
-                # 跳过空列表
-                if not ins_list or not pc_list:
-                    continue
-                
-                # 计算目标数量（取最大值）
-                target_count = max(len(ins_list), len(pc_list))
-                
-                if target_count == 0:
-                    continue
-                
-                # 平衡 ins 和 img（它们是配对的，需要同步扩展）
-                if ins_list and len(ins_list) < target_count:
-                    # 创建配对索引列表
-                    pair_indices = list(range(len(ins_list)))
-                    balanced_indices = _balance_by_copy(pair_indices, target_count)
-                    
-                    # 根据平衡后的索引重建列表
-                    self.sample_ids['ins'][obj_type][aff_type] = [ins_list[i] for i in balanced_indices]
-                    self.sample_ids['img'][obj_type][aff_type] = [img_list[i] for i in balanced_indices]
-                
-                # 平衡 pc
-                if pc_list and len(pc_list) < target_count:
-                    self.sample_ids['pc'][obj_type][aff_type] = _balance_by_copy(pc_list, target_count)
-
-        print("数据平衡完成")  
-
+   
 
 def main():
     """示例用法；支持 -s/--show 作为渲染工具，自动识别 2D/3D 并依次渲染。"""
     import argparse
-    parser = argparse.ArgumentParser(description="加载并分割联合数据集；或使用 -s/--show 渲染指定 2D/3D 数据")
+    parser = argparse.ArgumentParser(description="使用 -s/--show 渲染指定 2D/3D 数据")
 
-    # 数据集分割参数
-    parser.add_argument('-d', '--dataset-root', type=str, default=None,
-                        help='数据集根目录（非 show 模式时必填）')
-    parser.add_argument('-o', '--obj-type', type=str, nargs='+', default=None,
-                        help='物体类型列表，默认加载所有')
-    parser.add_argument('-a', '--aff-type', type=str, nargs='+', default=None,
-                        help='Affordance 类型列表，默认加载所有')
-    parser.add_argument('--train-ratio', type=float, default=0.7,
-                        help='训练集比例')
-    parser.add_argument('--val-ratio', type=float, default=0.15,
-                        help='验证集比例')
-    parser.add_argument('--test-ratio', type=float, default=0.15,
-                        help='测试集比例')
-    parser.add_argument('--seed', type=int, default=114514,
-                        help='随机种子')
-    parser.add_argument('--sample-rate', type=float, default=None,
-                        help='采样率 (0~1)，None 表示不采样')
-    parser.add_argument('--max-sample-per-group', type=int, default=None,
-                        help='每组 (obj_type, aff_type) 最大采样数')
-    parser.add_argument('--min-sample-per-group', type=int, default=10,
-                        help='每组最小保留数')
-    parser.add_argument('--no-balance', action='store_true', default=True,
-                        help='禁用数据平衡（默认启用）')
-    parser.add_argument('--save-split', action='store_true',
-                        help='保存数据集分割结果为JSON文件')
-    parser.add_argument('--keep-id', action='store_true', default=True,
-                        help='保持原有的ID（默认启用）')
-    parser.add_argument('--copy-to', type=str, default=None,
-                        help='分割后将源文件复制到指定目录，并保存 split_file 至该目录')
-
-    # 渲染参数，和上述参数不共存
     parser.add_argument('-s', '--show', type=str, nargs='+', default=None,
                         help='渲染模式：指定一个或多个文件/目录路径，自动识别 2D 图像或 3D 点云并依次调用 show()')
     args = parser.parse_args()
@@ -1874,32 +1959,6 @@ def main():
                 warnings.warn(f"渲染失败 {file_path}: {e}")
         return
 
-    elif args.dataset_root is not None:
-        dataset_root = resolve_path(args.dataset_root)
-        # 加载全量数据
-        JointDataset(
-            dataset_root=dataset_root,
-            obj_type=args.obj_type,
-            aff_type=args.aff_type,
-            keep_id=args.keep_id,
-            balance_data=not args.no_balance,
-        ).load_all_data()
-
-        # 使用 create_split.SplitManager 执行分割（统一 disk/memory 两种 IDs 来源）
-        if args.save_split:
-            from utils.data_process.create_split import SplitManager as UnifiedSplitManager
-            UnifiedSplitManager(dataset_root).split(
-                train_ratio=args.train_ratio,
-                val_ratio=args.val_ratio,
-                test_ratio=args.test_ratio,
-                random_seed=args.seed,
-                sample_rate=args.sample_rate,
-                max_sample_per_group=args.max_sample_per_group,
-                min_sample_per_group=args.min_sample_per_group,
-                id_source="memory",
-            )
-    else:
-        parser.error("未使用 -s/--show 时需指定 -d/--dataset-root")
 
 
 if __name__ == "__main__":
