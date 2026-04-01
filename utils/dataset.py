@@ -284,7 +284,7 @@ class JointAffordanceTorchDataset(Dataset):
         result["obj_type"] = obj_type
         result["aff_type"] = aff_type
 
-        question, answer = self._build_text(obj_type, aff_type, has_image, has_pc, data.get("ins") or "")
+        question, answer = self._build_text(sample, has_image, has_pc, data.get("ins") or "")
 
         # ZeRO-3 兼容：始终给 Qwen 提供一张图片
         if has_image:
