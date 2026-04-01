@@ -165,6 +165,48 @@ class MLLMBackbone(nn.Module):
         
         return model
 
+    def _compute_multimodal_position_ids(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        image_grid_thw: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        """
+        使用 Qwen-VL 内部 get_rope_index 计算位置编码。
+
+        说明：
+        - 为了满足“仅 inputs_embeds 前向”的要求，这里在外部先计算好 position_ids，
+          然后传给 self.model(...)，避免内部在缺少 input_ids 时退化为纯文本位置策略。
+        - 这样可以保留图像 token 的 3D 视觉位置建模（time/height/width）。
+        """
+        vl_core = getattr(self.model, "model", None)
+        if vl_core is None or not hasattr(vl_core, "get_rope_index"):
+            return None
+
+        try:
+            # Qwen2-VL / Qwen3-VL 接口（不含 second_per_grid_ts）
+            position_ids, rope_deltas = vl_core.get_rope_index(
+                input_ids=input_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=None,
+                attention_mask=attention_mask,
+            )
+        except TypeError:
+            # Qwen2.5-VL 接口（含 second_per_grid_ts）
+            position_ids, rope_deltas = vl_core.get_rope_index(
+                input_ids=input_ids,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=None,
+                second_per_grid_ts=None,
+                attention_mask=attention_mask,
+            )
+            
+
+        # 与官方实现保持一致：缓存 rope_deltas 供后续增量推理使用。
+        if hasattr(vl_core, "rope_deltas"):
+            vl_core.rope_deltas = rope_deltas
+        return position_ids
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -176,7 +218,7 @@ class MLLMBackbone(nn.Module):
         pc_valid_lengths: Optional[torch.Tensor] = None,
     ) -> dict:
         # 统一约束：始终走 inputs_embeds 路径，保证多模态缺失/齐全时前向形式一致。
-        # 注意：Qwen-VL 在存在 image token 时仍需要 input_ids 参与占位匹配与 RoPE 计算。
+        # 与之前不同：不再把 input_ids 直接传入 self.model(...)，而是仅用于外部构造 embedding 与位置编码。
         if input_ids is None:
             raise ValueError("MLLMBackbone.forward 统一使用 inputs_embeds 模式时，input_ids 不能为空。")
 
@@ -193,7 +235,7 @@ class MLLMBackbone(nn.Module):
             else:
                 attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
 
-        # 默认不加前缀：保持 inputs_embeds 与 input_ids 对齐
+        # 默认不加前缀：保持 inputs_embeds 与 input_ids 序列对齐
         final_input_ids = input_ids
         final_inputs_embeds = token_embeds
         final_attention_mask = attention_mask
@@ -238,11 +280,19 @@ class MLLMBackbone(nn.Module):
                 )
                 final_input_ids = torch.cat([prefix_ids, input_ids], dim=1)
 
-        # 4) 统一封装模型输入：无论点云是否缺失，都会显式提供 inputs_embeds。
+        # 4) 计算多模态 position_ids（保留视觉 RoPE 建模）。
+        #    注意这里用的是 final_input_ids（可能带前缀 pad），确保位置与最终序列长度一致。
+        position_ids = self._compute_multimodal_position_ids(
+            input_ids=final_input_ids,
+            attention_mask=final_attention_mask,
+            image_grid_thw=image_grid_thw,
+        )
+
+        # 5) 统一封装模型输入：只传 inputs_embeds，不传 input_ids。
         model_inputs = {
-            "input_ids": final_input_ids,
             "inputs_embeds": final_inputs_embeds,
             "attention_mask": final_attention_mask,
+            "position_ids": position_ids,
             "labels": final_labels,
             "pixel_values": pixel_values,
             "image_grid_thw": image_grid_thw,
