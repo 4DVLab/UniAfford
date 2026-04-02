@@ -313,5 +313,10 @@ class MLLMBackbone(nn.Module):
         # 确保输出为 [B, L, C]
         if hidden_states.dim() == 2:
             hidden_states = hidden_states.unsqueeze(0)
-        return {"hidden_states": hidden_states, "output": outputs}
+        return {
+            "hidden_states": hidden_states,
+            "output": outputs,
+            # 与 logits 序列长度严格对齐的标签（包含可选 pc prefix 的 IGNORE 区段）
+            "aligned_labels": final_labels,
+        }
 

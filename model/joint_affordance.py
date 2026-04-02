@@ -321,6 +321,8 @@ class JointAffordanceModel(nn.Module):
         )
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
         output_obj = mllm_out.get("output")
+        # 关键：当启用 pc prefix 时，使用与 logits 同长度的对齐标签，避免 CE 维度不一致
+        model_labels = mllm_out.get("aligned_labels", labels)
         B,L,C = hidden_states.shape
 
         logits_token_ids = None
@@ -334,7 +336,7 @@ class JointAffordanceModel(nn.Module):
                 # CE 改为“忽略 <img_aff>/<pc_aff> 标签位”的版本
                 ce_loss, ce_ignored_token_count = self._compute_text_ce_without_aff_placeholders(
                     logits=output_obj.logits,
-                    labels=labels,
+                    labels=model_labels,
                     ignore_index=-100,
                 )
             # 兜底：无 logits 时沿用底座返回 loss
@@ -359,7 +361,7 @@ class JointAffordanceModel(nn.Module):
                 hidden_states=hidden_states,
                 route_probs=route_probs,
             )
-            route_mask = self._build_route_mask_from_labels(labels=labels, seq_len=hidden_states.shape[1])
+            route_mask = self._build_route_mask_from_labels(labels=model_labels, seq_len=hidden_states.shape[1])
             # 路由后 token_ids 仅基于模型 logits，避免回退到输入文本造成评估/可视化偏差
             routed_token_ids = self._build_routed_token_ids(
                 logits_token_ids, hard_route, route_mask=route_mask
@@ -407,7 +409,7 @@ class JointAffordanceModel(nn.Module):
             "image_logits": image_logits,
             "point_logits": point_logits,
             "token_ids": routed_token_ids,
-            "labels": labels,
+            "labels": model_labels,
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
             "ce_loss": ce_loss,
             "output": None,
