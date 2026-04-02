@@ -1,3 +1,8 @@
+"""
+Discard
+之前为了快速保存模型权重，使用了特殊的权重保存方式，专门需要权重合成脚本才能把权重合成单一的文件
+"""
+
 import argparse
 import hashlib
 import json

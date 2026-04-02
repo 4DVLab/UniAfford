@@ -62,7 +62,9 @@ def parse_args():
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
     parser.add_argument("--fixed_save_interval", type=int, default=100, help="固定长周期保存 checkpoint 的间隔，用于保存收敛状态。")
-    parser.add_argument("--lazy_load", dest="lazy_load", action="store_true", help="启用懒加载（默认启用）",default=True)
+    parser.add_argument("--lazy_load", dest="lazy_load", action="store_true", help="启用懒加载（默认启用）", default=True)
+    parser.add_argument("--resume", action="store_true", help="从 checkpoint 断点续训")
+    parser.add_argument("--resume_ckpt", type=str, default=None, help="断点续训 checkpoint 路径；为空则默认 latest_fsdp.pth")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
     return parser.parse_known_args()[0]
 
@@ -137,6 +139,16 @@ def _to_serializable_metrics(metrics: Dict) -> Dict:
             except Exception:
                 out[k] = str(v)
     return out
+
+
+def _move_optimizer_state_to_device(optimizer, device: torch.device):
+    """将 optimizer state 中的张量迁移到目标设备，避免 resume 后设备不一致。"""
+    for state in optimizer.state.values():
+        if not isinstance(state, dict):
+            continue
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                state[k] = v.to(device=device, non_blocking=True)
 
 
 def train_one_epoch(
@@ -313,12 +325,6 @@ def main():
     logger.info("=" * 80)
 
     writer = None
-    if local_rank == 0:
-        tb_dir = os.path.join(training_configs.log_dir, "tensorboard")
-        os.makedirs(tb_dir, exist_ok=True)
-        writer = SummaryWriter(log_dir=tb_dir)
-        writer.add_text("config/training", str(training_configs.to_dict()))
-        writer.add_text("config/model", str(model_config.to_dict()))
 
     # ---------- 加载数据集 ----------
     logger.info("加载数据集...")
@@ -420,6 +426,28 @@ def main():
         f"参数统计: total={total_params:,}, trainable={trainable_params:,}, "
         f"ratio={100.0 * trainable_params / max(1, total_params):.2f}%"
     )
+
+    # ---------- 断点续训：先恢复模型权重（FSDP 包装前） ----------
+    ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints_fsdp")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    resume_payload = None
+    resume_path = args.resume_ckpt
+    if args.resume or args.resume_ckpt:
+        if resume_path is None:
+            resume_path = os.path.join(ckpt_dir, "latest_fsdp.pth")
+        if not os.path.isabs(resume_path):
+            resume_path = os.path.abspath(resume_path)
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError(f"断点续训失败，checkpoint 不存在: {resume_path}")
+        resume_payload = torch.load(resume_path, map_location="cpu")
+        state_dict = resume_payload.get("model_state_dict")
+        if state_dict is None:
+            raise KeyError(f"checkpoint 缺少 model_state_dict: {resume_path}")
+        miss, unexp = model.load_state_dict(state_dict, strict=False)
+        if local_rank == 0:
+            logger.info(
+                f"已加载断点模型: {resume_path} | missing={len(miss)} unexpected={len(unexp)}"
+            )
 
     train_ds_cls = JointAffordanceTrainDataset if training_configs.samples_per_epoch else JointAffordanceTorchDataset
     train_ds_kwargs = dict(
@@ -530,11 +558,45 @@ def main():
     global_step = 0
     best_metric = float("inf")
     best_epoch = -1
+    start_epoch = 0
     last_val_metrics: Dict = {}
     update_epoch = max(1, int(getattr(training_configs, "update_epoch", 1)))
-    ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints_fsdp")
-    os.makedirs(ckpt_dir, exist_ok=True)
     config_json_path = os.path.join(ckpt_dir, "training_config.json")
+
+    # ---------- 断点续训：恢复优化器/调度器与训练进度 ----------
+    if resume_payload is not None:
+        opt_state = resume_payload.get("optimizer_state_dict")
+        if opt_state is not None:
+            optimizer.load_state_dict(opt_state)
+            _move_optimizer_state_to_device(optimizer, device)
+        sch_state = resume_payload.get("scheduler_state_dict")
+        if sch_state is not None:
+            scheduler.load_state_dict(sch_state)
+        global_step = int(resume_payload.get("global_step", 0) or 0)
+        best_epoch = int(resume_payload.get("best_epoch", -1) or -1)
+        best_metric = float(resume_payload.get("best_val_loss", float("inf")))
+        start_epoch = int(resume_payload.get("epoch", 0) or 0)  # checkpoint 记录为已完成 epoch(1-based)
+        last_val_metrics = _to_serializable_metrics(resume_payload.get("val_metrics", {}))
+        if local_rank == 0:
+            logger.info(
+                f"断点续训状态: start_epoch={start_epoch + 1}, global_step={global_step}, "
+                f"best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
+            )
+            if opt_state is None or sch_state is None:
+                logger.warning(
+                    "resume checkpoint 缺少 optimizer/scheduler 状态，"
+                    "学习率曲线与优化器动量无法完全无缝衔接。建议使用新版本 latest_fsdp.pth 续训。"
+                )
+
+    # TensorBoard：在恢复完 global_step 后再初始化，保证曲线连续
+    if local_rank == 0:
+        tb_dir = os.path.join(training_configs.log_dir, "tensorboard")
+        os.makedirs(tb_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir=tb_dir, purge_step=global_step)
+        writer.add_text("config/training", str(training_configs.to_dict()))
+        writer.add_text("config/model", str(model_config.to_dict()))
+        if resume_payload is not None:
+            writer.add_text("resume/info", f"resume_from={resume_path}, global_step={global_step}, start_epoch={start_epoch + 1}")
     if local_rank == 0:
         training_configs.save_json(config_json_path)
         logger.info(f"配置已导出: {config_json_path}")
@@ -556,10 +618,12 @@ def main():
             payload = {
                 **meta,
                 "model_state_dict": full_state,
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             }
             torch.save(payload, os.path.join(ckpt_dir, filename))
 
-    for epoch in range(training_configs.epochs):
+    for epoch in range(start_epoch, training_configs.epochs):
         logger.info(f"----- Epoch [{epoch + 1}/{training_configs.epochs}] -----")
         train_sampler.set_epoch(epoch)
         val_sampler.set_epoch(epoch)
@@ -643,6 +707,8 @@ def main():
                 "best_val_loss": best_metric,
                 "val_metrics": last_val_metrics,
                 "model_state_dict": final_state,
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
             },
             os.path.join(ckpt_dir, "latest_fsdp.pth"),
         )
