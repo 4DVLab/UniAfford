@@ -42,6 +42,7 @@ class JointAffordanceModel(nn.Module):
         hidden_states: torch.Tensor,
         output_ids: torch.Tensor,
         id_to_token_info: dict,
+        attention_mask: Optional[torch.Tensor] = None,
     ) -> Dict[str, List[List[Tuple[str, torch.Tensor]]]]:
         """
         从 output_ids 中按顺序查找功能 token（在 id_to_token_info 中），提取 hidden state。
@@ -59,7 +60,10 @@ class JointAffordanceModel(nn.Module):
         }
 
         for i in range(B):
-            seq_len = min(L, output_ids.shape[1])
+            if attention_mask is not None:
+                seq_len = int(attention_mask[i].sum().item())
+            else:
+                seq_len = min(L, output_ids.shape[1])
             for pos in range(seq_len):
                 tid = int(output_ids[i, pos].item())
                 if tid not in id_to_token_info:
@@ -111,6 +115,8 @@ class JointAffordanceModel(nn.Module):
         )
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
         output_obj = mllm_out.get("output")
+        model_labels = mllm_out.get("aligned_labels", labels)
+        model_attention_mask = mllm_out.get("aligned_attention_mask", attention_mask)
         B,L,C = hidden_states.shape
 
         # output_ids 选择策略：
@@ -137,7 +143,7 @@ class JointAffordanceModel(nn.Module):
                 output_ids = logits_token_ids
             if output_ids is not None and self.id_to_token_info:
                 aff_dict = self._extract_aff_from_output_ids(
-                    hidden_states, output_ids, self.id_to_token_info
+                    hidden_states, output_ids, self.id_to_token_info, attention_mask=model_attention_mask
                 )
                 # 每样本所有 token 的 emb 做 mean pool，得到 [B, C] 供 decoder；
                 # 注意避免使用 new_zeros + in-place 赋值，确保 2D/3D loss 可回传到 MLLM hidden_states。
@@ -202,7 +208,8 @@ class JointAffordanceModel(nn.Module):
             "image_logits": image_logits,
             "point_logits": point_logits,
             "token_ids": logits_token_ids,
-            "labels": labels,
+            "labels": model_labels,
+            "attention_mask": model_attention_mask,
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
             "ce_loss": ce_loss,
             "output": None,

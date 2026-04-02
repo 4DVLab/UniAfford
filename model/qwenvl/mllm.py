@@ -5,7 +5,13 @@ import torch
 import torch.nn as nn
 from configs import MLLMConfigs
 from model.pointcept import PointCloudPrefixEncoder
-from utils.common import IGNORE_INDEX
+from utils.common import (
+    IGNORE_INDEX,
+    DEFAULT_PC_TOKEN,
+    DEFAULT_PC_PATCH_TOKEN,
+    DEFAULT_PC_START_TOKEN,
+    DEFAULT_PC_END_TOKEN,
+)
 
 
 class MLLMBackbone(nn.Module):
@@ -36,6 +42,7 @@ class MLLMBackbone(nn.Module):
         self.functional_token_ids = self._ensure_special_tokens(
             self.functional_tokens, token_modality
         )
+        self._ensure_pointcloud_tokens()
 
         # 特殊 token 注入后，词表大小可能变化，这里以模型实际词表为准回写配置。
         self.vocab_size = int(self.model.get_input_embeddings().num_embeddings)
@@ -50,6 +57,8 @@ class MLLMBackbone(nn.Module):
                 compute_dtype=self.config.compute_dtype,
                 backbone_kwargs=getattr(self.config, "point_prefix_backbone_kwargs", None),
             )
+        self.pc_anchor_token_id = self._resolve_token_id(DEFAULT_PC_TOKEN)
+        self.pc_patch_token_id = self._resolve_token_id(DEFAULT_PC_PATCH_TOKEN)
 
         self.to(dtype=self.config.compute_dtype)
 
@@ -165,6 +174,135 @@ class MLLMBackbone(nn.Module):
         
         return model
 
+    def _ensure_pointcloud_tokens(self):
+        """
+        注册点云输入占位 token（与 Qwen 视觉 token 风格一致），
+        便于在 input_ids 中定位并注入点云 embedding。
+        """
+        candidates = [
+            DEFAULT_PC_TOKEN,
+            DEFAULT_PC_PATCH_TOKEN,
+            DEFAULT_PC_START_TOKEN,
+            DEFAULT_PC_END_TOKEN,
+        ]
+        unk_id = self.tokenizer.unk_token_id
+        tokens_to_add = []
+        for tok in candidates:
+            tid = self.tokenizer.convert_tokens_to_ids(tok)
+            if tid is None or (unk_id is not None and int(tid) == int(unk_id)):
+                tokens_to_add.append(tok)
+        if tokens_to_add:
+            self.tokenizer.add_special_tokens({"additional_special_tokens": tokens_to_add})
+            self.model.resize_token_embeddings(len(self.tokenizer))
+
+    def _resolve_token_id(self, token: str) -> int:
+        tid = self.tokenizer.convert_tokens_to_ids(token)
+        unk_id = getattr(self.tokenizer, "unk_token_id", None)
+        if tid is None or (unk_id is not None and int(tid) == int(unk_id)):
+            raise ValueError(f"token 未注册: {token}")
+        return int(tid)
+
+    def _inject_pointcloud_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        token_embeds: torch.Tensor,
+        attention_mask: torch.Tensor,
+        labels: Optional[torch.Tensor],
+        point_clouds: Optional[torch.Tensor],
+        pc_valid_lengths: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+        """
+        token-to-token 对齐注入（仿照 Qwen 视觉位点替换思路）：
+        - 文本中使用 <pointcloud> 作为锚点
+        - 前向时将该锚点替换为点云编码输出的 K_i 个 token embedding（每样本可变长）
+        - 同步扩展 input_ids/attention_mask/labels，保持与 inputs_embeds 严格对齐
+        """
+        if self.point_prefix_encoder is None or point_clouds is None:
+            return input_ids, token_embeds, attention_mask, labels
+
+        prefix_embeds, prefix_mask = self.point_prefix_encoder(
+            point_clouds=point_clouds,
+            pc_valid_lengths=pc_valid_lengths,
+        )
+        if prefix_embeds is None or prefix_mask is None:
+            return input_ids, token_embeds, attention_mask, labels
+
+        B, L, C = token_embeds.shape
+        pad_id = int(self.tokenizer.pad_token_id) if self.tokenizer.pad_token_id is not None else 0
+        anchor_id = int(self.pc_anchor_token_id)
+        patch_id = int(self.pc_patch_token_id)
+
+        seq_ids_list = []
+        seq_emb_list = []
+        seq_attn_list = []
+        seq_lbl_list = [] if labels is not None else None
+        out_lens = []
+
+        for i in range(B):
+            cur_ids = input_ids[i]
+            cur_emb = token_embeds[i]
+            cur_attn = attention_mask[i]
+            cur_lbl = labels[i] if labels is not None else None
+
+            anchor_pos = (cur_ids == anchor_id).nonzero(as_tuple=False).view(-1)
+            valid_pc = True
+            if pc_valid_lengths is not None:
+                valid_pc = bool(pc_valid_lengths[i].item() > 0)
+
+            if anchor_pos.numel() == 0 or not valid_pc:
+                seq_ids = cur_ids
+                seq_emb = cur_emb
+                seq_attn = cur_attn
+                seq_lbl = cur_lbl
+            else:
+                # 仅替换第一个锚点，避免模板里重复锚点带来歧义
+                pos = int(anchor_pos[0].item())
+                valid_k = int(prefix_mask[i].sum().item())
+                if valid_k <= 0:
+                    seq_ids = cur_ids
+                    seq_emb = cur_emb
+                    seq_attn = cur_attn
+                    seq_lbl = cur_lbl
+                else:
+                    pc_tok = prefix_embeds[i, :valid_k].to(dtype=cur_emb.dtype)
+                    pc_ids = torch.full((valid_k,), patch_id, dtype=cur_ids.dtype, device=cur_ids.device)
+                    pc_attn = torch.ones((valid_k,), dtype=cur_attn.dtype, device=cur_attn.device)
+                    if cur_lbl is not None:
+                        pc_lbl = torch.full((valid_k,), IGNORE_INDEX, dtype=cur_lbl.dtype, device=cur_lbl.device)
+
+                    seq_ids = torch.cat([cur_ids[:pos], pc_ids, cur_ids[pos + 1 :]], dim=0)
+                    seq_emb = torch.cat([cur_emb[:pos], pc_tok, cur_emb[pos + 1 :]], dim=0)
+                    seq_attn = torch.cat([cur_attn[:pos], pc_attn, cur_attn[pos + 1 :]], dim=0)
+                    if cur_lbl is not None:
+                        seq_lbl = torch.cat([cur_lbl[:pos], pc_lbl, cur_lbl[pos + 1 :]], dim=0)
+                    else:
+                        seq_lbl = None
+
+            seq_ids_list.append(seq_ids)
+            seq_emb_list.append(seq_emb)
+            seq_attn_list.append(seq_attn)
+            if seq_lbl_list is not None:
+                seq_lbl_list.append(seq_lbl)
+            out_lens.append(int(seq_ids.shape[0]))
+
+        max_len = max(out_lens) if out_lens else L
+        out_ids = input_ids.new_full((B, max_len), pad_id)
+        out_emb = token_embeds.new_zeros((B, max_len, C))
+        out_attn = attention_mask.new_zeros((B, max_len))
+        out_lbl = None
+        if labels is not None:
+            out_lbl = labels.new_full((B, max_len), IGNORE_INDEX)
+
+        for i in range(B):
+            cur_len = seq_ids_list[i].shape[0]
+            out_ids[i, :cur_len] = seq_ids_list[i]
+            out_emb[i, :cur_len] = seq_emb_list[i]
+            out_attn[i, :cur_len] = seq_attn_list[i]
+            if out_lbl is not None and seq_lbl_list is not None:
+                out_lbl[i, :cur_len] = seq_lbl_list[i]
+
+        return out_ids, out_emb, out_attn, out_lbl
+
     def _compute_multimodal_position_ids(
         self,
         input_ids: torch.Tensor,
@@ -235,53 +373,23 @@ class MLLMBackbone(nn.Module):
             else:
                 attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
 
-        # 默认不加前缀：保持 inputs_embeds 与 input_ids 序列对齐
+        # 默认保持 inputs_embeds 与 input_ids 序列对齐
         final_input_ids = input_ids
         final_inputs_embeds = token_embeds
         final_attention_mask = attention_mask
         final_labels = labels
 
-        # 3) 点云前缀（可选）：若编码器可用且传入点云，则把前缀拼到序列前面。
-        #    即使某个样本无有效点云，prefix_mask 会把该样本前缀位标记为无效（attention=0）。
-        if self.point_prefix_encoder is not None and point_clouds is not None:
-            prefix_embeds, prefix_mask = self.point_prefix_encoder(
-                point_clouds=point_clouds,
-                pc_valid_lengths=pc_valid_lengths,
-            )
-            if prefix_embeds is not None and prefix_mask is not None:
-                # 对齐 dtype，避免 cat 时精度不一致。
-                token_embeds = token_embeds.to(dtype=prefix_embeds.dtype)
-                final_inputs_embeds = torch.cat([prefix_embeds, token_embeds], dim=1)
-
-                # attention_mask 前缀位由 prefix_mask 控制（有效前缀=1，无效填充前缀=0）
-                prefix_attn = prefix_mask.to(dtype=attention_mask.dtype)
-                final_attention_mask = torch.cat([prefix_attn, attention_mask], dim=1)
-
-                # labels 前缀位统一忽略，不参与语言建模 CE。
-                if labels is not None:
-                    prefix_labels = torch.full(
-                        (labels.shape[0], prefix_embeds.shape[1]),
-                        IGNORE_INDEX,
-                        device=labels.device,
-                        dtype=labels.dtype,
-                    )
-                    final_labels = torch.cat([prefix_labels, labels], dim=1)
-
-                # Qwen-VL 仍依赖 input_ids 识别图像占位 token。
-                # 前缀对应位置填充为 pad/eos，不会命中功能 token 与 image token。
-                pad_id = self.tokenizer.pad_token_id
-                if pad_id is None:
-                    pad_id = self.tokenizer.eos_token_id if self.tokenizer.eos_token_id is not None else 0
-                prefix_ids = torch.full(
-                    (input_ids.shape[0], prefix_embeds.shape[1]),
-                    int(pad_id),
-                    device=input_ids.device,
-                    dtype=input_ids.dtype,
-                )
-                final_input_ids = torch.cat([prefix_ids, input_ids], dim=1)
+        # 3) 点云输入注入：<pointcloud> 锚点 -> K_i 个 <|point_pad|> 对齐 token embedding。
+        final_input_ids, final_inputs_embeds, final_attention_mask, final_labels = self._inject_pointcloud_embeddings(
+            input_ids=final_input_ids,
+            token_embeds=final_inputs_embeds,
+            attention_mask=final_attention_mask,
+            labels=final_labels,
+            point_clouds=point_clouds,
+            pc_valid_lengths=pc_valid_lengths,
+        )
 
         # 4) 计算多模态 position_ids（保留视觉 RoPE 建模）。
-        #    注意这里用的是 final_input_ids（可能带前缀 pad），确保位置与最终序列长度一致。
         position_ids = self._compute_multimodal_position_ids(
             input_ids=final_input_ids,
             attention_mask=final_attention_mask,
@@ -313,5 +421,10 @@ class MLLMBackbone(nn.Module):
         # 确保输出为 [B, L, C]
         if hidden_states.dim() == 2:
             hidden_states = hidden_states.unsqueeze(0)
-        return {"hidden_states": hidden_states, "output": outputs}
+        return {
+            "hidden_states": hidden_states,
+            "output": outputs,
+            "aligned_labels": final_labels,
+            "aligned_attention_mask": final_attention_mask,
+        }
 
