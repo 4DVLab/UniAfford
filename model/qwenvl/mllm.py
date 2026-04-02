@@ -287,7 +287,12 @@ class MLLMBackbone(nn.Module):
 
         max_len = max(out_lens) if out_lens else L
         out_ids = input_ids.new_full((B, max_len), pad_id)
-        out_emb = token_embeds.new_zeros((B, max_len, C))
+        # 关键：padding 位的 embedding 使用“真实 pad token embedding”，
+        # 避免在 Qwen get_placeholder_mask(input_ids=None) 中被误判为 image token。
+        pad_embed = self.model.get_input_embeddings()(
+            torch.tensor([pad_id], device=token_embeds.device, dtype=input_ids.dtype)
+        )[0].to(dtype=token_embeds.dtype)
+        out_emb = pad_embed.view(1, 1, C).expand(B, max_len, C).clone()
         out_attn = attention_mask.new_zeros((B, max_len))
         out_lbl = None
         if labels is not None:
