@@ -350,6 +350,36 @@ class MLLMBackbone(nn.Module):
             vl_core.rope_deltas = rope_deltas
         return position_ids
 
+    def _sanitize_image_placeholder_embeddings(
+        self,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        在 inputs_embeds 路径下，Qwen 会通过“向量相等”识别 image token。
+        该函数用 input_ids 作为真值，消除非 image 位点被误判成 image token 的情况。
+        """
+        image_token_id = getattr(self.model.config, "image_token_id", None)
+        if image_token_id is None:
+            return inputs_embeds
+
+        image_token_id = int(image_token_id)
+        expected_mask = input_ids.eq(image_token_id)  # [B, L]
+        image_embed = self.model.get_input_embeddings()(
+            torch.tensor([image_token_id], device=inputs_embeds.device, dtype=input_ids.dtype)
+        )[0].to(dtype=inputs_embeds.dtype)
+        observed_mask = inputs_embeds.eq(image_embed.view(1, 1, -1)).all(dim=-1)  # [B, L]
+
+        extra_mask = observed_mask & (~expected_mask)
+        if not extra_mask.any():
+            return inputs_embeds
+
+        pad_id = int(self.tokenizer.pad_token_id) if self.tokenizer.pad_token_id is not None else 0
+        pad_embed = self.model.get_input_embeddings()(
+            torch.tensor([pad_id], device=inputs_embeds.device, dtype=input_ids.dtype)
+        )[0].to(dtype=inputs_embeds.dtype)
+        return torch.where(extra_mask.unsqueeze(-1), pad_embed.view(1, 1, -1), inputs_embeds)
+
     def forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -392,6 +422,11 @@ class MLLMBackbone(nn.Module):
             labels=final_labels,
             point_clouds=point_clouds,
             pc_valid_lengths=pc_valid_lengths,
+        )
+        # 对齐校正：确保 image placeholder 计数以 input_ids 为准，避免 embeddings 等值误判。
+        final_inputs_embeds = self._sanitize_image_placeholder_embeddings(
+            input_ids=final_input_ids,
+            inputs_embeds=final_inputs_embeds,
         )
 
         # 4) 计算多模态 position_ids（保留视觉 RoPE 建模）。
