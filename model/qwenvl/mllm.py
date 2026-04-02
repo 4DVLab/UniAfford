@@ -318,5 +318,7 @@ class MLLMBackbone(nn.Module):
             "output": outputs,
             # 与 logits 序列长度严格对齐的标签（包含可选 pc prefix 的 IGNORE 区段）
             "aligned_labels": final_labels,
+            # 与 hidden_states 序列长度严格对齐的 attention_mask
+            "aligned_attention_mask": final_attention_mask,
         }
 

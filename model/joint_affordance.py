@@ -323,6 +323,7 @@ class JointAffordanceModel(nn.Module):
         output_obj = mllm_out.get("output")
         # 关键：当启用 pc prefix 时，使用与 logits 同长度的对齐标签，避免 CE 维度不一致
         model_labels = mllm_out.get("aligned_labels", labels)
+        model_attention_mask = mllm_out.get("aligned_attention_mask", attention_mask)
         B,L,C = hidden_states.shape
 
         logits_token_ids = None
@@ -353,7 +354,7 @@ class JointAffordanceModel(nn.Module):
             pc_available = (pc_valid_lengths > 0) if pc_valid_lengths is not None else None
             route_logits, route_probs, hard_route = self._route_hidden_states(
                 hidden_states=hidden_states,
-                attention_mask=attention_mask,
+                attention_mask=model_attention_mask,
                 img_available=img_available,
                 pc_available=pc_available,
             )
@@ -370,7 +371,7 @@ class JointAffordanceModel(nn.Module):
                 hard_route=hard_route,
                 img_token_emb=img_token_emb,
                 pc_token_emb=pc_token_emb,
-                attention_mask=attention_mask,
+                attention_mask=model_attention_mask,
                 route_mask=route_mask,
             )
 
