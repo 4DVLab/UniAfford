@@ -503,6 +503,12 @@ def main():
             pred_token_ids_batch = output_dict.get("token_ids")
             if pred_token_ids_batch is not None:
                 pred_token_ids_batch = pred_token_ids_batch.detach().cpu()
+            aligned_labels_batch = output_dict.get("labels")
+            if isinstance(aligned_labels_batch, torch.Tensor):
+                aligned_labels_batch = aligned_labels_batch.detach().cpu()
+            aligned_attention_batch = output_dict.get("attention_mask")
+            if isinstance(aligned_attention_batch, torch.Tensor):
+                aligned_attention_batch = aligned_attention_batch.detach().cpu()
 
             # ---- 逐样本记录 ----
             batch_size = input_dict["input_ids"].shape[0]
@@ -523,8 +529,14 @@ def main():
                 }
 
                 # GT 文本：从 labels 中提取非 IGNORE 的 token ids 解码
-                labels_i = input_dict["labels"][i].cpu()
+                # 关键：优先使用模型返回的对齐 labels（已包含点云动态注入后的位点变化）
+                if isinstance(aligned_labels_batch, torch.Tensor) and aligned_labels_batch.shape[0] > i:
+                    labels_i = aligned_labels_batch[i]
+                else:
+                    labels_i = input_dict["labels"][i].cpu()
                 answer_mask = labels_i != IGNORE_INDEX
+                if isinstance(aligned_attention_batch, torch.Tensor) and aligned_attention_batch.shape[0] > i:
+                    answer_mask = answer_mask & aligned_attention_batch[i].bool()
                 supervised_pos = torch.nonzero(answer_mask, as_tuple=False).squeeze(-1)
                 gt_ids = labels_i[supervised_pos].tolist()
                 record["gt_text"] = tokenizer.decode(gt_ids, skip_special_tokens=False)
