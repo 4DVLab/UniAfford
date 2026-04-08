@@ -210,6 +210,8 @@ class MLLMBackbone(nn.Module):
         labels: Optional[torch.Tensor],
         point_clouds: Optional[torch.Tensor],
         pc_valid_lengths: Optional[torch.Tensor],
+        point_token_embeds: Optional[torch.Tensor] = None,
+        point_token_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """
         token-to-token 对齐注入（仿照 Qwen 视觉位点替换思路）：
@@ -217,13 +219,15 @@ class MLLMBackbone(nn.Module):
         - 前向时将该锚点替换为点云编码输出的 K_i 个 token embedding（每样本可变长）
         - 同步扩展 input_ids/attention_mask/labels，保持与 inputs_embeds 严格对齐
         """
-        if self.point_prefix_encoder is None or point_clouds is None:
-            return input_ids, token_embeds, attention_mask, labels
-
-        prefix_embeds, prefix_mask = self.point_prefix_encoder(
-            point_clouds=point_clouds,
-            pc_valid_lengths=pc_valid_lengths,
-        )
+        if point_token_embeds is not None and point_token_mask is not None:
+            prefix_embeds, prefix_mask = point_token_embeds, point_token_mask
+        else:
+            if self.point_prefix_encoder is None or point_clouds is None:
+                return input_ids, token_embeds, attention_mask, labels
+            prefix_embeds, prefix_mask = self.point_prefix_encoder(
+                point_clouds=point_clouds,
+                pc_valid_lengths=pc_valid_lengths,
+            )
         if prefix_embeds is None or prefix_mask is None:
             return input_ids, token_embeds, attention_mask, labels
 
@@ -389,6 +393,8 @@ class MLLMBackbone(nn.Module):
         image_grid_thw: Optional[torch.Tensor] = None,
         point_clouds: Optional[torch.Tensor] = None,
         pc_valid_lengths: Optional[torch.Tensor] = None,
+        point_token_embeds: Optional[torch.Tensor] = None,
+        point_token_mask: Optional[torch.Tensor] = None,
     ) -> dict:
         # 统一约束：始终走 inputs_embeds 路径，保证多模态缺失/齐全时前向形式一致。
         # 与之前不同：不再把 input_ids 直接传入 self.model(...)，而是仅用于外部构造 embedding 与位置编码。
@@ -422,6 +428,8 @@ class MLLMBackbone(nn.Module):
             labels=final_labels,
             point_clouds=point_clouds,
             pc_valid_lengths=pc_valid_lengths,
+            point_token_embeds=point_token_embeds,
+            point_token_mask=point_token_mask,
         )
         # 对齐校正：确保 image placeholder 计数以 input_ids 为准，避免 embeddings 等值误判。
         final_inputs_embeds = self._sanitize_image_placeholder_embeddings(

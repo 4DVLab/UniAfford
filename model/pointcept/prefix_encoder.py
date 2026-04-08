@@ -1,4 +1,4 @@
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Any
 
 import torch
 import torch.nn as nn
@@ -127,8 +127,23 @@ class PointCloudPrefixEncoder(nn.Module):
             prefix_embeds: [B, K_max, H]，补齐后的前缀 embedding。
             prefix_mask:   [B, K_max] (bool)，True 表示有效前缀 token。
         """
-        if point_clouds is None:
+        shared = self.encode_shared(point_clouds=point_clouds, pc_valid_lengths=pc_valid_lengths)
+        if shared is None:
             return None, None
+        return shared["prefix_embeds"], shared["prefix_mask"]
+
+    def encode_shared(
+        self,
+        point_clouds: Optional[torch.Tensor],
+        pc_valid_lengths: Optional[torch.Tensor] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        单次 backbone 前向，输出 MLLM 注入与 3D 解码共用特征：
+        - prefix_embeds/prefix_mask: 注入 MLLM 的变长 token
+        - point_features/point_coords/point_mask: 供 3D decoder 做逐点相似度场
+        """
+        if point_clouds is None:
+            return None
 
         # Step 1. 输入合法性检查 + 形状规范化。
         if point_clouds.dim() != 3:
@@ -147,11 +162,15 @@ class PointCloudPrefixEncoder(nn.Module):
         data_dict = self._build_pointcept_batch(point_clouds)
         point = self.point_backbone(data_dict)
 
-        # Step 4. 通道投影到 MLLM hidden_size，便于与文本 embedding 在同空间拼接。
-        point_feat = self.proj(point.feat.to(self.compute_dtype))
+        # Step 4. 同时保留 backbone 原始点特征（供 decoder）与投影后特征（供 MLLM 注入）。
+        raw_feat = point.feat.to(self.compute_dtype)
+        point_feat = self.proj(raw_feat)
+        coord_feat = point.coord.to(self.compute_dtype)
 
         # Step 5. 展平特征按样本拆分（变长 token 序列）。
         token_list = self._split_by_batch(point_feat, point.batch, bsz)
+        raw_list = self._split_by_batch(raw_feat, point.batch, bsz)
+        coord_list = self._split_by_batch(coord_feat, point.batch, bsz)
 
         # Step 6. 无效点云样本（pc_valid_lengths==0）显式置空，避免引入噪声前缀。
         if pc_valid_lengths is not None:
@@ -160,20 +179,45 @@ class PointCloudPrefixEncoder(nn.Module):
                 tok if valid_flags[i] else tok.new_zeros((0, tok.shape[-1]))
                 for i, tok in enumerate(token_list)
             ]
+            raw_list = [
+                tok if valid_flags[i] else tok.new_zeros((0, tok.shape[-1]))
+                for i, tok in enumerate(raw_list)
+            ]
+            coord_list = [
+                tok if valid_flags[i] else tok.new_zeros((0, tok.shape[-1]))
+                for i, tok in enumerate(coord_list)
+            ]
 
         # Step 7. 计算 batch 内最大前缀长度；若全为空则返回 None。
         max_len = max((tok.shape[0] for tok in token_list), default=0)
         if max_len == 0:
-            return None, None
+            return {
+                "prefix_embeds": None,
+                "prefix_mask": None,
+                "point_features": None,
+                "point_coords": None,
+                "point_mask": None,
+            }
 
-        # Step 8. 补齐为 [B, K_max, H] 并构建 bool mask。
+        # Step 8. 补齐为 [B, K_max, *] 并构建 bool mask。
         hidden = token_list[0].shape[-1]
+        raw_hidden = raw_list[0].shape[-1]
         prefix_embeds = token_list[0].new_zeros((bsz, max_len, hidden))
+        point_features = raw_list[0].new_zeros((bsz, max_len, raw_hidden))
+        point_coords = coord_list[0].new_zeros((bsz, max_len, 3))
         prefix_mask = torch.zeros((bsz, max_len), dtype=torch.bool, device=prefix_embeds.device)
         for i, tok in enumerate(token_list):
             cur_len = tok.shape[0]
             if cur_len == 0:
                 continue
             prefix_embeds[i, :cur_len] = tok
+            point_features[i, :cur_len] = raw_list[i]
+            point_coords[i, :cur_len] = coord_list[i]
             prefix_mask[i, :cur_len] = True
-        return prefix_embeds, prefix_mask
+        return {
+            "prefix_embeds": prefix_embeds,
+            "prefix_mask": prefix_mask,
+            "point_features": point_features,
+            "point_coords": point_coords,
+            "point_mask": prefix_mask,
+        }
