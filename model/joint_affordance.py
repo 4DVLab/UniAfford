@@ -26,9 +26,14 @@ class JointAffordanceModel(nn.Module):
         self.functional_token_ids = self.mllm.functional_token_ids
         # 双向映射：token_id -> {name, modality}，用于从 output_ids 中快速查找功能 token
         self.id_to_token_info = getattr(self.mllm, "id_to_token_info", {})
+        point_feature_size = int(getattr(self.config.mllm.point_encoder_backbone, "dec_channels", (64,))[0])
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
-        self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
+        self.point_decoder = PointCloudHiddenStateDecoder(
+            self.config.point_decoder,
+            self.config.mllm.hidden_size,
+            point_feature_size=point_feature_size,
+        )
         self.point_encoder = getattr(self.mllm, "point_encoder", None)
 
 

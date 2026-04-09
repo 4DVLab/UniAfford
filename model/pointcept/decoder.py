@@ -12,6 +12,7 @@ class PointCloudHiddenStateDecoder(nn.Module):
         self,
         config: PointDecoderConfigs,
         text_hidden_size: int,
+        point_feature_size: int,
     ):
         super().__init__()
         self.config = config
@@ -30,8 +31,9 @@ class PointCloudHiddenStateDecoder(nn.Module):
         for param in self.text_hidden_fcs.parameters():
             param.requires_grad = True
 
-        # 共享 encoder 的原始点特征维度在不同骨干配置下可能变化，使用 LazyLinear 自动适配。
-        self.point_proj = nn.LazyLinear(config.hidden_size)
+        # 逐点特征维度由 point encoder backbone 的 dec_point 输出通道决定。
+        # 使用显式 Linear，避免 LazyLinear 在首次前向前参数未初始化，进而影响参数统计/FSDP 初始化。
+        self.point_proj = nn.Linear(point_feature_size, config.hidden_size)
         # FSDP requires parameter tensors to be at least 1D.
         self.logit_scale = nn.Parameter(torch.ones(1))
 

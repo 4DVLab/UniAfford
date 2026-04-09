@@ -7,6 +7,7 @@ from .base_config import (
     MLLMConfigs,
     ImageDecoderConfigs,
     PointDecoderConfigs,
+    PointEncoderBackboneConfigs,
 )
 
 __all__ = [
@@ -15,4 +16,5 @@ __all__ = [
     "MLLMConfigs",
     "ImageDecoderConfigs",
     "PointDecoderConfigs",
+    "PointEncoderBackboneConfigs",
 ]
