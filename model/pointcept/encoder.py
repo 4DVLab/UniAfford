@@ -20,10 +20,15 @@ class PointCloudEncoder(nn.Module):
         self,
         out_hidden_size: int,
         compute_dtype: torch.dtype,
-        backbone_kwargs: Optional[Dict],
+        backbone_config: Optional[Dict],
     ):
         super().__init__()
-        kwargs = dict(backbone_kwargs)
+        if backbone_config is None:
+            kwargs = {}
+        elif hasattr(backbone_config, "to_dict"):
+            kwargs = dict(backbone_config.to_dict())
+        else:
+            kwargs = dict(backbone_config)
         # 这里启用解码器，并通过 PTV3 的 return_dual=True 同时拿到：
         # 1) 编码器末端 enc_point（较短 token，给 MLLM）
         # 2) 解码器末端 dec_point（逐点特征，给 3D decoder）

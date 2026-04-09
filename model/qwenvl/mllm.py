@@ -51,11 +51,11 @@ class MLLMBackbone(nn.Module):
             self.config.vocab_size = self.vocab_size
 
         self.point_encoder = None
-        if getattr(self.config, "enable_pc_prefix", False):
+        if getattr(self.config, "enable_point_encoder", False):
             self.point_encoder = PointCloudEncoder(
                 out_hidden_size=self.hidden_size,
                 compute_dtype=self.config.compute_dtype,
-                backbone_kwargs=getattr(self.config, "point_prefix_backbone_kwargs", None),
+                backbone_config=getattr(self.config, "point_encoder_backbone", None),
             )
         self.pc_anchor_token_id = self._resolve_token_id(DEFAULT_PC_TOKEN)
         self.pc_patch_token_id = self._resolve_token_id(DEFAULT_PC_PATCH_TOKEN)
