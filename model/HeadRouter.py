@@ -2,16 +2,21 @@ from typing import Optional, List, Tuple, Dict, Any
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class HeadRouter(nn.Module):
     """
     token 级三路路由器（text/img/pc）。
 
-    当前实现使用“硬路由执行”：
-    - 先对每个 token 计算三路概率；
-    - 再取 argmax 分配路由；
-    - 最终仅使用分配到该分支的 token 构造分支 query。
+    当前 router 的目标不是做 MoE 专家负载均衡，而是做 token 语义角色判别：
+    - text: 普通文本 token
+    - img : 用于 2D affordance 解码的 token
+    - pc  : 用于 3D affordance 解码的 token
+
+    训练时：
+    - 路由概率使用 softmax，便于结构损失（存在性/稀疏性）直接回传梯度；
+    - 下游执行仍采用 hard argmax，保持“一个 token 只解释成一个分支”的约束。
     """
 
     def __init__(
@@ -141,6 +146,63 @@ class HeadRouter(nn.Module):
         pc_emb = (pc_token_emb * pc_w).sum(dim=1) / pc_den
         return img_emb, pc_emb, img_token_emb, pc_token_emb
 
+    def build_structure_signals(
+        self,
+        route_probs: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        route_mask: Optional[torch.Tensor] = None,
+    ) -> Dict[str, torch.Tensor]:
+        """
+        基于 softmax 概率构造“可微”的样本结构信号。
+
+        为什么要单独构造这组量：
+        - 我们希望模型学到“有图时至少出现一个 img token、无图时不要出现 img token”
+        - 这类结构约束若直接定义在 argmax/计数上是离散的，梯度无法稳定回传
+        - 因此训练时使用 route_probs 构造连续近似量，再用 BCE / 稀疏损失监督
+
+        这里输出两类信号：
+        1) any_prob:
+           - noisy-or 近似“至少存在一个该类 token”的概率
+           - 公式: 1 - prod(1 - p_t)
+        2) expected_count:
+           - soft 期望个数，等价于 sum_t p_t(class)
+
+        这些量都定义在 answer 对齐后的有效 token 上：
+        - 优先使用 route_mask（与 next-token 监督对齐）
+        - 若 route_mask 不存在，则退化为 attention_mask
+        """
+        if route_mask is not None:
+            valid_mask = route_mask.bool()
+        elif attention_mask is not None:
+            valid_mask = attention_mask.bool()
+        else:
+            valid_mask = torch.ones(
+                route_probs.shape[0],
+                route_probs.shape[1],
+                dtype=torch.bool,
+                device=route_probs.device,
+            )
+
+        valid_f = valid_mask.to(route_probs.dtype)
+        img_probs = route_probs[:, :, self.route_img_idx] * valid_f
+        pc_probs = route_probs[:, :, self.route_pc_idx] * valid_f
+
+        # noisy-or: 至少存在一个 token 命中对应分支的连续近似概率
+        img_any_prob = 1.0 - torch.exp(torch.sum(torch.log1p(-img_probs.clamp(max=1 - 1e-6)), dim=1))
+        pc_any_prob = 1.0 - torch.exp(torch.sum(torch.log1p(-pc_probs.clamp(max=1 - 1e-6)), dim=1))
+
+        # soft 期望个数：用于控制 affordance token 不要过多
+        img_expected_count = img_probs.sum(dim=1)
+        pc_expected_count = pc_probs.sum(dim=1)
+
+        return {
+            "structure_valid_mask": valid_mask,
+            "img_any_prob": img_any_prob.clamp(0.0, 1.0),
+            "pc_any_prob": pc_any_prob.clamp(0.0, 1.0),
+            "img_expected_count": img_expected_count,
+            "pc_expected_count": pc_expected_count,
+        }
+
     def build_routed_token_ids(
         self,
         base_token_ids: Optional[torch.Tensor],
@@ -248,6 +310,11 @@ class HeadRouter(nn.Module):
             labels=labels,
             seq_len=hidden_states.shape[1],
         )
+        structure_signals = self.build_structure_signals(
+            route_probs=route_probs,
+            attention_mask=attention_mask,
+            route_mask=route_mask,
+        )
         routed_token_ids = self.build_routed_token_ids(
             base_token_ids=base_token_ids,
             hard_route=hard_route,
@@ -272,4 +339,5 @@ class HeadRouter(nn.Module):
             "pc_token_emb": pc_token_emb,
             "routed_token_ids": routed_token_ids,
             "aff_token_pairs": aff_token_pairs,
+            **structure_signals,
         }

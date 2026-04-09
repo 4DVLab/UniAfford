@@ -477,6 +477,10 @@ def main():
         focal_gamma=getattr(training_cfg, "focal_gamma", 2.0),
         bce_loss_weight=getattr(training_cfg, "bce_loss_weight", 2.0),
         ce_loss_weight=getattr(training_cfg, "ce_loss_weight", 1.0),
+        route_loss_weight=getattr(training_cfg, "route_loss_weight", 1.0),
+        route_exist_loss_weight=getattr(training_cfg, "route_exist_loss_weight", 0.25),
+        route_sparse_loss_weight=getattr(training_cfg, "route_sparse_loss_weight", 0.05),
+        route_target_present_count=getattr(training_cfg, "route_target_present_count", 1.0),
     )
 
     threshold_2d = max(training_cfg.mask_threshold_2d, 0.5)

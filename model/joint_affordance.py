@@ -129,7 +129,6 @@ class JointAffordanceModel(nn.Module):
         B,L,C = hidden_states.shape
 
         logits_token_ids = None
-        routed_token_ids = None
         ce_loss = None
         ce_ignored_token_count = 0
         if output_obj is not None:
@@ -146,11 +145,6 @@ class JointAffordanceModel(nn.Module):
             if ce_loss is None and getattr(output_obj, "loss", None) is not None:
                 ce_loss = output_obj.loss
         
-        image_logits = None
-        point_logits = None
-        route_logits = None
-        route_probs = None
-
         if hidden_states is not None:
             img_available = img_valid_mask if img_valid_mask is not None else None
             pc_available = (pc_valid_lengths > 0) if pc_valid_lengths is not None else None
@@ -162,15 +156,9 @@ class JointAffordanceModel(nn.Module):
                 labels=model_labels,
                 base_token_ids=logits_token_ids,
             )
-            route_logits = route_out["route_logits"]
-            route_probs = route_out["route_probs"]
-            img_emb = route_out["img_emb"]
-            pc_emb = route_out["pc_emb"]
-            routed_token_ids = route_out["routed_token_ids"]
-            aff_token_pairs = route_out["aff_token_pairs"]
 
-            image_pred_emb = self.image_decoder.project_hidden_states(img_emb)
-            point_pred_emb = self.point_decoder.project_hidden_states(pc_emb)
+            image_pred_emb = self.image_decoder.project_hidden_states(route_out["img_emb"])
+            point_pred_emb = self.point_decoder.project_hidden_states(route_out["pc_emb"])
 
             # ---- 3. 2D 图像分割 ----
             image_embeddings = self.image_decoder.get_visual_embs(images)
@@ -203,7 +191,7 @@ class JointAffordanceModel(nn.Module):
             "hidden_states": None,
             "image_logits": image_logits,
             "point_logits": point_logits,
-            "token_ids": routed_token_ids,
+            "token_ids": route_out["routed_token_ids"],
             "labels": model_labels,
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
             "ce_loss": ce_loss,
@@ -212,8 +200,12 @@ class JointAffordanceModel(nn.Module):
             # 格式: List[List[Tuple[str, Tensor]]]，每样本 [("<img-x>", emb), ("<pc-x>", emb), ...]
             "aff_token_pairs": None,
             # 路由监督辅助输出
-            "route_logits": route_logits,
-            "route_probs": route_probs,
+            "route_logits": route_out["route_logits"],
+            "route_probs": route_out["route_probs"],
+            "img_any_prob": route_out["img_any_prob"],
+            "pc_any_prob": route_out["pc_any_prob"],
+            "img_expected_count": route_out["img_expected_count"],
+            "pc_expected_count": route_out["pc_expected_count"],
             "img_placeholder_id": self.router.img_placeholder_id,
             "pc_placeholder_id": self.router.pc_placeholder_id,
             # batch 级统计：CE 中被忽略的 <img_aff>/<pc_aff> 标签 token 数
@@ -221,7 +213,7 @@ class JointAffordanceModel(nn.Module):
         }
 
         if hidden_states is not None:
-            output_dict["aff_token_pairs"] = aff_token_pairs
+            output_dict["aff_token_pairs"] = route_out["aff_token_pairs"]
         if return_hidden_states:
             output_dict["hidden_states"] = hidden_states
         if return_mllm_output:

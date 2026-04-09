@@ -22,6 +22,7 @@ LOSS_KEYS = [
     "loss", "ce_loss",
     "img_focal_loss", "img_dice_loss", "img_loss",
     "pc_bce_loss", "pc_dice_loss", "pc_loss",
+    "route_loss", "route_exist_loss", "route_sparse_loss",
 ]
 
 SEG_2D_KEYS = ["giou_2d", "ciou_2d"]

@@ -546,7 +546,9 @@ def main():
         bce_loss_weight=getattr(training_configs, "bce_loss_weight", 2.0),
         ce_loss_weight=getattr(training_configs, "ce_loss_weight", 1.0),
         route_loss_weight=getattr(training_configs, "route_loss_weight", 1.0),
-        route_bal_loss_weight=getattr(training_configs, "route_bal_loss_weight", 0.05),
+        route_exist_loss_weight=getattr(training_configs, "route_exist_loss_weight", 0.25),
+        route_sparse_loss_weight=getattr(training_configs, "route_sparse_loss_weight", 0.05),
+        route_target_present_count=getattr(training_configs, "route_target_present_count", 1.0),
     )
     logger.info(f"损失配置: {loss_kwargs}")
 

@@ -247,7 +247,9 @@ class TrainingConfig(Configs):
         pc_dice_loss_weight=0.5,
         ce_loss_weight=1.0,
         route_loss_weight=1.0,
-        route_bal_loss_weight=0.05,
+        route_exist_loss_weight=0.25,
+        route_sparse_loss_weight=0.05,
+        route_target_present_count=1.0,
         
         # 高级配置
         exclude_val=False,
@@ -338,7 +340,9 @@ class TrainingConfig(Configs):
             pc_dice_loss_weight = pc_dice_loss_weight,
             ce_loss_weight = ce_loss_weight,
             route_loss_weight = route_loss_weight,
-            route_bal_loss_weight = route_bal_loss_weight,
+            route_exist_loss_weight = route_exist_loss_weight,
+            route_sparse_loss_weight = route_sparse_loss_weight,
+            route_target_present_count = route_target_present_count,
 
             # 高级配置
             exclude_val = exclude_val,

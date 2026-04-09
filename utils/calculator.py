@@ -297,44 +297,68 @@ def route_supervision_loss(
     return loss, targets, valid_mask
 
 
-def route_balance_loss(
-    route_probs: Optional[torch.Tensor],
-    route_targets: Optional[torch.Tensor],
-    valid_mask: Optional[torch.Tensor],
+def route_structure_loss(
+    img_any_prob: Optional[torch.Tensor],
+    pc_any_prob: Optional[torch.Tensor],
+    img_expected_count: Optional[torch.Tensor],
+    pc_expected_count: Optional[torch.Tensor],
+    img_available: Optional[torch.Tensor],
+    pc_available: Optional[torch.Tensor],
     device: torch.device,
-) -> torch.Tensor:
+    target_present_count: float = 1.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    L_bal: 路由负载均衡损失。
-    使用监督 token 的真实标签分布作为先验（而非均匀先验），
-    避免在单模态样本占优时把路由错误地推向 img/pc 分支。
+    基于连续概率构造样本级结构约束。
+
+    目标分两部分：
+    1) existence loss:
+       - 有图样本：至少存在一个 img_aff token
+       - 无图样本：不应存在 img_aff token
+       - 3D 同理
+    2) sparse loss:
+       - affordance token 应尽量少
+       - 对有该模态的样本，期望个数接近 target_present_count（默认 1）
+       - 对无该模态的样本，期望个数接近 0
+
+    注意：
+    - 这里全部作用在 soft 概率统计量上，因此对 router 参数是可微的；
+    - 不依赖 argmax 结果，也不使用 MoE 式负载均衡。
     """
     zero = torch.tensor(0.0, device=device)
-    if route_probs is None or route_targets is None or valid_mask is None:
-        return zero
+    required = [img_any_prob, pc_any_prob, img_expected_count, pc_expected_count]
+    if any(x is None for x in required):
+        return zero, zero
 
-    bsz, seq_len, num_routes = route_probs.shape
-    if num_routes != 3 or route_targets.shape[0] != bsz or valid_mask.shape[0] != bsz:
-        return zero
-    use_len = min(seq_len, route_targets.shape[1], valid_mask.shape[1])
-    if use_len <= 0:
-        return zero
-    route_probs = route_probs[:, :use_len, :]
-    route_targets = route_targets[:, :use_len]
-    valid_mask = valid_mask[:, :use_len]
-    if not valid_mask.any():
-        return zero
+    if img_available is None:
+        img_available = torch.zeros_like(img_any_prob, dtype=torch.bool)
+    else:
+        img_available = img_available.bool().to(img_any_prob.device)
+    if pc_available is None:
+        pc_available = torch.zeros_like(pc_any_prob, dtype=torch.bool)
+    else:
+        pc_available = pc_available.bool().to(pc_any_prob.device)
 
-    mask_f = valid_mask.to(route_probs.dtype).unsqueeze(-1)  # [B,L,1]
-    mean_probs = (route_probs * mask_f).sum(dim=(0, 1)) / mask_f.sum().clamp_min(1.0)  # [3]
+    img_target = img_available.to(img_any_prob.dtype)
+    pc_target = pc_available.to(pc_any_prob.dtype)
 
-    target_counts = torch.zeros(3, device=device, dtype=route_probs.dtype)
-    valid_targets = route_targets[valid_mask]  # [Nv]
-    if valid_targets.numel() == 0:
-        return zero
-    for c in range(3):
-        target_counts[c] = (valid_targets == c).sum().to(route_probs.dtype)
-    prior = target_counts / target_counts.sum().clamp_min(1.0)
-    return torch.sum((mean_probs - prior) ** 2)
+    exist_img = F.binary_cross_entropy(img_any_prob.clamp(1e-6, 1 - 1e-6), img_target)
+    exist_pc = F.binary_cross_entropy(pc_any_prob.clamp(1e-6, 1 - 1e-6), pc_target)
+    exist_loss = exist_img + exist_pc
+
+    target_img_count = torch.where(
+        img_available,
+        torch.full_like(img_expected_count, float(target_present_count)),
+        torch.zeros_like(img_expected_count),
+    )
+    target_pc_count = torch.where(
+        pc_available,
+        torch.full_like(pc_expected_count, float(target_present_count)),
+        torch.zeros_like(pc_expected_count),
+    )
+    sparse_img = F.smooth_l1_loss(img_expected_count, target_img_count)
+    sparse_pc = F.smooth_l1_loss(pc_expected_count, target_pc_count)
+    sparse_loss = sparse_img + sparse_pc
+    return exist_loss, sparse_loss
 
 
 def compute_losses(
@@ -353,7 +377,9 @@ def compute_losses(
     ce_loss_weight: float = 1.0,
     # ---- Router losses ----
     route_loss_weight: float = 1.0,
-    route_bal_loss_weight: float = 0.05,
+    route_exist_loss_weight: float = 0.25,
+    route_sparse_loss_weight: float = 0.05,
+    route_target_present_count: float = 1.0,
 ) -> Dict[str, torch.Tensor]:
     """
     统一计算所有损失，返回损失字典。训练与验证共用。
@@ -377,14 +403,16 @@ def compute_losses(
         pc_dice_loss_weight: 3D Dice 权重（None 时复用 dice_loss_weight）
         ce_loss_weight: 语言模型 CE 权重
         route_loss_weight: token-level 路由监督损失权重
-        route_bal_loss_weight: 路由负载均衡损失权重
+        route_exist_loss_weight: 样本级存在性约束权重
+        route_sparse_loss_weight: affordance token 稀疏/数量约束权重
+        route_target_present_count: 有效模态样本中 aff token 的目标期望个数
 
     Returns:
         Dict[str, Tensor]: 统一损失字典，始终包含以下键（缺失的分支为 0）:
             "loss", "ce_loss",
             "img_focal_loss", "img_dice_loss", "img_loss",
             "pc_bce_loss", "pc_dice_loss", "pc_loss",
-            "route_loss", "route_bal_loss"
+            "route_loss", "route_exist_loss", "route_sparse_loss"
     """
     zero = torch.tensor(0.0, device=device)
     pc_dice_w = pc_dice_loss_weight if pc_dice_loss_weight is not None else dice_loss_weight
@@ -424,7 +452,6 @@ def compute_losses(
 
     # ---------- Router 损失 ----------
     route_logits = output_dict.get("route_logits")
-    route_probs = output_dict.get("route_probs")
     labels = output_dict.get("labels", input_dict.get("labels"))
     img_placeholder_id = output_dict.get("img_placeholder_id")
     pc_placeholder_id = output_dict.get("pc_placeholder_id")
@@ -435,11 +462,22 @@ def compute_losses(
         pc_placeholder_id=pc_placeholder_id,
         device=device,
     )
-    route_bal = route_balance_loss(
-        route_probs=route_probs,
-        route_targets=route_targets,
-        valid_mask=route_valid,
+    img_any_prob = output_dict.get("img_any_prob")
+    pc_any_prob = output_dict.get("pc_any_prob")
+    img_expected_count = output_dict.get("img_expected_count")
+    pc_expected_count = output_dict.get("pc_expected_count")
+    img_available = input_dict.get("img_valid_mask")
+    pc_valid_lengths = input_dict.get("pc_valid_lengths")
+    pc_available = (pc_valid_lengths > 0) if pc_valid_lengths is not None else None
+    route_exist, route_sparse = route_structure_loss(
+        img_any_prob=img_any_prob,
+        pc_any_prob=pc_any_prob,
+        img_expected_count=img_expected_count,
+        pc_expected_count=pc_expected_count,
+        img_available=img_available,
+        pc_available=pc_available,
         device=device,
+        target_present_count=route_target_present_count,
     )
 
     # ---------- 总损失 ----------
@@ -448,7 +486,8 @@ def compute_losses(
         + img_total
         + pc_total
         + route_loss_weight * route_ce
-        + route_bal_loss_weight * route_bal
+        + route_exist_loss_weight * route_exist
+        + route_sparse_loss_weight * route_sparse
     )
 
     return {
@@ -464,7 +503,8 @@ def compute_losses(
         "pc_loss": pc_total,
         # Router 分项
         "route_loss": route_ce,
-        "route_bal_loss": route_bal,
+        "route_exist_loss": route_exist,
+        "route_sparse_loss": route_sparse,
     }
 
 
