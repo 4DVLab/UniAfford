@@ -229,6 +229,32 @@ dataset_root/
 }
 ```
 
+### 3D 分支内部结构（当前实现）
+
+当前 3D 分支不再使用 `cross-attention decoder` 或 `kNN` 还原，而是采用“一次点云主干前向，产出两路特征”的设计：
+
+1. `PointTransformerV3(return_dual=True)` 同时返回：
+   - `enc_point`：编码器末端的较短语义 token
+   - `dec_point`：解码器末端的逐点特征
+2. `PointCloudEncoder.encode_shared()` 将其整理为两组张量：
+   - `mllm_point_tokens / mllm_point_token_mask`
+     - 由 `enc_point.feat` 投影得到
+     - 作为较短点云 token 注入 MLLM
+   - `per_point_features / per_point_mask`
+     - 由 `dec_point.feat` 整理得到
+     - 与原始点数 `N` 对齐，供 3D decoder 逐点计算 affordance 响应
+3. `PointCloudHiddenStateDecoder` 不再负责特征提取或长度恢复，只做：
+   - 将 MLLM 输出的 `pc` affordance token hidden 投影为 query
+   - 将 `per_point_features` 投影到 3D 对齐空间
+   - 对每个点直接计算 `sim(point_i, aff_query)`，输出 `point_logits`
+
+也就是说，当前 3D 路线的语义是：
+
+- `enc_point -> mllm_point_tokens -> MLLM`
+- `dec_point -> per_point_features -> 3D decoder`
+
+其中 `mllm_point_tokens` 是 token 级特征，`per_point_features` 是逐点特征，这两者共享同一次 SONATA/PTV3 主干前向，但语义职责不同，不能混用。
+
 ### 模型输出（`JointAffordanceModel.forward`）
 
 ```python
@@ -240,6 +266,7 @@ dataset_root/
     "ce_loss": Tensor | None,                  # 语言建模交叉熵（传入 labels 时）
     "hidden_states": Tensor | None,           # 仅 return_hidden_states=True 时
     "output": MLLMOutput | None,               # 仅 return_mllm_output=True 时
+    "aff_token_pairs": List[List[Tuple[str, Tensor]]] | None,  # 每样本提取到的 aff token 与 hidden
 }
 ```
 

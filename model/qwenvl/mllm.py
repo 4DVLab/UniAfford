@@ -4,7 +4,7 @@ from transformers import AutoProcessor
 import torch
 import torch.nn as nn
 from configs import MLLMConfigs
-from model.pointcept import PointCloudPrefixEncoder
+from model.pointcept import PointCloudEncoder
 from utils.common import (
     IGNORE_INDEX,
     DEFAULT_PC_TOKEN,
@@ -50,9 +50,9 @@ class MLLMBackbone(nn.Module):
             print(f"Warning: vocab_size mismatch, config={self.config.vocab_size}, model={self.vocab_size}")
             self.config.vocab_size = self.vocab_size
 
-        self.point_prefix_encoder = None
+        self.point_encoder = None
         if getattr(self.config, "enable_pc_prefix", False):
-            self.point_prefix_encoder = PointCloudPrefixEncoder(
+            self.point_encoder = PointCloudEncoder(
                 out_hidden_size=self.hidden_size,
                 compute_dtype=self.config.compute_dtype,
                 backbone_kwargs=getattr(self.config, "point_prefix_backbone_kwargs", None),
@@ -220,15 +220,15 @@ class MLLMBackbone(nn.Module):
         - 同步扩展 input_ids/attention_mask/labels，保持与 inputs_embeds 严格对齐
         """
         if point_token_embeds is not None and point_token_mask is not None:
-            prefix_embeds, prefix_mask = point_token_embeds, point_token_mask
+            mllm_point_tokens, mllm_point_token_mask = point_token_embeds, point_token_mask
         else:
-            if self.point_prefix_encoder is None or point_clouds is None:
+            if self.point_encoder is None or point_clouds is None:
                 return input_ids, token_embeds, attention_mask, labels
-            prefix_embeds, prefix_mask = self.point_prefix_encoder(
+            mllm_point_tokens, mllm_point_token_mask = self.point_encoder(
                 point_clouds=point_clouds,
                 pc_valid_lengths=pc_valid_lengths,
             )
-        if prefix_embeds is None or prefix_mask is None:
+        if mllm_point_tokens is None or mllm_point_token_mask is None:
             return input_ids, token_embeds, attention_mask, labels
 
         B, L, C = token_embeds.shape
@@ -261,14 +261,14 @@ class MLLMBackbone(nn.Module):
             else:
                 # 仅替换第一个锚点，避免模板里重复锚点带来歧义
                 pos = int(anchor_pos[0].item())
-                valid_k = int(prefix_mask[i].sum().item())
+                valid_k = int(mllm_point_token_mask[i].sum().item())
                 if valid_k <= 0:
                     seq_ids = cur_ids
                     seq_emb = cur_emb
                     seq_attn = cur_attn
                     seq_lbl = cur_lbl
                 else:
-                    pc_tok = prefix_embeds[i, :valid_k].to(dtype=cur_emb.dtype)
+                    pc_tok = mllm_point_tokens[i, :valid_k].to(dtype=cur_emb.dtype)
                     pc_ids = torch.full((valid_k,), patch_id, dtype=cur_ids.dtype, device=cur_ids.device)
                     pc_attn = torch.ones((valid_k,), dtype=cur_attn.dtype, device=cur_attn.device)
                     if cur_lbl is not None:

@@ -29,7 +29,7 @@ class JointAffordanceModel(nn.Module):
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
         self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
-        self.point_encoder = getattr(self.mllm, "point_prefix_encoder", None)
+        self.point_encoder = getattr(self.mllm, "point_encoder", None)
 
 
     @property
@@ -104,10 +104,10 @@ class JointAffordanceModel(nn.Module):
         **kwargs,
     ) -> Dict[str, Optional[torch.Tensor]]:
 
-        # ---- 0. 共享点云编码（单次 backbone，双路复用）----
-        shared_pc = None
+        # ---- 0. 点云编码（单次 backbone，产出 token级 + 逐点级 两路特征）----
+        point_encoder_outputs = None
         if self.point_encoder is not None and point_clouds is not None:
-            shared_pc = self.point_encoder.encode_shared(
+            point_encoder_outputs = self.point_encoder.encode_shared(
                 point_clouds=point_clouds,
                 pc_valid_lengths=pc_valid_lengths,
             )
@@ -121,8 +121,8 @@ class JointAffordanceModel(nn.Module):
             image_grid_thw=image_grid_thw,
             point_clouds=point_clouds,
             pc_valid_lengths=pc_valid_lengths,
-            point_token_embeds=None if shared_pc is None else shared_pc.get("prefix_embeds"),
-            point_token_mask=None if shared_pc is None else shared_pc.get("prefix_mask"),
+            point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
+            point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
         )
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
         output_obj = mllm_out.get("output")
@@ -203,20 +203,16 @@ class JointAffordanceModel(nn.Module):
                 image_logits = all_image_logits
 
             # ---- 4. 3D 点云分割 ----
-            has_shared_pc = (
-                shared_pc is not None
-                and shared_pc.get("point_features") is not None
-                and shared_pc.get("point_coords") is not None
-                and shared_pc.get("point_mask") is not None
+            has_per_point_features = (
+                point_encoder_outputs is not None
+                and point_encoder_outputs.get("per_point_features") is not None
+                and point_encoder_outputs.get("per_point_mask") is not None
             )
-            if has_shared_pc and point_clouds is not None:
+            if has_per_point_features and point_clouds is not None:
                 all_point_logits = self.point_decoder(
                     pred_embeddings=pc_emb,
-                    point_clouds=point_clouds,
-                    shared_point_features=shared_pc.get("point_features"),
-                    shared_point_coords=shared_pc.get("point_coords"),
-                    shared_point_mask=shared_pc.get("point_mask"),
-                    pc_valid_lengths=pc_valid_lengths,
+                    per_point_features=point_encoder_outputs.get("per_point_features"),
+                    per_point_mask=point_encoder_outputs.get("per_point_mask"),
                 )
             else:
                 all_point_logits = None
