@@ -65,6 +65,13 @@ def parse_args():
         default=None,
         help="SONATA point backbone 预训练配置路径；不传时默认尝试使用权重同目录下的 config.json",
     )
+    parser.add_argument(
+        "--point_feature_source",
+        type=str,
+        default=None,
+        choices=["decoder", "encoder_inverse"],
+        help="3D 分支逐点特征来源：decoder 为当前 PTv3 decoder 输出，encoder_inverse 为 SONATA README 推荐的 inverse 恢复特征",
+    )
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
@@ -302,6 +309,8 @@ def main():
         model_config.mllm.point_encoder_pretrained = args.point_backbone_pretrained
     if args.point_backbone_pretrained_config:
         model_config.mllm.point_encoder_pretrained_config = args.point_backbone_pretrained_config
+    if args.point_feature_source:
+        model_config.mllm.point_feature_source = args.point_feature_source
     if args.dataset_dir:
         training_configs.dataset_dir = args.dataset_dir
     if args.log_dir:

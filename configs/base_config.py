@@ -111,6 +111,7 @@ class MLLMConfigs(Configs):
         "functional_tokens": FUNCTIONAL_TOKENS,
         "enable_point_encoder": True,
         "point_encoder_backbone": None,
+        "point_feature_source": "decoder",
         "point_encoder_pretrained": None,
         "point_encoder_pretrained_config": None,
     }

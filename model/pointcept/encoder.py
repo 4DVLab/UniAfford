@@ -57,7 +57,8 @@ class PointCloudEncoder(nn.Module):
     """
     将点云编码为两种不同语义的特征：
     1) `mllm_point_tokens`: 编码器末端的较短 token，供 MLLM 注入。
-    2) `per_point_features`: 解码器末端的逐点特征，供 3D decoder 逐点做相似度。
+    2) `per_point_features`: 可选地来自 PTv3 decoder，或来自 SONATA README 推荐的
+       encoder inverse 恢复结果，供 3D decoder 逐点做相似度。
 
     Notes:
     - 两者共享同一次 PTV3 backbone 前向，但语义职责不同，不能混用。
@@ -68,7 +69,8 @@ class PointCloudEncoder(nn.Module):
         out_hidden_size: int,
         compute_dtype: torch.dtype,
         backbone_config: Optional[Dict],
-    ):
+        point_feature_source: str = "decoder",
+    ):  
         super().__init__()
         if backbone_config is None:
             kwargs = {}
@@ -84,11 +86,27 @@ class PointCloudEncoder(nn.Module):
         kwargs["enc_mode"] = False
         self.point_backbone = PointTransformerV3(**kwargs)
         enc_dim = int(kwargs.get("enc_channels", (32, 64, 128, 256, 512))[-1])
+        self.enc_channels = tuple(kwargs.get("enc_channels", (32, 64, 128, 256, 512)))
+        self.dec_channels = tuple(kwargs.get("dec_channels", (64, 64, 128, 256)))
         self.in_channels = int(kwargs.get("in_channels", POINT_XYZ_CHANNELS))
+        self.point_feature_source = str(point_feature_source).strip().lower()
+        if self.point_feature_source not in {"decoder", "encoder_inverse"}:
+            raise ValueError(
+                "point_feature_source 仅支持 'decoder' 或 'encoder_inverse'，"
+                f"当前为 {point_feature_source!r}"
+            )
+        self.point_feature_size = self._infer_point_feature_size()
         self.proj = nn.Linear(enc_dim, out_hidden_size)
         self.compute_dtype = compute_dtype
         self.pretrained_info = None
         self.to(dtype=compute_dtype)
+
+    def _infer_point_feature_size(self) -> int:
+        if self.point_feature_source == "decoder":
+            return int(self.dec_channels[0]) if len(self.dec_channels) > 0 else int(self.enc_channels[-1])
+
+        concat_levels = min(3, len(self.enc_channels))
+        return int(sum(self.enc_channels[-concat_levels:]))
 
     @staticmethod
     def _to_plain_backbone_config(backbone_config: Optional[Dict]) -> Dict[str, Any]:
@@ -291,6 +309,7 @@ class PointCloudEncoder(nn.Module):
         out_hidden_size: int,
         compute_dtype: torch.dtype,
         backbone_config: Optional[Dict] = None,
+        point_feature_source: str = "decoder",
         pretrained_config_path: Optional[str] = None,
         map_location: str | torch.device = "cpu",
     ) -> "PointCloudEncoder":
@@ -304,6 +323,7 @@ class PointCloudEncoder(nn.Module):
             out_hidden_size=out_hidden_size,
             compute_dtype=compute_dtype,
             backbone_config=merged_cfg,
+            point_feature_source=point_feature_source,
         )
         encoder.pretrained_info = info
         encoder.load_pretrained(checkpoint_path, map_location=map_location)
@@ -346,6 +366,29 @@ class PointCloudEncoder(nn.Module):
             offset=offset,
             grid_size=0.02,
         )
+
+    @staticmethod
+    def _restore_encoder_point_features(point) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        按 SONATA README 的推荐方式，将 encoder-only 的层级特征恢复到输入点级别。
+
+        规则：
+        - 前两级恢复时，将 parent.feat 与高层 feat[inverse] 做 concat
+        - 后续层级仅传播已经恢复好的特征
+        """
+        concat_steps = 0
+        while "pooling_parent" in point.keys():
+            assert "pooling_inverse" in point.keys()
+            parent = point.pop("pooling_parent")
+            inverse = point.pop("pooling_inverse")
+            lifted_feat = point.feat[inverse]
+            if concat_steps < 2:
+                parent.feat = torch.cat([parent.feat, lifted_feat], dim=-1)
+            else:
+                parent.feat = lifted_feat
+            point = parent
+            concat_steps += 1
+        return point.feat, point.batch
 
     @staticmethod
     def _split_by_batch(feat: torch.Tensor, batch: torch.Tensor, bsz: int) -> List[torch.Tensor]:
@@ -391,7 +434,9 @@ class PointCloudEncoder(nn.Module):
         """
         单次 backbone 前向，输出两种尺度的特征：
         - mllm_point_tokens/mllm_point_token_mask: enc_point 产生的短 token，注入 MLLM
-        - per_point_features/per_point_mask: 与原始点数对齐的逐点特征，供 3D decoder 做相似度场
+        - per_point_features/per_point_mask:
+          * decoder 模式：使用 PTv3 decoder 恢复的逐点特征
+          * encoder_inverse 模式：使用 SONATA README 推荐的 inverse 恢复特征
         """
         if point_clouds is None:
             return None
@@ -413,18 +458,26 @@ class PointCloudEncoder(nn.Module):
         data_dict = self._build_pointcept_batch(point_clouds, in_channels=self.in_channels)
         dual_out = self.point_backbone(data_dict, return_dual=True)
         enc_point = dual_out["enc_point"]
-        dec_point = dual_out["dec_point"]
+        dec_point = dual_out["dec_point"] if self.point_feature_source == "decoder" else None
 
-        # Step 4. enc_point -> 投影成 MLLM token；dec_point -> 保持逐点特征给 decoder。
+        # Step 4. enc_point -> 投影成 MLLM token。
+        # 逐点特征则按配置选择 decoder 输出或 encoder inverse 恢复结果。
         enc_feat = enc_point.feat.to(self.compute_dtype)     # [sum(K_i), C_enc]
-        dec_feat = dec_point.feat.to(self.compute_dtype)     # [sum(N_i), C_dec]
         proj_feat = self.proj(enc_feat)                      # [sum(K_i), H_mllm]
+        if self.point_feature_source == "decoder":
+            assert dec_point is not None
+            point_feat = dec_point.feat.to(self.compute_dtype)
+            point_batch = dec_point.batch
+        else:
+            restored_feat, restored_batch = self._restore_encoder_point_features(enc_point)
+            point_feat = restored_feat.to(self.compute_dtype)
+            point_batch = restored_batch
 
         # Step 5. 分别按 batch 拆回：
         # - enc/proj 列表：较短 token 序列
-        # - dec 列表：逐点特征序列（应与输入点数对齐）
+        # - point 列表：逐点特征序列（应与输入点数对齐）
         enc_list = self._split_by_batch(proj_feat, enc_point.batch, bsz)
-        point_list = self._split_by_batch(dec_feat, dec_point.batch, bsz)
+        point_list = self._split_by_batch(point_feat, point_batch, bsz)
 
         # Step 6. 无效点云样本（pc_valid_lengths==0）显式置空，避免引入噪声前缀。
         if pc_valid_lengths is not None:
@@ -461,7 +514,7 @@ class PointCloudEncoder(nn.Module):
         # Step 7. 分别补齐短 token 与逐点特征。
         # 其中 per_point_features 明确按原始点数 N 对齐，供 decoder 直接逐点做相似度。
         token_hidden = token_list[0].shape[-1] if max_token_len > 0 else enc_list[0].shape[-1]
-        point_hidden = point_list[0].shape[-1]
+        point_hidden = self.point_feature_size
         mllm_point_tokens = enc_list[0].new_zeros((bsz, max_token_len, token_hidden))
         mllm_point_token_mask = torch.zeros((bsz, max_token_len), dtype=torch.bool, device=enc_list[0].device)
         per_point_features = point_list[0].new_zeros((bsz, num_points, point_hidden))
