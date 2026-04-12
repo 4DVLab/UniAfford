@@ -52,11 +52,22 @@ class MLLMBackbone(nn.Module):
 
         self.point_encoder = None
         if getattr(self.config, "enable_point_encoder", False):
-            self.point_encoder = PointCloudEncoder(
-                out_hidden_size=self.hidden_size,
-                compute_dtype=self.config.compute_dtype,
-                backbone_config=getattr(self.config, "point_encoder_backbone", None),
-            )
+            point_encoder_ckpt = getattr(self.config, "point_encoder_pretrained", None)
+            point_encoder_cfg = getattr(self.config, "point_encoder_pretrained_config", None)
+            if point_encoder_ckpt:
+                self.point_encoder = PointCloudEncoder.from_pretrained(
+                    checkpoint_path=point_encoder_ckpt,
+                    out_hidden_size=self.hidden_size,
+                    compute_dtype=self.config.compute_dtype,
+                    backbone_config=getattr(self.config, "point_encoder_backbone", None),
+                    pretrained_config_path=point_encoder_cfg,
+                )
+            else:
+                self.point_encoder = PointCloudEncoder(
+                    out_hidden_size=self.hidden_size,
+                    compute_dtype=self.config.compute_dtype,
+                    backbone_config=getattr(self.config, "point_encoder_backbone", None),
+                )
         self.pc_anchor_token_id = self._resolve_token_id(DEFAULT_PC_TOKEN)
         self.pc_patch_token_id = self._resolve_token_id(DEFAULT_PC_PATCH_TOKEN)
 

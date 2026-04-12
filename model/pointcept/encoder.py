@@ -1,9 +1,56 @@
+import json
+import os
+from collections import OrderedDict
 from typing import Dict, Optional, Tuple, List, Any
 
 import torch
 import torch.nn as nn
 
 from .models.point_prompt_training.point_transformer_v3m2_sonata import PointTransformerV3
+from utils.checkpoint_utils import extract_state_dict
+
+
+POINT_XYZ_CHANNELS = 3
+POINT_BACKBONE_SHARED_CONFIG_KEYS = {
+    "in_channels",
+    "order",
+    "stride",
+    "enc_depths",
+    "enc_channels",
+    "enc_num_head",
+    "enc_patch_size",
+    "mlp_ratio",
+    "qkv_bias",
+    "qk_scale",
+    "attn_drop",
+    "proj_drop",
+    "drop_path",
+    "layer_scale",
+    "pre_norm",
+    "shuffle_orders",
+    "enable_rpe",
+    "enable_flash",
+    "upcast_attention",
+    "upcast_softmax",
+    "traceable",
+    "mask_token",
+}
+POINT_BACKBONE_DECODER_CONFIG_KEYS = {
+    "dec_depths",
+    "dec_channels",
+    "dec_num_head",
+    "dec_patch_size",
+}
+POINT_BACKBONE_STATE_PREFIXES = (
+    "",
+    "module.",
+    "point_backbone.",
+    "module.point_backbone.",
+    "point_encoder.point_backbone.",
+    "module.point_encoder.point_backbone.",
+    "mllm.point_encoder.point_backbone.",
+    "module.mllm.point_encoder.point_backbone.",
+)
 
 
 class PointCloudEncoder(nn.Module):
@@ -29,31 +76,258 @@ class PointCloudEncoder(nn.Module):
             kwargs = dict(backbone_config.to_dict())
         else:
             kwargs = dict(backbone_config)
+
+        kwargs.pop("enc_mode", None)
         # 这里启用解码器，并通过 PTV3 的 return_dual=True 同时拿到：
         # 1) 编码器末端 enc_point（较短 token，给 MLLM）
         # 2) 解码器末端 dec_point（逐点特征，给 3D decoder）
         kwargs["enc_mode"] = False
         self.point_backbone = PointTransformerV3(**kwargs)
         enc_dim = int(kwargs.get("enc_channels", (32, 64, 128, 256, 512))[-1])
+        self.in_channels = int(kwargs.get("in_channels", POINT_XYZ_CHANNELS))
         self.proj = nn.Linear(enc_dim, out_hidden_size)
         self.compute_dtype = compute_dtype
+        self.pretrained_info = None
         self.to(dtype=compute_dtype)
 
     @staticmethod
-    def _build_pointcept_batch(point_clouds: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def _to_plain_backbone_config(backbone_config: Optional[Dict]) -> Dict[str, Any]:
+        if backbone_config is None:
+            return {}
+        if hasattr(backbone_config, "to_dict"):
+            return dict(backbone_config.to_dict())
+        return dict(backbone_config)
+
+    @staticmethod
+    def _extract_pretrained_backbone_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+        nested_candidates = [
+            payload.get("point_encoder_backbone"),
+            payload.get("point_prefix_backbone_kwargs"),
+            payload.get("backbone"),
+            ((payload.get("mllm") or {}).get("point_encoder_backbone") if isinstance(payload.get("mllm"), dict) else None),
+            (
+                ((payload.get("model_config") or {}).get("mllm") or {}).get("point_encoder_backbone")
+                if isinstance(payload.get("model_config"), dict)
+                else None
+            ),
+        ]
+        for candidate in nested_candidates:
+            if isinstance(candidate, dict):
+                filtered = {
+                    k: v
+                    for k, v in candidate.items()
+                    if k in POINT_BACKBONE_SHARED_CONFIG_KEYS or k in POINT_BACKBONE_DECODER_CONFIG_KEYS or k == "enc_mode"
+                }
+                if filtered:
+                    return filtered
+
+        filtered_root = {
+            k: v
+            for k, v in payload.items()
+            if k in POINT_BACKBONE_SHARED_CONFIG_KEYS or k in POINT_BACKBONE_DECODER_CONFIG_KEYS or k == "enc_mode"
+        }
+        if filtered_root:
+            return filtered_root
+        raise ValueError("预训练配置中未找到 point backbone 相关字段。")
+
+    @staticmethod
+    def _resolve_pretrained_config_path(
+        checkpoint_path: str,
+        pretrained_config_path: Optional[str] = None,
+    ) -> Optional[str]:
+        if pretrained_config_path:
+            return pretrained_config_path
+        guessed_path = os.path.join(os.path.dirname(checkpoint_path), "config.json")
+        if os.path.exists(guessed_path):
+            return guessed_path
+        return None
+
+    @classmethod
+    def _load_pretrained_bundle(
+        cls,
+        checkpoint_path: str,
+        pretrained_config_path: Optional[str] = None,
+        map_location: str | torch.device = "cpu",
+    ) -> Tuple[Dict[str, Any], Dict[str, torch.Tensor], str]:
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"找不到 point backbone 预训练权重: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        state_dict = extract_state_dict(checkpoint)
+
+        resolved_config_path = cls._resolve_pretrained_config_path(
+            checkpoint_path,
+            pretrained_config_path,
+        )
+        if resolved_config_path is not None:
+            with open(resolved_config_path, "r", encoding="utf-8") as f:
+                payload = json.load(f)
+            return cls._extract_pretrained_backbone_payload(payload), state_dict, resolved_config_path
+
+        if isinstance(checkpoint, dict):
+            for key in ("config", "model_config"):
+                candidate = checkpoint.get(key)
+                if isinstance(candidate, dict):
+                    try:
+                        return cls._extract_pretrained_backbone_payload(candidate), state_dict, f"{checkpoint_path}:{key}"
+                    except ValueError:
+                        pass
+
+        raise ValueError(
+            "未找到 point backbone 的预训练配置。"
+            " 请显式传入 `--point_backbone_pretrained_config`，"
+            "或将 `config.json` 放到权重同目录，"
+            "或确保 ckpt 内部包含 `config/model_config`。"
+        )
+
+    @classmethod
+    def _build_backbone_config_for_pretrained(
+        cls,
+        backbone_config: Optional[Dict],
+        checkpoint_path: str,
+        pretrained_config_path: Optional[str] = None,
+        map_location: str | torch.device = "cpu",
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        pretrained_cfg, _, resolved_config_source = cls._load_pretrained_bundle(
+            checkpoint_path,
+            pretrained_config_path,
+            map_location=map_location,
+        )
+        merged_cfg = cls._to_plain_backbone_config(backbone_config)
+        pretrained_in_channels = int(pretrained_cfg.get("in_channels", merged_cfg.get("in_channels", POINT_XYZ_CHANNELS)))
+        if pretrained_in_channels < POINT_XYZ_CHANNELS:
+            raise ValueError(
+                "point backbone 预训练配置的 in_channels 小于 3，无法承载当前 xyz 输入。"
+                f" got in_channels={pretrained_in_channels}"
+            )
+
+        copied_keys: List[str] = []
+        for key in POINT_BACKBONE_SHARED_CONFIG_KEYS:
+            if key in pretrained_cfg:
+                merged_cfg[key] = pretrained_cfg[key]
+                copied_keys.append(key)
+
+        if not bool(pretrained_cfg.get("enc_mode", False)):
+            for key in POINT_BACKBONE_DECODER_CONFIG_KEYS:
+                if key in pretrained_cfg:
+                    merged_cfg[key] = pretrained_cfg[key]
+                    copied_keys.append(key)
+
+        # SONATA 常见输入为 [coord, color, normal] 共 9 维；当前项目仅提供 xyz，
+        # 因此保留预训练通道数，并在 forward 时仅写前 3 个通道，剩余通道固定为 0。
+        merged_cfg["in_channels"] = pretrained_in_channels
+        merged_cfg["enc_mode"] = False
+        return merged_cfg, {
+            "config_path": resolved_config_source,
+            "copied_keys": copied_keys,
+            "pretrained_enc_mode": bool(pretrained_cfg.get("enc_mode", False)),
+            "pretrained_in_channels": pretrained_in_channels,
+        }
+
+    @staticmethod
+    def _strip_state_prefix(
+        state_dict: Dict[str, torch.Tensor],
+        prefix: str,
+    ) -> OrderedDict[str, torch.Tensor]:
+        if prefix == "":
+            return OrderedDict(state_dict.items())
+        return OrderedDict(
+            (k[len(prefix) :], v)
+            for k, v in state_dict.items()
+            if k.startswith(prefix)
+        )
+
+    def _match_pretrained_state_dict(
+        self,
+        raw_state_dict: Dict[str, torch.Tensor],
+    ) -> Tuple[OrderedDict[str, torch.Tensor], str]:
+        module_state = self.point_backbone.state_dict()
+        best_prefix = ""
+        best_state = OrderedDict()
+        best_match_count = -1
+
+        for prefix in POINT_BACKBONE_STATE_PREFIXES:
+            candidate = self._strip_state_prefix(raw_state_dict, prefix)
+            matched = OrderedDict(
+                (key, value)
+                for key, value in candidate.items()
+                if key in module_state and tuple(module_state[key].shape) == tuple(value.shape)
+            )
+            if len(matched) > best_match_count:
+                best_match_count = len(matched)
+                best_prefix = prefix
+                best_state = matched
+
+        if best_match_count <= 0:
+            raise ValueError("未在预训练 checkpoint 中找到可匹配当前 point backbone 的参数。")
+        return best_state, (best_prefix or "<raw>")
+
+    def load_pretrained(
+        self,
+        checkpoint_path: str,
+        map_location: str | torch.device = "cpu",
+    ) -> Dict[str, Any]:
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"找不到 point backbone 预训练权重: {checkpoint_path}")
+
+        checkpoint = torch.load(checkpoint_path, map_location=map_location)
+        raw_state_dict = extract_state_dict(checkpoint)
+        loadable_state, matched_prefix = self._match_pretrained_state_dict(raw_state_dict)
+        missing, unexpected = self.point_backbone.load_state_dict(loadable_state, strict=False)
+        self.pretrained_info = {
+            **(self.pretrained_info or {}),
+            "weight_path": checkpoint_path,
+            "matched_prefix": matched_prefix,
+            "loaded_tensors": len(loadable_state),
+            "missing_keys": list(missing),
+            "unexpected_keys": list(unexpected),
+        }
+        return self.pretrained_info
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        checkpoint_path: str,
+        out_hidden_size: int,
+        compute_dtype: torch.dtype,
+        backbone_config: Optional[Dict] = None,
+        pretrained_config_path: Optional[str] = None,
+        map_location: str | torch.device = "cpu",
+    ) -> "PointCloudEncoder":
+        merged_cfg, info = cls._build_backbone_config_for_pretrained(
+            backbone_config=backbone_config,
+            checkpoint_path=checkpoint_path,
+            pretrained_config_path=pretrained_config_path,
+            map_location=map_location,
+        )
+        encoder = cls(
+            out_hidden_size=out_hidden_size,
+            compute_dtype=compute_dtype,
+            backbone_config=merged_cfg,
+        )
+        encoder.pretrained_info = info
+        encoder.load_pretrained(checkpoint_path, map_location=map_location)
+        return encoder
+
+    @staticmethod
+    def _build_pointcept_batch(point_clouds: torch.Tensor, in_channels: int) -> Dict[str, torch.Tensor]:
         """
         将 [B, N, 3] 点云改写为 Pointcept 所需字典。
 
         字段语义：
         - coord: [sum(N), 3]，所有样本坐标拼接后的展平坐标。
-        - feat:  [sum(N), 3]，这里直接复用坐标作为输入特征。
+        - feat:  [sum(N), C]，兼容 SONATA 的 [coord, color, normal] 风格输入。
+                 当前项目只有 xyz，因此写入前 3 个通道，其余通道固定为 0。
         - batch: [sum(N)]，每个点属于哪个样本的 batch 索引。
         - offset:[B]，每个样本在展平序列中的结束下标（累积点数）。
         - grid_size: 体素网格大小，供 Pointcept 稀疏化/分块使用。
         """
         bsz, num_points, _ = point_clouds.shape
         coord = point_clouds.reshape(-1, 3).contiguous()
-        feat = coord
+        if in_channels < POINT_XYZ_CHANNELS:
+            raise ValueError(f"point backbone in_channels 必须 >= 3，当前为 {in_channels}")
+        feat = coord.new_zeros((coord.shape[0], in_channels))
+        feat[:, :POINT_XYZ_CHANNELS] = coord
         batch = (
             torch.arange(bsz, device=point_clouds.device)
             .unsqueeze(1)
@@ -136,7 +410,7 @@ class PointCloudEncoder(nn.Module):
         bsz = point_clouds.shape[0]
 
         # Step 3. Pointcept 编码：单次前向同时返回 enc_point 与 dec_point。
-        data_dict = self._build_pointcept_batch(point_clouds)
+        data_dict = self._build_pointcept_batch(point_clouds, in_channels=self.in_channels)
         dual_out = self.point_backbone(data_dict, return_dual=True)
         enc_point = dual_out["enc_point"]
         dec_point = dual_out["dec_point"]

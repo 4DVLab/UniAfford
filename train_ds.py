@@ -51,6 +51,13 @@ def parse_args():
     parser = argparse.ArgumentParser(description="JointAffordance (Qwen) training")
     parser.add_argument("--qwen_model", type=str, default=None, help="Qwen 模型路径或名称")
     parser.add_argument("--vision_pretrained", type=str, default=None, help="SAM 权重路径")
+    parser.add_argument("--point_backbone_pretrained", type=str, default=None, help="SONATA point backbone 预训练权重路径")
+    parser.add_argument(
+        "--point_backbone_pretrained_config",
+        type=str,
+        default=None,
+        help="SONATA point backbone 预训练配置路径；不传时默认尝试使用权重同目录下的 config.json",
+    )
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
@@ -265,6 +272,10 @@ def main():
         model_config.mllm.qwen_model_name_or_path = args.qwen_model
     if args.vision_pretrained:
         model_config.image_decoder.vision_pretrained = args.vision_pretrained
+    if args.point_backbone_pretrained:
+        model_config.mllm.point_encoder_pretrained = args.point_backbone_pretrained
+    if args.point_backbone_pretrained_config:
+        model_config.mllm.point_encoder_pretrained_config = args.point_backbone_pretrained_config
     if args.dataset_dir:
         training_configs.dataset_dir = args.dataset_dir
     if args.log_dir:
@@ -291,6 +302,15 @@ def main():
     # ---------- 初始化模型 ----------
     logger.info("正在初始化模型...")
     model = JointAffordanceModel(model_config)
+    if getattr(model, "point_encoder", None) is not None and getattr(model.point_encoder, "pretrained_info", None):
+        load_info = model.point_encoder.pretrained_info
+        model_config.mllm.point_encoder_pretrained_config = load_info.get("config_path")
+        logger.info(
+            "已通过 PointCloudEncoder.from_pretrained 加载 point backbone: "
+            f"{load_info.get('weight_path')} | config={load_info.get('config_path')} | "
+            f"prefix={load_info['matched_prefix']} | loaded={load_info['loaded_tensors']} | "
+            f"missing={len(load_info['missing_keys'])} | unexpected={len(load_info['unexpected_keys'])}"
+        )
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
     data_collator = partial(
         joint_affordance_collate_fn,
