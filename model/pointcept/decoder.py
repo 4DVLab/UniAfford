@@ -42,6 +42,24 @@ class PointCloudHiddenStateDecoder(nn.Module):
 
         self.to(dtype=self.config.compute_dtype)
 
+    @staticmethod
+    def _debug_check_tensor(name: str, tensor: Optional[torch.Tensor]) -> None:
+        if tensor is None or not isinstance(tensor, torch.Tensor):
+            return
+        if torch.isfinite(tensor).all():
+            return
+        finite_mask = torch.isfinite(tensor)
+        finite_vals = tensor[finite_mask]
+        finite_min = float(finite_vals.min().item()) if finite_vals.numel() > 0 else float("nan")
+        finite_max = float(finite_vals.max().item()) if finite_vals.numel() > 0 else float("nan")
+        nan_count = int(torch.isnan(tensor).sum().item())
+        inf_count = int(torch.isinf(tensor).sum().item())
+        print(
+            "[PointCloudHiddenStateDecoder][NonFinite] "
+            f"{name}: shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+            f"nan={nan_count}, inf={inf_count}, finite_min={finite_min:.6g}, finite_max={finite_max:.6g}"
+        )
+
     def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
         hidden_states = hidden_states.to(self.config.compute_dtype)
@@ -71,16 +89,22 @@ class PointCloudHiddenStateDecoder(nn.Module):
         pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
         point_feat = per_point_features.to(self.config.compute_dtype)
         point_mask = per_point_mask.bool()
+        self._debug_check_tensor("input/pred_embeddings", pred_embeddings)
+        self._debug_check_tensor("input/per_point_features", point_feat)
 
         text_feat = F.normalize(self.project_hidden_states(pred_embeddings), p=2, dim=-1)  # [B, H]
         point_feat = self.point_proj(point_feat)  # [B, K, H]
+        self._debug_check_tensor("output/project_hidden_states", text_feat)
+        self._debug_check_tensor("output/point_proj", point_feat)
         point_feat = F.normalize(point_feat, p=2, dim=-1)
         point_feat = torch.where(point_mask.unsqueeze(-1), point_feat, torch.zeros_like(point_feat))
+        self._debug_check_tensor("output/point_feat_normalized", point_feat)
 
         # 逐点响应场：每个点特征直接与 aff query 做相似度。
         logits = (point_feat * text_feat.unsqueeze(1)).sum(dim=-1)  # [B, K]
         logits = logits * self.logit_scale.exp().clamp(min=1e-4, max=100.0)
         logits = torch.where(point_mask, logits, torch.zeros_like(logits))
+        self._debug_check_tensor("output/logits", logits)
         return logits
 
     def forward_with_loss(

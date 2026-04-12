@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from .models.point_prompt_training.point_transformer_v3m2_sonata import PointTransformerV3
+from .models.utils.structure import Point
 from utils.checkpoint_utils import extract_state_dict
 
 
@@ -107,6 +108,24 @@ class PointCloudEncoder(nn.Module):
 
         concat_levels = min(3, len(self.enc_channels))
         return int(sum(self.enc_channels[-concat_levels:]))
+
+    @staticmethod
+    def _debug_check_tensor(name: str, tensor: Optional[torch.Tensor]) -> None:
+        if tensor is None or not isinstance(tensor, torch.Tensor):
+            return
+        if torch.isfinite(tensor).all():
+            return
+        finite_mask = torch.isfinite(tensor)
+        finite_vals = tensor[finite_mask]
+        finite_min = float(finite_vals.min().item()) if finite_vals.numel() > 0 else float("nan")
+        finite_max = float(finite_vals.max().item()) if finite_vals.numel() > 0 else float("nan")
+        nan_count = int(torch.isnan(tensor).sum().item())
+        inf_count = int(torch.isinf(tensor).sum().item())
+        print(
+            "[PointCloudEncoder][NonFinite] "
+            f"{name}: shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+            f"nan={nan_count}, inf={inf_count}, finite_min={finite_min:.6g}, finite_max={finite_max:.6g}"
+        )
 
     @staticmethod
     def _to_plain_backbone_config(backbone_config: Optional[Dict]) -> Dict[str, Any]:
@@ -390,6 +409,17 @@ class PointCloudEncoder(nn.Module):
             concat_steps += 1
         return point.feat, point.batch
 
+    def _forward_encoder_only(self, data_dict: Dict[str, torch.Tensor]):
+        point = Point(data_dict)
+        point = self.point_backbone.embedding(point)
+        point.serialization(
+            order=self.point_backbone.order,
+            shuffle_orders=self.point_backbone.shuffle_orders,
+        )
+        point.sparsify()
+        enc_point = self.point_backbone.enc(point)
+        return enc_point
+
     @staticmethod
     def _split_by_batch(feat: torch.Tensor, batch: torch.Tensor, bsz: int) -> List[torch.Tensor]:
         """
@@ -454,24 +484,36 @@ class PointCloudEncoder(nn.Module):
         point_clouds = point_clouds.to(self.compute_dtype)
         bsz = point_clouds.shape[0]
 
-        # Step 3. Pointcept 编码：单次前向同时返回 enc_point 与 dec_point。
+        # Step 3. Pointcept 编码：
+        # - decoder 模式：沿当前 PTv3 decoder 路径同时拿到 enc_point 与 dec_point
+        # - encoder_inverse 模式：严格按 encoder-only 路径前向，避免 decoder 改写父层特征
         data_dict = self._build_pointcept_batch(point_clouds, in_channels=self.in_channels)
-        dual_out = self.point_backbone(data_dict, return_dual=True)
-        enc_point = dual_out["enc_point"]
-        dec_point = dual_out["dec_point"] if self.point_feature_source == "decoder" else None
+        self._debug_check_tensor("input/point_clouds", point_clouds)
+        self._debug_check_tensor("input/feat", data_dict.get("feat"))
+        if self.point_feature_source == "decoder":
+            dual_out = self.point_backbone(data_dict, return_dual=True)
+            enc_point = dual_out["enc_point"]
+            dec_point = dual_out["dec_point"]
+        else:
+            enc_point = self._forward_encoder_only(data_dict)
+            dec_point = None
 
         # Step 4. enc_point -> 投影成 MLLM token。
         # 逐点特征则按配置选择 decoder 输出或 encoder inverse 恢复结果。
         enc_feat = enc_point.feat.to(self.compute_dtype)     # [sum(K_i), C_enc]
         proj_feat = self.proj(enc_feat)                      # [sum(K_i), H_mllm]
+        self._debug_check_tensor("output/enc_feat", enc_feat)
+        self._debug_check_tensor("output/proj_feat", proj_feat)
         if self.point_feature_source == "decoder":
             assert dec_point is not None
             point_feat = dec_point.feat.to(self.compute_dtype)
             point_batch = dec_point.batch
+            self._debug_check_tensor("output/dec_feat", point_feat)
         else:
             restored_feat, restored_batch = self._restore_encoder_point_features(enc_point)
             point_feat = restored_feat.to(self.compute_dtype)
             point_batch = restored_batch
+            self._debug_check_tensor("output/restored_feat", point_feat)
 
         # Step 5. 分别按 batch 拆回：
         # - enc/proj 列表：较短 token 序列
@@ -537,6 +579,9 @@ class PointCloudEncoder(nn.Module):
                     )
                 per_point_features[i, :pt_len] = pts[:pt_len]
                 per_point_mask[i, :pt_len] = True
+
+        self._debug_check_tensor("output/mllm_point_tokens", mllm_point_tokens)
+        self._debug_check_tensor("output/per_point_features", per_point_features)
 
         return {
             "mllm_point_tokens": mllm_point_tokens,
