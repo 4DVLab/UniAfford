@@ -49,6 +49,7 @@ from utils.metrics import (
     log_epoch_summary,
 )
 from utils.debug import log_param_dtype_stats, count_model_params, _collect_batch_runtime_stats
+from utils.model_io import build_portable_assets, build_portable_checkpoint_payload
 
 
 ENV_LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
@@ -69,6 +70,8 @@ def parse_args():
         choices=["shared", "independent"],
         help="3D decoder backbone 模式：shared 为与 encoder 共用基座，independent 为独立随机初始化 backbone",
     )
+    parser.add_argument("--batch_size", type=int, default=None, help="每卡训练 batch size（同时覆写 val_batch_size）")
+    parser.add_argument("--epochs", type=int, default=None, help="训练总 epoch 数")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
@@ -326,6 +329,11 @@ def main():
         else ("shared" if bool(getattr(model_config.point_decoder, "share_encoder_backbone", True)) else "independent")
     )
     apply_point_decoder_backbone_mode(model_config, decoder_backbone_mode)
+    if args.batch_size is not None:
+        training_configs.batch_size = int(args.batch_size)
+        training_configs.val_batch_size = int(args.batch_size)
+    if args.epochs is not None:
+        training_configs.epochs = int(args.epochs)
     if args.dataset_dir:
         training_configs.dataset_dir = args.dataset_dir
     if args.log_dir:
@@ -455,6 +463,7 @@ def main():
         model.mllm.model = get_peft_model(model.mllm.model, training_configs.lora.to_peft_config())
 
     enable_trainable_modules(model, training_configs.name_of_params_to_train)
+    portable_asset_bundle = build_portable_assets(model)
     log_param_dtype_stats(model, logger, stage="before_fsdp")
     total_params, trainable_params = count_model_params(model)
     logger.info(
@@ -575,7 +584,7 @@ def main():
     os.makedirs(ckpt_dir, exist_ok=True)
     config_json_path = os.path.join(ckpt_dir, "training_config.json")
     if local_rank == 0:
-        training_configs.save_json(config_json_path)
+        training_configs.save_json(config_json_path, include_deepspeed=False)
         logger.info(f"配置已导出: {config_json_path}")
         logger.info(
             f"Checkpoint 保存策略: 直接保存完整 .pth（best/latest/fixed），latest 每 {update_epoch} epoch，固定存档每 {args.fixed_save_interval} epoch"
@@ -592,10 +601,12 @@ def main():
         ):
             full_state = model_fsdp.state_dict()
         if local_rank == 0:
-            payload = {
-                **meta,
-                "model_state_dict": full_state,
-            }
+            payload = build_portable_checkpoint_payload(
+                model_state_dict=full_state,
+                meta=meta,
+                training_cfg=training_configs,
+                asset_bundle=portable_asset_bundle,
+            )
             torch.save(payload, os.path.join(ckpt_dir, filename))
 
     for epoch in range(training_configs.epochs):
@@ -662,8 +673,6 @@ def main():
                 if local_rank == 0:
                     logger.info(f"固定周期 checkpoint 已保存: {os.path.join(ckpt_dir, fixed_name)}")
                 did_save = True
-            if local_rank == 0:
-                training_configs.save_json(config_json_path)
         # 仅在发生保存时同步，避免每个 epoch 都阻塞等待
         if did_save:
             dist.barrier()
@@ -675,14 +684,18 @@ def main():
         ):
             final_state = model_fsdp.state_dict()
         torch.save(
-            {
-                "epoch": training_configs.epochs,
-                "global_step": global_step,
-                "best_epoch": best_epoch,
-                "best_val_loss": best_metric,
-                "val_metrics": last_val_metrics,
-                "model_state_dict": final_state,
-            },
+            build_portable_checkpoint_payload(
+                model_state_dict=final_state,
+                meta={
+                    "epoch": training_configs.epochs,
+                    "global_step": global_step,
+                    "best_epoch": best_epoch,
+                    "best_val_loss": best_metric,
+                    "val_metrics": last_val_metrics,
+                },
+                training_cfg=training_configs,
+                asset_bundle=portable_asset_bundle,
+            ),
             os.path.join(ckpt_dir, "latest_fsdp.pth"),
         )
         logger.info("训练结束：已额外导出完整 latest 权重 latest_fsdp.pth")

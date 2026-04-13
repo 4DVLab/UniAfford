@@ -17,6 +17,27 @@ from utils.debug import decode_token_ids
 class JointAffordanceModel(nn.Module):
     """模型管理基座，负责加载配置并组织各模块。"""
 
+    def _sync_point_decoder_config(self):
+        point_decoder_cfg = getattr(self.config, "point_decoder", None)
+        if point_decoder_cfg is None:
+            return
+
+        share_backbone = bool(getattr(point_decoder_cfg, "share_encoder_backbone", True))
+        point_decoder_cfg.share_encoder_backbone = share_backbone
+        if share_backbone:
+            encoder_backbone_cfg = self.config.mllm.point_encoder_backbone.to_dict()
+            decoder_backbone_cfg = dict(encoder_backbone_cfg)
+            decoder_backbone_cfg["enc_mode"] = False
+            point_decoder_cfg.backbone_kwargs = decoder_backbone_cfg
+            point_decoder_cfg.backbone_out_channels = int(
+                decoder_backbone_cfg.get("dec_channels", (64,))[0]
+            )
+        else:
+            point_decoder = getattr(self, "point_decoder", None)
+            if point_decoder is not None and hasattr(point_decoder, "config"):
+                point_decoder_cfg.backbone_kwargs = dict(point_decoder.config.backbone_kwargs)
+                point_decoder_cfg.backbone_out_channels = int(point_decoder.config.backbone_out_channels)
+
     def __init__(self, config: Optional[JointAffordanceConfig] = None):
         super().__init__()
         self.config = config or JointAffordanceConfig()
@@ -45,6 +66,7 @@ class JointAffordanceModel(nn.Module):
                 self.config.point_decoder,
                 self.config.mllm.hidden_size,
             )
+        self._sync_point_decoder_config()
 
 
     @property

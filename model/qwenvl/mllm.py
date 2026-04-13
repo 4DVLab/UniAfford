@@ -1,6 +1,7 @@
 from typing import Optional, Dict, Tuple
 from pathlib import Path
-from transformers import AutoProcessor
+import tempfile
+from transformers import AutoConfig, AutoProcessor
 import torch
 import torch.nn as nn
 from configs import MLLMConfigs
@@ -30,9 +31,7 @@ class MLLMBackbone(nn.Module):
 
         # 统一使用 AutoProcessor（包含 tokenizer + image_processor），
         # 避免 tokenizer 和 processor 分开创建导致 special token 不同步。
-        self.processor = AutoProcessor.from_pretrained(
-            self.config.qwen_model_name_or_path,
-        )
+        self.processor = self._build_processor(config)
         self.processor.tokenizer.padding_side = "right"
         self.tokenizer = self.processor.tokenizer
 
@@ -54,7 +53,13 @@ class MLLMBackbone(nn.Module):
         if getattr(self.config, "enable_point_encoder", False):
             point_encoder_ckpt = getattr(self.config, "point_encoder_pretrained", None)
             point_encoder_cfg = getattr(self.config, "point_encoder_pretrained_config", None)
-            if point_encoder_ckpt:
+            if getattr(self.config, "restore_from_checkpoint", False):
+                self.point_encoder = PointCloudEncoder(
+                    out_hidden_size=self.hidden_size,
+                    compute_dtype=self.config.compute_dtype,
+                    backbone_config=getattr(self.config, "point_encoder_backbone", None),
+                )
+            elif point_encoder_ckpt:
                 self.point_encoder = PointCloudEncoder.from_pretrained(
                     checkpoint_path=point_encoder_ckpt,
                     out_hidden_size=self.hidden_size,
@@ -68,10 +73,89 @@ class MLLMBackbone(nn.Module):
                     compute_dtype=self.config.compute_dtype,
                     backbone_config=getattr(self.config, "point_encoder_backbone", None),
                 )
+            self._sync_point_encoder_config()
         self.pc_anchor_token_id = self._resolve_token_id(DEFAULT_PC_TOKEN)
         self.pc_patch_token_id = self._resolve_token_id(DEFAULT_PC_PATCH_TOKEN)
 
         self.to(dtype=self.config.compute_dtype)
+
+    def _sync_point_encoder_config(self):
+        point_encoder = getattr(self, "point_encoder", None)
+        backbone_cfg = getattr(self.config, "point_encoder_backbone", None)
+        if point_encoder is None or backbone_cfg is None:
+            return
+
+        if hasattr(backbone_cfg, "update") and hasattr(point_encoder, "backbone_config_dict"):
+            backbone_cfg.update(point_encoder.backbone_config_dict)
+        elif hasattr(point_encoder, "backbone_config_dict"):
+            self.config.point_encoder_backbone = point_encoder.backbone_config_dict
+
+        pretrained_info = getattr(point_encoder, "pretrained_info", None)
+        if pretrained_info and pretrained_info.get("config_path"):
+            self.config.point_encoder_pretrained_config = pretrained_info["config_path"]
+
+    @staticmethod
+    def _write_temp_assets(root_dir: str, file_map: Optional[Dict[str, bytes]]) -> None:
+        for rel_path, content in (file_map or {}).items():
+            file_path = Path(root_dir) / rel_path
+            file_path.parent.mkdir(parents=True, exist_ok=True)
+            file_path.write_bytes(content)
+
+    def _build_processor(self, config: MLLMConfigs):
+        serialized_files = getattr(config, "serialized_processor_files", None)
+        if getattr(config, "restore_from_checkpoint", False) and serialized_files:
+            with tempfile.TemporaryDirectory(prefix="ja_processor_restore_") as tmpdir:
+                self._write_temp_assets(tmpdir, serialized_files)
+                return AutoProcessor.from_pretrained(tmpdir, local_files_only=True)
+        return AutoProcessor.from_pretrained(
+            self.config.qwen_model_name_or_path,
+        )
+
+    @staticmethod
+    def _resolve_qwen_model_class(class_name: Optional[str], model_name: str):
+        model_name_lower = (model_name or "").lower()
+        normalized = (class_name or "").strip()
+        if normalized == "Qwen3VLMoeForConditionalGeneration":
+            from transformers import Qwen3VLMoeForConditionalGeneration
+            return Qwen3VLMoeForConditionalGeneration
+        if normalized == "Qwen3VLForConditionalGeneration":
+            from transformers import Qwen3VLForConditionalGeneration
+            return Qwen3VLForConditionalGeneration
+        if normalized == "Qwen2_5_VLForConditionalGeneration":
+            from transformers import Qwen2_5_VLForConditionalGeneration
+            return Qwen2_5_VLForConditionalGeneration
+        if normalized == "Qwen2VLForConditionalGeneration":
+            from transformers import Qwen2VLForConditionalGeneration
+            return Qwen2VLForConditionalGeneration
+
+        if "qwen3" in model_name_lower and "a" in Path(model_name.rstrip("/")).name.lower():
+            from transformers import Qwen3VLMoeForConditionalGeneration
+            return Qwen3VLMoeForConditionalGeneration
+        if "qwen3" in model_name_lower:
+            from transformers import Qwen3VLForConditionalGeneration
+            return Qwen3VLForConditionalGeneration
+        if "qwen2.5" in model_name_lower:
+            from transformers import Qwen2_5_VLForConditionalGeneration
+            return Qwen2_5_VLForConditionalGeneration
+        from transformers import Qwen2VLForConditionalGeneration
+        return Qwen2VLForConditionalGeneration
+
+    def _build_qwen_from_serialized_config(self, config: MLLMConfigs):
+        serialized_files = getattr(config, "serialized_model_config_files", None)
+        if not serialized_files:
+            return None
+
+        with tempfile.TemporaryDirectory(prefix="ja_qwen_restore_") as tmpdir:
+            self._write_temp_assets(tmpdir, serialized_files)
+            config_obj = AutoConfig.from_pretrained(tmpdir, local_files_only=True)
+            if config.qwen_attn_implementation is not None:
+                setattr(config_obj, "_attn_implementation", config.qwen_attn_implementation)
+                setattr(config_obj, "attn_implementation", config.qwen_attn_implementation)
+            model_cls = self._resolve_qwen_model_class(
+                getattr(config, "serialized_model_class_name", None),
+                getattr(config, "qwen_model_name_or_path", ""),
+            )
+            return model_cls(config_obj)
 
     def _normalize_functional_tokens(self, candidate_tokens: dict) -> Tuple[Dict[str, str], Dict[str, str]]:
         """
@@ -144,34 +228,18 @@ class MLLMBackbone(nn.Module):
 
     def _build_qwen_model(self, config: MLLMConfigs):
         model_name = config.qwen_model_name_or_path
-        model_name_lower = model_name.lower()
         dtype = config.compute_dtype
+        restore_mode = bool(getattr(config, "restore_from_checkpoint", False))
 
-        # choose QwenVL version
-        if "qwen3" in model_name_lower and "a" in Path(model_name.rstrip("/")).name.lower():
-            from transformers import Qwen3VLMoeForConditionalGeneration
-            model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
+        model = None
+        if restore_mode:
+            model = self._build_qwen_from_serialized_config(config)
+        if model is None:
+            model_cls = self._resolve_qwen_model_class(
+                getattr(config, "serialized_model_class_name", None),
                 model_name,
-                attn_implementation=config.qwen_attn_implementation,
-                dtype=dtype,
             )
-        elif "qwen3" in model_name_lower:
-            from transformers import Qwen3VLForConditionalGeneration
-            model = Qwen3VLForConditionalGeneration.from_pretrained(
-                model_name,
-                attn_implementation=config.qwen_attn_implementation,
-                dtype=dtype,
-            )
-        elif "qwen2.5" in model_name_lower:
-            from transformers import Qwen2_5_VLForConditionalGeneration
-            model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
-                model_name,
-                attn_implementation=config.qwen_attn_implementation,
-                dtype=dtype,
-            )
-        else:
-            from transformers import Qwen2VLForConditionalGeneration
-            model = Qwen2VLForConditionalGeneration.from_pretrained(
+            model = model_cls.from_pretrained(
                 model_name,
                 attn_implementation=config.qwen_attn_implementation,
                 dtype=dtype,

@@ -113,6 +113,10 @@ class MLLMConfigs(Configs):
         "point_encoder_backbone": None,
         "point_encoder_pretrained": None,
         "point_encoder_pretrained_config": None,
+        "restore_from_checkpoint": False,
+        "serialized_processor_files": None,
+        "serialized_model_config_files": None,
+        "serialized_model_class_name": None,
     }
 
     def __init__(self, config_dict: Optional[Dict] = None, **overrides):

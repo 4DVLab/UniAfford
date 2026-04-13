@@ -82,6 +82,7 @@ class PointCloudEncoder(nn.Module):
         kwargs.pop("enc_mode", None)
         # PointCloudEncoder 固定走 encoder-only 路径，逐点特征通过 inverse 恢复得到。
         kwargs["enc_mode"] = True
+        self.backbone_config_dict = dict(kwargs)
         self.point_backbone = PointTransformerV3(**kwargs)
         enc_dim = int(kwargs.get("enc_channels", (32, 64, 128, 256, 512))[-1])
         self.enc_channels = tuple(kwargs.get("enc_channels", (32, 64, 128, 256, 512)))

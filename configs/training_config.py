@@ -293,6 +293,16 @@ class TrainingConfig(Configs):
 
         super().__init__(raw, model_config=model_config, deepspeed=deepspeed_config, lora=lora_config)
 
+    def to_json_dict(self, include_deepspeed: bool = True):
+        data = super().to_json_dict()
+        if not include_deepspeed:
+            data.pop("deepspeed", None)
+        return data
+
+    def save_json(self, path: str, include_deepspeed: bool = True):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_json_dict(include_deepspeed=include_deepspeed), f, ensure_ascii=False, indent=2)
+
     @classmethod
     def from_json_dict(cls, data: dict) -> "TrainingConfig":
         """从 JSON 字典恢复 TrainingConfig。"""
