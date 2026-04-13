@@ -58,8 +58,8 @@ class PointCloudEncoder(nn.Module):
     """
     将点云编码为两种不同语义的特征：
     1) `mllm_point_tokens`: 编码器末端的较短 token，供 MLLM 注入。
-    2) `per_point_features`: 可选地来自 PTv3 decoder，或来自 SONATA README 推荐的
-       encoder inverse 恢复结果，供 3D decoder 逐点做相似度。
+    2) `per_point_features`: 来自 SONATA README 推荐的 encoder inverse 恢复结果，
+       供 3D decoder 逐点做相似度。
 
     Notes:
     - 两者共享同一次 PTV3 backbone 前向，但语义职责不同，不能混用。
@@ -70,7 +70,6 @@ class PointCloudEncoder(nn.Module):
         out_hidden_size: int,
         compute_dtype: torch.dtype,
         backbone_config: Optional[Dict],
-        point_feature_source: str = "decoder",
     ):  
         super().__init__()
         if backbone_config is None:
@@ -81,21 +80,12 @@ class PointCloudEncoder(nn.Module):
             kwargs = dict(backbone_config)
 
         kwargs.pop("enc_mode", None)
-        # 这里启用解码器，并通过 PTV3 的 return_dual=True 同时拿到：
-        # 1) 编码器末端 enc_point（较短 token，给 MLLM）
-        # 2) 解码器末端 dec_point（逐点特征，给 3D decoder）
-        kwargs["enc_mode"] = False
+        # PointCloudEncoder 固定走 encoder-only 路径，逐点特征通过 inverse 恢复得到。
+        kwargs["enc_mode"] = True
         self.point_backbone = PointTransformerV3(**kwargs)
         enc_dim = int(kwargs.get("enc_channels", (32, 64, 128, 256, 512))[-1])
         self.enc_channels = tuple(kwargs.get("enc_channels", (32, 64, 128, 256, 512)))
-        self.dec_channels = tuple(kwargs.get("dec_channels", (64, 64, 128, 256)))
         self.in_channels = int(kwargs.get("in_channels", POINT_XYZ_CHANNELS))
-        self.point_feature_source = str(point_feature_source).strip().lower()
-        if self.point_feature_source not in {"decoder", "encoder_inverse"}:
-            raise ValueError(
-                "point_feature_source 仅支持 'decoder' 或 'encoder_inverse'，"
-                f"当前为 {point_feature_source!r}"
-            )
         self.point_feature_size = self._infer_point_feature_size()
         self.proj = nn.Linear(enc_dim, out_hidden_size)
         self.compute_dtype = compute_dtype
@@ -103,29 +93,8 @@ class PointCloudEncoder(nn.Module):
         self.to(dtype=compute_dtype)
 
     def _infer_point_feature_size(self) -> int:
-        if self.point_feature_source == "decoder":
-            return int(self.dec_channels[0]) if len(self.dec_channels) > 0 else int(self.enc_channels[-1])
-
         concat_levels = min(3, len(self.enc_channels))
         return int(sum(self.enc_channels[-concat_levels:]))
-
-    @staticmethod
-    def _debug_check_tensor(name: str, tensor: Optional[torch.Tensor]) -> None:
-        if tensor is None or not isinstance(tensor, torch.Tensor):
-            return
-        if torch.isfinite(tensor).all():
-            return
-        finite_mask = torch.isfinite(tensor)
-        finite_vals = tensor[finite_mask]
-        finite_min = float(finite_vals.min().item()) if finite_vals.numel() > 0 else float("nan")
-        finite_max = float(finite_vals.max().item()) if finite_vals.numel() > 0 else float("nan")
-        nan_count = int(torch.isnan(tensor).sum().item())
-        inf_count = int(torch.isinf(tensor).sum().item())
-        print(
-            "[PointCloudEncoder][NonFinite] "
-            f"{name}: shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
-            f"nan={nan_count}, inf={inf_count}, finite_min={finite_min:.6g}, finite_max={finite_max:.6g}"
-        )
 
     @staticmethod
     def _to_plain_backbone_config(backbone_config: Optional[Dict]) -> Dict[str, Any]:
@@ -253,7 +222,7 @@ class PointCloudEncoder(nn.Module):
         # SONATA 常见输入为 [coord, color, normal] 共 9 维；当前项目仅提供 xyz，
         # 因此保留预训练通道数，并在 forward 时仅写前 3 个通道，剩余通道固定为 0。
         merged_cfg["in_channels"] = pretrained_in_channels
-        merged_cfg["enc_mode"] = False
+        merged_cfg["enc_mode"] = True
         return merged_cfg, {
             "config_path": resolved_config_source,
             "copied_keys": copied_keys,
@@ -328,7 +297,6 @@ class PointCloudEncoder(nn.Module):
         out_hidden_size: int,
         compute_dtype: torch.dtype,
         backbone_config: Optional[Dict] = None,
-        point_feature_source: str = "decoder",
         pretrained_config_path: Optional[str] = None,
         map_location: str | torch.device = "cpu",
     ) -> "PointCloudEncoder":
@@ -342,7 +310,6 @@ class PointCloudEncoder(nn.Module):
             out_hidden_size=out_hidden_size,
             compute_dtype=compute_dtype,
             backbone_config=merged_cfg,
-            point_feature_source=point_feature_source,
         )
         encoder.pretrained_info = info
         encoder.load_pretrained(checkpoint_path, map_location=map_location)
@@ -464,9 +431,7 @@ class PointCloudEncoder(nn.Module):
         """
         单次 backbone 前向，输出两种尺度的特征：
         - mllm_point_tokens/mllm_point_token_mask: enc_point 产生的短 token，注入 MLLM
-        - per_point_features/per_point_mask:
-          * decoder 模式：使用 PTv3 decoder 恢复的逐点特征
-          * encoder_inverse 模式：使用 SONATA README 推荐的 inverse 恢复特征
+        - per_point_features/per_point_mask: 使用 SONATA README 推荐的 inverse 恢复特征
         """
         if point_clouds is None:
             return None
@@ -484,30 +449,17 @@ class PointCloudEncoder(nn.Module):
         point_clouds = point_clouds.to(self.compute_dtype)
         bsz = point_clouds.shape[0]
 
-        # Step 3. Pointcept 编码：
-        # - decoder 模式：沿当前 PTv3 decoder 路径同时拿到 enc_point 与 dec_point
-        # - encoder_inverse 模式：严格按 encoder-only 路径前向，避免 decoder 改写父层特征
+        # Step 3. Pointcept encoder-only 前向，避免引入 PTv3 decoder 路径。
         data_dict = self._build_pointcept_batch(point_clouds, in_channels=self.in_channels)
-        if self.point_feature_source == "decoder":
-            dual_out = self.point_backbone(data_dict, return_dual=True)
-            enc_point = dual_out["enc_point"]
-            dec_point = dual_out["dec_point"]
-        else:
-            enc_point = self._forward_encoder_only(data_dict)
-            dec_point = None
+        enc_point = self._forward_encoder_only(data_dict)
 
         # Step 4. enc_point -> 投影成 MLLM token。
-        # 逐点特征则按配置选择 decoder 输出或 encoder inverse 恢复结果。
+        # 逐点特征通过 SONATA README 推荐的 inverse 规则恢复。
         enc_feat = enc_point.feat.to(self.compute_dtype)     # [sum(K_i), C_enc]
         proj_feat = self.proj(enc_feat)                      # [sum(K_i), H_mllm]
-        if self.point_feature_source == "decoder":
-            assert dec_point is not None
-            point_feat = dec_point.feat.to(self.compute_dtype)
-            point_batch = dec_point.batch
-        else:
-            restored_feat, restored_batch = self._restore_encoder_point_features(enc_point)
-            point_feat = restored_feat.to(self.compute_dtype)
-            point_batch = restored_batch
+        restored_feat, restored_batch = self._restore_encoder_point_features(enc_point)
+        point_feat = restored_feat.to(self.compute_dtype)
+        point_batch = restored_batch
 
         # Step 5. 分别按 batch 拆回：
         # - enc/proj 列表：较短 token 序列

@@ -60,7 +60,6 @@ class MLLMBackbone(nn.Module):
                     out_hidden_size=self.hidden_size,
                     compute_dtype=self.config.compute_dtype,
                     backbone_config=getattr(self.config, "point_encoder_backbone", None),
-                    point_feature_source=getattr(self.config, "point_feature_source", "decoder"),
                     pretrained_config_path=point_encoder_cfg,
                 )
             else:
@@ -68,7 +67,6 @@ class MLLMBackbone(nn.Module):
                     out_hidden_size=self.hidden_size,
                     compute_dtype=self.config.compute_dtype,
                     backbone_config=getattr(self.config, "point_encoder_backbone", None),
-                    point_feature_source=getattr(self.config, "point_feature_source", "decoder"),
                 )
         self.pc_anchor_token_id = self._resolve_token_id(DEFAULT_PC_TOKEN)
         self.pc_patch_token_id = self._resolve_token_id(DEFAULT_PC_PATCH_TOKEN)

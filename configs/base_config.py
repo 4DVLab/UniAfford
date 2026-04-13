@@ -111,7 +111,6 @@ class MLLMConfigs(Configs):
         "functional_tokens": FUNCTIONAL_TOKENS,
         "enable_point_encoder": True,
         "point_encoder_backbone": None,
-        "point_feature_source": "decoder",
         "point_encoder_pretrained": None,
         "point_encoder_pretrained_config": None,
     }
@@ -180,6 +179,10 @@ class PointDecoderConfigs(Configs):
         "compute_dtype": "fp32",
         "hidden_size": 256,
         "num_heads": 8,
+        "share_encoder_backbone": True,
+        "grid_size": 0.02,
+        "backbone_kwargs": None,
+        "backbone_out_channels": 64,
     }
 
     def __init__(self, config_dict: Optional[Dict] = None, **overrides):
@@ -188,6 +191,18 @@ class PointDecoderConfigs(Configs):
             raw.update(config_dict)
         raw.update(overrides)
         raw["compute_dtype"] = resolve_dtype(raw.get("compute_dtype", self.defaults["compute_dtype"]))
+        backbone_kwargs = raw.get("backbone_kwargs", self.defaults["backbone_kwargs"])
+        if backbone_kwargs is None:
+            backbone_kwargs = PointEncoderBackboneConfigs().to_dict()
+        elif hasattr(backbone_kwargs, "to_dict"):
+            backbone_kwargs = backbone_kwargs.to_dict()
+        else:
+            backbone_kwargs = dict(backbone_kwargs)
+        backbone_kwargs["enc_mode"] = False
+        raw["backbone_kwargs"] = backbone_kwargs
+        if raw.get("backbone_out_channels", None) is None:
+            dec_channels = backbone_kwargs.get("dec_channels", PointEncoderBackboneConfigs.defaults["dec_channels"])
+            raw["backbone_out_channels"] = int(dec_channels[0])
         super().__init__(raw)
 
 

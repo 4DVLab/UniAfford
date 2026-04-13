@@ -7,7 +7,7 @@ import torch.nn as nn
 
 from configs import JointAffordanceConfig
 # from model.pointnet2 import PointCloudHiddenStateDecoder
-from model.pointcept import PointCloudHiddenStateDecoder
+from model.pointcept import PointCloudIndependentDecoder, PointCloudSharedBackboneDecoder
 from model.segment_anything import ImageHiddenStateDecoder
 from model.qwenvl import MLLMBackbone
 
@@ -33,11 +33,18 @@ class JointAffordanceModel(nn.Module):
             point_feature_size = int(getattr(self.config.mllm.point_encoder_backbone, "dec_channels", (64,))[0])
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
-        self.point_decoder = PointCloudHiddenStateDecoder(
-            self.config.point_decoder,
-            self.config.mllm.hidden_size,
-            point_feature_size=point_feature_size,
-        )
+        self.share_point_encoder_backbone = bool(getattr(self.config.point_decoder, "share_encoder_backbone", True))
+        if self.share_point_encoder_backbone:
+            self.point_decoder = PointCloudSharedBackboneDecoder(
+                self.config.point_decoder,
+                self.config.mllm.hidden_size,
+                point_feature_size=point_feature_size,
+            )
+        else:
+            self.point_decoder = PointCloudIndependentDecoder(
+                self.config.point_decoder,
+                self.config.mllm.hidden_size,
+            )
 
 
     @property
@@ -216,11 +223,16 @@ class JointAffordanceModel(nn.Module):
                 and point_encoder_outputs.get("per_point_features") is not None
                 and point_encoder_outputs.get("per_point_mask") is not None
             )
-            if has_per_point_features and point_clouds is not None:
+            if self.share_point_encoder_backbone and has_per_point_features and point_clouds is not None:
                 all_point_logits = self.point_decoder(
                     pred_embeddings=pc_emb,
                     per_point_features=point_encoder_outputs.get("per_point_features"),
                     per_point_mask=point_encoder_outputs.get("per_point_mask"),
+                )
+            elif (not self.share_point_encoder_backbone) and point_clouds is not None:
+                all_point_logits = self.point_decoder(
+                    pred_embeddings=pc_emb,
+                    point_clouds=point_clouds,
                 )
             else:
                 all_point_logits = None
@@ -264,5 +276,6 @@ __all__ = [
     "JointAffordanceModel",
     "MLLMBackbone",
     "ImageHiddenStateDecoder",
-    "PointCloudHiddenStateDecoder",
+    "PointCloudSharedBackboneDecoder",
+    "PointCloudIndependentDecoder",
 ]

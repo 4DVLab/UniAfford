@@ -59,16 +59,30 @@ def parse_args():
         help="SONATA point backbone 预训练配置路径；不传时默认尝试使用权重同目录下的 config.json",
     )
     parser.add_argument(
-        "--point_feature_source",
+        "--point_decoder_backbone_mode",
         type=str,
         default=None,
-        choices=["decoder", "encoder_inverse"],
-        help="3D 分支逐点特征来源：decoder 为当前 PTv3 decoder 输出，encoder_inverse 为 SONATA README 推荐的 inverse 恢复特征",
+        choices=["shared", "independent"],
+        help="3D decoder backbone 模式：shared 为与 encoder 共用基座，independent 为独立随机初始化 backbone",
     )
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
     return parser.parse_known_args()[0]
+
+
+def apply_point_decoder_backbone_mode(model_config, mode: str):
+    share_backbone = mode == "shared"
+    encoder_backbone_cfg = model_config.mllm.point_encoder_backbone.to_dict()
+    decoder_backbone_cfg = dict(encoder_backbone_cfg)
+    decoder_backbone_cfg["enc_mode"] = False
+    model_config.point_decoder.share_encoder_backbone = bool(share_backbone)
+    model_config.point_decoder.backbone_kwargs = decoder_backbone_cfg
+    model_config.point_decoder.backbone_out_channels = int(
+        decoder_backbone_cfg.get("dec_channels", (64,))[0]
+    )
+    if share_backbone:
+        model_config.mllm.enable_point_encoder = True
 
 
 # ===================== 模型初始化辅助 =====================
@@ -283,8 +297,12 @@ def main():
         model_config.mllm.point_encoder_pretrained = args.point_backbone_pretrained
     if args.point_backbone_pretrained_config:
         model_config.mllm.point_encoder_pretrained_config = args.point_backbone_pretrained_config
-    if args.point_feature_source:
-        model_config.mllm.point_feature_source = args.point_feature_source
+    decoder_backbone_mode = (
+        args.point_decoder_backbone_mode
+        if args.point_decoder_backbone_mode is not None
+        else ("shared" if bool(getattr(model_config.point_decoder, "share_encoder_backbone", True)) else "independent")
+    )
+    apply_point_decoder_backbone_mode(model_config, decoder_backbone_mode)
     if args.dataset_dir:
         training_configs.dataset_dir = args.dataset_dir
     if args.log_dir:
