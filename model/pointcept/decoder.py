@@ -89,22 +89,16 @@ class PointCloudHiddenStateDecoder(nn.Module):
         pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
         point_feat = per_point_features.to(self.config.compute_dtype)
         point_mask = per_point_mask.bool()
-        self._debug_check_tensor("input/pred_embeddings", pred_embeddings)
-        self._debug_check_tensor("input/per_point_features", point_feat)
 
         text_feat = F.normalize(self.project_hidden_states(pred_embeddings), p=2, dim=-1)  # [B, H]
         point_feat = self.point_proj(point_feat)  # [B, K, H]
-        self._debug_check_tensor("output/project_hidden_states", text_feat)
-        self._debug_check_tensor("output/point_proj", point_feat)
         point_feat = F.normalize(point_feat, p=2, dim=-1)
         point_feat = torch.where(point_mask.unsqueeze(-1), point_feat, torch.zeros_like(point_feat))
-        self._debug_check_tensor("output/point_feat_normalized", point_feat)
 
         # 逐点响应场：每个点特征直接与 aff query 做相似度。
         logits = (point_feat * text_feat.unsqueeze(1)).sum(dim=-1)  # [B, K]
         logits = logits * self.logit_scale.exp().clamp(min=1e-4, max=100.0)
         logits = torch.where(point_mask, logits, torch.zeros_like(logits))
-        self._debug_check_tensor("output/logits", logits)
         return logits
 
     def forward_with_loss(

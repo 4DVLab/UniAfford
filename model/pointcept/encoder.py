@@ -488,8 +488,6 @@ class PointCloudEncoder(nn.Module):
         # - decoder 模式：沿当前 PTv3 decoder 路径同时拿到 enc_point 与 dec_point
         # - encoder_inverse 模式：严格按 encoder-only 路径前向，避免 decoder 改写父层特征
         data_dict = self._build_pointcept_batch(point_clouds, in_channels=self.in_channels)
-        self._debug_check_tensor("input/point_clouds", point_clouds)
-        self._debug_check_tensor("input/feat", data_dict.get("feat"))
         if self.point_feature_source == "decoder":
             dual_out = self.point_backbone(data_dict, return_dual=True)
             enc_point = dual_out["enc_point"]
@@ -502,18 +500,14 @@ class PointCloudEncoder(nn.Module):
         # 逐点特征则按配置选择 decoder 输出或 encoder inverse 恢复结果。
         enc_feat = enc_point.feat.to(self.compute_dtype)     # [sum(K_i), C_enc]
         proj_feat = self.proj(enc_feat)                      # [sum(K_i), H_mllm]
-        self._debug_check_tensor("output/enc_feat", enc_feat)
-        self._debug_check_tensor("output/proj_feat", proj_feat)
         if self.point_feature_source == "decoder":
             assert dec_point is not None
             point_feat = dec_point.feat.to(self.compute_dtype)
             point_batch = dec_point.batch
-            self._debug_check_tensor("output/dec_feat", point_feat)
         else:
             restored_feat, restored_batch = self._restore_encoder_point_features(enc_point)
             point_feat = restored_feat.to(self.compute_dtype)
             point_batch = restored_batch
-            self._debug_check_tensor("output/restored_feat", point_feat)
 
         # Step 5. 分别按 batch 拆回：
         # - enc/proj 列表：较短 token 序列
@@ -579,9 +573,6 @@ class PointCloudEncoder(nn.Module):
                     )
                 per_point_features[i, :pt_len] = pts[:pt_len]
                 per_point_mask[i, :pt_len] = True
-
-        self._debug_check_tensor("output/mllm_point_tokens", mllm_point_tokens)
-        self._debug_check_tensor("output/per_point_features", per_point_features)
 
         return {
             "mllm_point_tokens": mllm_point_tokens,

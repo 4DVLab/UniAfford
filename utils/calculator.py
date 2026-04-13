@@ -221,43 +221,12 @@ def pc_loss(
         mask_3d_dice_loss: Dice损失
         mask_3d_loss: 加权总损失
     """
-    if not torch.isfinite(pred_3d_masks).all():
-        finite_mask = torch.isfinite(pred_3d_masks)
-        finite_vals = pred_3d_masks[finite_mask]
-        finite_min = float(finite_vals.min().item()) if finite_vals.numel() > 0 else float("nan")
-        finite_max = float(finite_vals.max().item()) if finite_vals.numel() > 0 else float("nan")
-        print(
-            "[pc_loss][NonFinite] pred_3d_masks: "
-            f"shape={tuple(pred_3d_masks.shape)}, dtype={pred_3d_masks.dtype}, "
-            f"nan={int(torch.isnan(pred_3d_masks).sum().item())}, "
-            f"inf={int(torch.isinf(pred_3d_masks).sum().item())}, "
-            f"finite_min={finite_min:.6g}, finite_max={finite_max:.6g}"
-        )
-    if not torch.isfinite(gt_3d_masks).all():
-        finite_mask = torch.isfinite(gt_3d_masks)
-        finite_vals = gt_3d_masks[finite_mask]
-        finite_min = float(finite_vals.min().item()) if finite_vals.numel() > 0 else float("nan")
-        finite_max = float(finite_vals.max().item()) if finite_vals.numel() > 0 else float("nan")
-        print(
-            "[pc_loss][NonFinite] gt_3d_masks: "
-            f"shape={tuple(gt_3d_masks.shape)}, dtype={gt_3d_masks.dtype}, "
-            f"nan={int(torch.isnan(gt_3d_masks).sum().item())}, "
-            f"inf={int(torch.isinf(gt_3d_masks).sum().item())}, "
-            f"finite_min={finite_min:.6g}, finite_max={finite_max:.6g}"
-        )
-
     # sigmoid_CE_loss 内部使用 binary_cross_entropy_with_logits，自带 sigmoid
     mask_3d_bce_loss = sigmoid_CE_loss(pred_3d_masks, gt_3d_masks)
     # dice_loss_heatmap 现在也会在 from_logits=True 时先做 sigmoid，保持一致
     mask_3d_dice_loss = dice_loss_heatmap(pred_3d_masks, gt_3d_masks, from_logits=from_logits)
     
     mask_3d_loss = bce_loss_weight * mask_3d_bce_loss + dice_loss_weight * mask_3d_dice_loss
-    if not torch.isfinite(mask_3d_bce_loss):
-        print(f"[pc_loss][NonFinite] mask_3d_bce_loss={mask_3d_bce_loss}")
-    if not torch.isfinite(mask_3d_dice_loss):
-        print(f"[pc_loss][NonFinite] mask_3d_dice_loss={mask_3d_dice_loss}")
-    if not torch.isfinite(mask_3d_loss):
-        print(f"[pc_loss][NonFinite] mask_3d_loss={mask_3d_loss}")
     
     return mask_3d_bce_loss, mask_3d_dice_loss, mask_3d_loss
 
