@@ -216,7 +216,9 @@ class PointCloudIndependentDecoder(nn.Module):
         pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
         point_clouds = point_clouds.to(self.config.compute_dtype)
 
-        text_feat = F.normalize(pred_embeddings, p=2, dim=-1)
+        # 与 shared decoder 保持一致：先把 LLM hidden 投影到 point decoder 的隐空间，
+        # 再与逐点特征做相似度，避免 text/point 维度不一致。
+        text_feat = F.normalize(self.project_hidden_states(pred_embeddings), p=2, dim=-1)
 
         data_dict = self._build_pointcept_batch(point_clouds, self.config.grid_size)
         point = self.point_backbone(data_dict)
