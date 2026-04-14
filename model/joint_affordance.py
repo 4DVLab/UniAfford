@@ -47,6 +47,13 @@ class JointAffordanceModel(nn.Module):
         self.functional_token_ids = self.mllm.functional_token_ids
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
+
+        self.point_encoder = getattr(self.mllm, "point_encoder", None)
+        if self.point_encoder is not None:
+            point_feature_size = int(getattr(self.point_encoder, "point_feature_size"))
+        else:
+            point_feature_size = int(getattr(self.config.mllm.point_encoder_backbone, "dec_channels", (64,))[0])
+
         self.share_point_encoder_backbone = bool(getattr(self.config.point_decoder, "share_encoder_backbone", True))
         if self.share_point_encoder_backbone:
             self.point_decoder = PointCloudSharedBackboneDecoder(
