@@ -462,20 +462,14 @@ def compute_losses(
         pc_placeholder_id=pc_placeholder_id,
         device=device,
     )
-    img_any_prob = output_dict.get("img_any_prob")
-    pc_any_prob = output_dict.get("pc_any_prob")
-    img_expected_count = output_dict.get("img_expected_count")
-    pc_expected_count = output_dict.get("pc_expected_count")
-    img_available = input_dict.get("img_valid_mask")
-    pc_valid_lengths = input_dict.get("pc_valid_lengths")
-    pc_available = (pc_valid_lengths > 0) if pc_valid_lengths is not None else None
+
     route_exist, route_sparse = route_structure_loss(
-        img_any_prob=img_any_prob,
-        pc_any_prob=pc_any_prob,
-        img_expected_count=img_expected_count,
-        pc_expected_count=pc_expected_count,
-        img_available=img_available,
-        pc_available=pc_available,
+        img_any_prob=output_dict.get("img_any_prob"),
+        pc_any_prob=output_dict.get("pc_any_prob"),
+        img_expected_count=output_dict.get("img_expected_count"),
+        pc_expected_count=output_dict.get("pc_expected_count"),
+        img_available=input_dict.get("img_valid_mask"),
+        pc_available=input_dict.get("pc_valid_lengths",0) > 0,
         device=device,
         target_present_count=route_target_present_count,
     )

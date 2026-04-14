@@ -41,24 +41,13 @@ def build_functional_tokens_from_samples(samples: List[JointDataSample]) -> Dict
 def build_functional_tokens_from_sample_ids(sample_ids: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
     """
     从 split/sample_ids 结构构建功能 token（无需加载大样本到内存）。
-    仅根据是否存在对应模态 id 判断是否注册 img/pc token。
+    router 架构下不再按 obj-aff 动态扩展 token；
+    仅根据是否存在对应模态样本，决定是否保留通用占位 token。
     """
-    token_map: Dict[str, Dict[str, str]] = {"img": {}, "pc": {}}
-    ins_map = sample_ids.get("Instruction", sample_ids.get("ins", {})) or {}
-    img_map = sample_ids.get("Image", sample_ids.get("img", {})) or {}
-    pc_map = sample_ids.get("PointCloud", sample_ids.get("pc", {})) or {}
-    all_obj = set(ins_map.keys()) | set(img_map.keys()) | set(pc_map.keys())
-    for obj_type in all_obj:
-        all_aff = set(ins_map.get(obj_type, {}).keys()) | set(img_map.get(obj_type, {}).keys()) | set(pc_map.get(obj_type, {}).keys())
-        for aff_type in all_aff:
-            pair_key = f"{obj_type}_{aff_type}"
-            if len(img_map.get(obj_type, {}).get(aff_type, [])) > 0:
-                img_name = f"img_{pair_key}"
-                token_map["img"][img_name] = f"<{img_name}>"
-            if len(pc_map.get(obj_type, {}).get(aff_type, [])) > 0:
-                pc_name = f"pc_{pair_key}"
-                token_map["pc"][pc_name] = f"<{pc_name}>"
-    return token_map
+    return {
+        "img": {"img_aff_token": "<img_aff>"},
+        "pc": {"pc_aff_token": "<pc_aff>"},
+    }
 
 
 class JointAffordanceTorchDataset(Dataset):
@@ -305,8 +294,7 @@ class JointAffordanceTorchDataset(Dataset):
             qwen_img_rgb = cv2.cvtColor(qwen_img, cv2.COLOR_BGR2RGB)
             pil_img = Image.fromarray(qwen_img_rgb)
         else:
-            # 无图样本也使用与训练一致的分辨率，避免同一 batch 内视觉 token 长度不一致
-            pil_img = Image.new("RGB", (self.image_size[0], self.image_size[1]), color=(0, 0, 0))
+            pil_img = Image.new("RGB", (28, 28), color=(0, 0, 0))
 
         result.update(self._build_qwen_inputs(question, answer, pil_img))
 
