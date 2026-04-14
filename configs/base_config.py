@@ -1,6 +1,7 @@
 """
 联合可供性模型配置，集中管理模型所需的全部配置项。
 """
+from copy import deepcopy
 import json
 import torch
 from typing import Optional, Dict
@@ -9,11 +10,19 @@ from utils.common import resolve_dtype, FUNCTIONAL_TOKENS
 class Configs:
     """基础配置类，提供快速属性更新能力。"""
 
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
+    defaults: Dict = {}
 
-    def update(self, **kwargs):
-        self.__dict__.update(kwargs)
+    def __init__(self, config_dict: Optional[Dict] = None, **overrides):
+        merged = deepcopy(self.defaults)
+        if config_dict is not None:
+            merged.update(config_dict)
+        merged.update(overrides)
+        self.__dict__.update(merged)
+
+    def update(self, config_dict: Optional[Dict] = None, **overrides):
+        if config_dict is not None:
+            self.__dict__.update(config_dict)
+        self.__dict__.update(overrides)
         return self
 
     def to_dict(self):
@@ -50,152 +59,192 @@ class Configs:
             json.dump(self.to_json_dict(), f, ensure_ascii=False, indent=2)
 
 
+class PointEncoderBackboneConfigs(Configs):
+    """点云编码器 backbone（SONATA / PTV3）相关配置。"""
+
+    defaults = {
+        "in_channels": 3,
+        "order": ("z", "z-trans"),
+        "stride": (2, 2, 2, 2),
+        "enc_depths": (2, 2, 2, 6, 2),
+        "enc_channels": (32, 64, 128, 256, 512),
+        "enc_num_head": (2, 4, 8, 16, 32),
+        "enc_patch_size": (128, 128, 128, 128, 128),
+        "dec_depths": (2, 2, 2, 2),
+        "dec_channels": (64, 64, 128, 256),
+        "dec_num_head": (4, 4, 8, 16),
+        "dec_patch_size": (128, 128, 128, 128),
+        "mlp_ratio": 4,
+        "qkv_bias": True,
+        "qk_scale": None,
+        "attn_drop": 0.0,
+        "proj_drop": 0.0,
+        "drop_path": 0.1,
+        "layer_scale": None,
+        "pre_norm": True,
+        "shuffle_orders": True,
+        "enable_rpe": False,
+        "enable_flash": False,
+        "upcast_attention": False,
+        "upcast_softmax": False,
+        "traceable": False,
+        "mask_token": False,
+        "enc_mode": False,
+        "freeze_encoder": False,
+    }
+
+
 class MLLMConfigs(Configs):
     """多模态大模型相关配置。"""
 
-    def __init__(
-        self,
-        qwen_model_name_or_path: str = "Qwen/Qwen3-VL-8B-Instruct",
-        qwen_attn_implementation: str = "flash_attention_2",
-        compute_dtype: str = "bf16",
-        model_max_length: int = 512,
-        vocab_size: int = 32000,
-        hidden_size: int = 4096,
-        num_heads: int = 8,
-        tokenizer: Optional[object] = None,
-        train_mask_decoder: bool = True,
-        out_dim: int = 256,
-        functional_tokens: dict = FUNCTIONAL_TOKENS,
-        enable_pc_prefix: bool = True,
-        point_prefix_backbone_kwargs: Optional[Dict] = None,
-        **kwargs,
-    ):
-        # 在fp32的时候禁用 flash_attention_2，因为flash_attention_2只支持bf16，在fp32的时候使用默认的attn_implementation
-        qwen_attn_implementation = qwen_attn_implementation if compute_dtype == 'bf16' else None
-        super().__init__(
-            qwen_model_name_or_path=qwen_model_name_or_path,
-            qwen_attn_implementation=qwen_attn_implementation,
-            compute_dtype=resolve_dtype(compute_dtype),
-            model_max_length=model_max_length,
-            vocab_size=vocab_size,
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            tokenizer=tokenizer,
-            train_mask_decoder=train_mask_decoder,
-            out_dim=out_dim,
-            functional_tokens=functional_tokens,
-            enable_pc_prefix=enable_pc_prefix,
-            point_prefix_backbone_kwargs=point_prefix_backbone_kwargs,
-            **kwargs,
-        )
+    defaults = {
+        "qwen_model_name_or_path": "Qwen/Qwen3-VL-8B-Instruct",
+        "qwen_attn_implementation": "flash_attention_2",
+        "compute_dtype": "bf16",
+        "model_max_length": 512,
+        "vocab_size": 32000,
+        "hidden_size": 4096,
+        "num_heads": 8,
+        "tokenizer": None,
+        "train_mask_decoder": True,
+        "out_dim": 256,
+        "functional_tokens": FUNCTIONAL_TOKENS,
+        "enable_point_encoder": True,
+        "point_encoder_backbone": None,
+        "point_encoder_pretrained": None,
+        "point_encoder_pretrained_config": None,
+        "restore_from_checkpoint": False,
+        "serialized_processor_files": None,
+        "serialized_model_config_files": None,
+        "serialized_model_class_name": None,
+    }
+
+    def __init__(self, config_dict: Optional[Dict] = None, **overrides):
+        raw = {}
+        if config_dict is not None:
+            raw.update(config_dict)
+        raw.update(overrides)
+
+        # 兼容旧命名，避免已有配置/权重元数据失效。
+        if "enable_pc_prefix" in raw and "enable_point_encoder" not in raw:
+            raw["enable_point_encoder"] = raw.pop("enable_pc_prefix")
+        if "point_prefix_backbone_kwargs" in raw and "point_encoder_backbone" not in raw:
+            raw["point_encoder_backbone"] = raw.pop("point_prefix_backbone_kwargs")
+
+        # 在 fp32 的时候禁用 flash_attention_2，因为 flash_attention_2 只支持 bf16。
+        compute_dtype = raw.get("compute_dtype", self.defaults["compute_dtype"])
+        resolved_dtype = resolve_dtype(compute_dtype)
+        raw["compute_dtype"] = resolved_dtype
+        if resolved_dtype != torch.bfloat16:
+            raw["qwen_attn_implementation"] = None
+
+        backbone_cfg = raw.get("point_encoder_backbone", None)
+        if backbone_cfg is None:
+            raw["point_encoder_backbone"] = PointEncoderBackboneConfigs()
+        elif isinstance(backbone_cfg, PointEncoderBackboneConfigs):
+            raw["point_encoder_backbone"] = backbone_cfg
+        else:
+            raw["point_encoder_backbone"] = PointEncoderBackboneConfigs(backbone_cfg)
+
+        super().__init__(raw)
 
 
 class ImageDecoderConfigs(Configs):
     """视觉编码器及对齐相关配置。"""
 
-    def __init__(
-        self,
-        compute_dtype: Optional[torch.dtype] = 'fp32',
-        hidden_size: int = 256,
-        num_heads: int = 8,
-        mm_vision_select_feature: str = "patch",
-        image_aspect_ratio: str = "square",
-        image_grid_pinpoints: Optional[object] = None,
-        image_out_dim: int = 1,
-        tune_mm_mlp_adapter: bool = False,
-        freeze_mm_mlp_adapter: bool = True,
-        pretrain_mm_mlp_adapter: Optional[str] = None,
-        mm_use_im_patch_token: bool = False,
-        use_cache: bool = False,
-        **kwargs,
-    ):  
-        super().__init__(
-            compute_dtype=resolve_dtype(compute_dtype),
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            mm_vision_select_feature=mm_vision_select_feature,
-            image_aspect_ratio=image_aspect_ratio,
-            image_grid_pinpoints=image_grid_pinpoints,
-            image_out_dim=image_out_dim,
-            tune_mm_mlp_adapter=tune_mm_mlp_adapter,
-            freeze_mm_mlp_adapter=freeze_mm_mlp_adapter,
-            pretrain_mm_mlp_adapter=pretrain_mm_mlp_adapter,
-            mm_use_im_patch_token=mm_use_im_patch_token,
-            use_cache=use_cache,
-            **kwargs,
-        )
+    defaults = {
+        "compute_dtype": "fp32",
+        "hidden_size": 256,
+        "num_heads": 8,
+        "mm_vision_select_feature": "patch",
+        "image_aspect_ratio": "square",
+        "image_grid_pinpoints": None,
+        "image_out_dim": 1,
+        "tune_mm_mlp_adapter": False,
+        "freeze_mm_mlp_adapter": True,
+        "pretrain_mm_mlp_adapter": None,
+        "mm_use_im_patch_token": False,
+        "use_cache": False,
+    }
+
+    def __init__(self, config_dict: Optional[Dict] = None, **overrides):
+        raw = {}
+        if config_dict is not None:
+            raw.update(config_dict)
+        raw.update(overrides)
+        raw["compute_dtype"] = resolve_dtype(raw.get("compute_dtype", self.defaults["compute_dtype"]))
+        super().__init__(raw)
 
 
 class PointDecoderConfigs(Configs):
     """图像/点云解码器相关配置。"""
 
-    def __init__(
-        self,
-        compute_dtype: Optional[torch.dtype] = 'fp32',
-        hidden_size: int = 256,
-        num_heads: int = 8,
-        grid_size: float = 0.02,
-        backbone_out_channels: int = 64,
-        backbone_kwargs: Optional[Dict] = None,
-        # point_out_dim: int = None, # 为空则可以适配任意点数的输入输出
-        **kwargs,
-    ):
+    defaults = {
+        "compute_dtype": "fp32",
+        "hidden_size": 256,
+        "num_heads": 8,
+        "share_encoder_backbone": True,
+        "grid_size": 0.02,
+        "backbone_kwargs": None,
+        "backbone_out_channels": 64,
+    }
+
+    def __init__(self, config_dict: Optional[Dict] = None, **overrides):
+        raw = {}
+        if config_dict is not None:
+            raw.update(config_dict)
+        raw.update(overrides)
+        raw["compute_dtype"] = resolve_dtype(raw.get("compute_dtype", self.defaults["compute_dtype"]))
+        backbone_kwargs = raw.get("backbone_kwargs", self.defaults["backbone_kwargs"])
         if backbone_kwargs is None:
-            backbone_kwargs = dict(
-                in_channels=3,
-                order=("z", "z-trans"),
-                stride=(2, 2, 2, 2),
-                enc_depths=(2, 2, 2, 6, 2),
-                enc_channels=(32, 64, 128, 256, 512),
-                enc_num_head=(2, 4, 8, 16, 32),
-                enc_patch_size=(128, 128, 128, 128, 128),
-                dec_depths=(2, 2, 2, 2),
-                dec_channels=(64, 64, 128, 256),
-                dec_num_head=(4, 4, 8, 16),
-                dec_patch_size=(128, 128, 128, 128),
-                mlp_ratio=4,
-                qkv_bias=True,
-                qk_scale=None,
-                attn_drop=0.0,
-                proj_drop=0.0,
-                drop_path=0.1,
-                layer_scale=None,
-                pre_norm=True,
-                shuffle_orders=True,
-                enable_rpe=False,
-                enable_flash=False,
-                upcast_attention=False,
-                upcast_softmax=False,
-                traceable=False,
-                mask_token=False,
-                enc_mode=False,
-                freeze_encoder=False,
-            )
-        super().__init__(
-            compute_dtype=resolve_dtype(compute_dtype),
-            hidden_size=hidden_size,
-            num_heads=num_heads,
-            grid_size=grid_size,
-            backbone_out_channels=backbone_out_channels,
-            backbone_kwargs=backbone_kwargs,
-            # point_out_dim=point_out_dim,
-            **kwargs,
-        )
-        
+            backbone_kwargs = PointEncoderBackboneConfigs().to_dict()
+        elif hasattr(backbone_kwargs, "to_dict"):
+            backbone_kwargs = backbone_kwargs.to_dict()
+        else:
+            backbone_kwargs = dict(backbone_kwargs)
+        backbone_kwargs["enc_mode"] = False
+        raw["backbone_kwargs"] = backbone_kwargs
+        if raw.get("backbone_out_channels", None) is None:
+            dec_channels = backbone_kwargs.get("dec_channels", PointEncoderBackboneConfigs.defaults["dec_channels"])
+            raw["backbone_out_channels"] = int(dec_channels[0])
+        super().__init__(raw)
+
 
 class JointAffordanceConfig(Configs):
     """联合可供性模型的配置类。"""
+
     def __init__(
         self,
-        mllm_config:Optional[MLLMConfigs] = None,
-        image_decoder: Optional[ImageDecoderConfigs] = None,
-        point_decoder: Optional[PointDecoderConfigs] = None,
+        config_dict: Optional[Dict] = None,
+        mllm_config: Optional[MLLMConfigs | Dict] = None,
+        image_decoder: Optional[ImageDecoderConfigs | Dict] = None,
+        point_decoder: Optional[PointDecoderConfigs | Dict] = None,
         **kwargs,
-    ):  
-        super().__init__(**kwargs)
-        self.mllm = mllm_config or MLLMConfigs()
-        self.image_decoder = image_decoder or ImageDecoderConfigs()
-        self.point_decoder = point_decoder or PointDecoderConfigs()
+    ):
+        raw = {}
+        if config_dict is not None:
+            raw.update(config_dict)
+        raw.update(kwargs)
+
+        # 兼容不同命名风格：mllm / mllm_config
+        if mllm_config is None and "mllm" in raw:
+            mllm_config = raw.pop("mllm")
+        if mllm_config is None and "mllm_config" in raw:
+            mllm_config = raw.pop("mllm_config")
+        if image_decoder is None and "image_decoder" in raw:
+            image_decoder = raw.pop("image_decoder")
+        if point_decoder is None and "point_decoder" in raw:
+            point_decoder = raw.pop("point_decoder")
+
+        super().__init__(raw)
+
+        self.mllm = mllm_config if isinstance(mllm_config, MLLMConfigs) else MLLMConfigs(mllm_config)
+        self.image_decoder = (
+            image_decoder if isinstance(image_decoder, ImageDecoderConfigs) else ImageDecoderConfigs(image_decoder)
+        )
+        self.point_decoder = (
+            point_decoder if isinstance(point_decoder, PointDecoderConfigs) else PointDecoderConfigs(point_decoder)
+        )
 
         if self.mllm is not None:
             self.tokenizer = self.mllm.tokenizer
@@ -207,9 +256,9 @@ class JointAffordanceConfig(Configs):
         raise AttributeError(f"{type(self).__name__} has no attribute '{name}'")
 
 
-
 __all__ = [
     "Configs",
+    "PointEncoderBackboneConfigs",
     "MLLMConfigs",
     "ImageDecoderConfigs",
     "PointDecoderConfigs",

@@ -18,19 +18,17 @@ import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 import numpy as np
-from peft import get_peft_model
 import cv2
 
 from configs import TrainingConfig
 from configs.inference_config import InferenceConfig
-from model.joint_affordance import JointAffordanceModel
 from utils.base_dataset import JointDataset
 from utils.dataset import (
     JointAffordanceTorchDataset,
     joint_affordance_collate_fn,
 )
 from utils.common import dict_to_cuda
-from utils.checkpoint_utils import load_checkpoint_to_model
+from utils.model_io import load_portable_model
 from utils import calculator as calc
 from utils.metrics import (
     build_torchmetrics_bundle,
@@ -101,7 +99,7 @@ def build_dataloader_for_split(
 
     joint_dataset = JointDataset(
         dataset_root=training_cfg.dataset_dir,
-        split_file=f'test.json',
+        split_file=f"{infer_cfg.split}.json",
     ).load_all_data()
     torch_dataset = JointAffordanceTorchDataset(
         joint_dataset.samples,
@@ -441,20 +439,20 @@ def main():
     device = torch.device(infer_cfg.device if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}\n")
 
-    # 初始化模型
-    model_cfg = training_cfg.model_config
     if args.qwen_model:
-        model_cfg.mllm.qwen_model_name_or_path = args.qwen_model
+        training_cfg.model_config.mllm.qwen_model_name_or_path = args.qwen_model
     if args.vision_pretrained:
-        model_cfg.image_decoder.vision_pretrained = args.vision_pretrained
+        training_cfg.model_config.image_decoder.vision_pretrained = args.vision_pretrained
 
-    model = JointAffordanceModel(model_cfg).to(device)
-    # 应用lora
-    if training_cfg.lora.lora_r > 0:
-        model.mllm.model = get_peft_model(model.mllm.model, training_cfg.lora.to_peft_config())
-
-    load_checkpoint_to_model(model, args.checkpoint_path, map_location="cpu")
-    model.to(device)
+    model, training_cfg, _ = load_portable_model(
+        args.checkpoint_path,
+        config_json_path=cfg_json_path,
+        training_cfg=training_cfg,
+        map_location="cpu",
+        device=device,
+        strict=False,
+    )
+    model_cfg = training_cfg.model_config
     model.eval()
 
     # DataLoader
@@ -508,6 +506,12 @@ def main():
             pred_token_ids_batch = output_dict.get("token_ids")
             if pred_token_ids_batch is not None:
                 pred_token_ids_batch = pred_token_ids_batch.detach().cpu()
+            aligned_labels_batch = output_dict.get("labels")
+            if isinstance(aligned_labels_batch, torch.Tensor):
+                aligned_labels_batch = aligned_labels_batch.detach().cpu()
+            aligned_attention_batch = output_dict.get("attention_mask")
+            if isinstance(aligned_attention_batch, torch.Tensor):
+                aligned_attention_batch = aligned_attention_batch.detach().cpu()
 
             # ---- 逐样本记录 ----
             batch_size = input_dict["input_ids"].shape[0]
@@ -528,8 +532,14 @@ def main():
                 }
 
                 # GT 文本：从 labels 中提取非 IGNORE 的 token ids 解码
-                labels_i = input_dict["labels"][i].cpu()
+                # 关键：优先使用模型返回的对齐 labels（已包含点云动态注入后的位点变化）
+                if isinstance(aligned_labels_batch, torch.Tensor) and aligned_labels_batch.shape[0] > i:
+                    labels_i = aligned_labels_batch[i]
+                else:
+                    labels_i = input_dict["labels"][i].cpu()
                 answer_mask = labels_i != IGNORE_INDEX
+                if isinstance(aligned_attention_batch, torch.Tensor) and aligned_attention_batch.shape[0] > i:
+                    answer_mask = answer_mask & aligned_attention_batch[i].bool()
                 supervised_pos = torch.nonzero(answer_mask, as_tuple=False).squeeze(-1)
                 gt_ids = labels_i[supervised_pos].tolist()
                 record["gt_text"] = tokenizer.decode(gt_ids, skip_special_tokens=False)

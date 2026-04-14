@@ -17,10 +17,18 @@ DEFAULT_IMAGE_PATCH_TOKEN = "<image_pad>"
 DEFAULT_IM_START_TOKEN = "<im_start>"
 DEFAULT_IM_END_TOKEN = "<im_end>"
 
+# Qwen-VL 常见视觉相关 token（不同版本命名可能略有差异，保留便于比对）
+QWEN_VL_VISION_START_TOKEN = "<|vision_start|>"
+QWEN_VL_VISION_END_TOKEN = "<|vision_end|>"
+QWEN_VL_IMAGE_PAD_TOKEN = "<|image_pad|>"
+QWEN_VL_VIDEO_PAD_TOKEN = "<|video_pad|>"
+
 # 点云相关常量
 DEFAULT_PC_TOKEN = "<pointcloud>"
-DEFAULT_PC_START_TOKEN = "<pc_start>"
-DEFAULT_PC_END_TOKEN = "<pc_end>"
+# 与 Qwen 视觉 token 风格对齐，统一采用 <|...|> 形式
+DEFAULT_PC_PATCH_TOKEN = "<|point_pad|>"
+DEFAULT_PC_START_TOKEN = "<|pc_start|>"
+DEFAULT_PC_END_TOKEN = "<|pc_end|>"
 
 # 用于下游分割任务的功能性 token。
 # 结构：

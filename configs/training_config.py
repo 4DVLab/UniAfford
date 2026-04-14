@@ -3,7 +3,7 @@ NOTE: 所有的相对目录都是基于项目（仓库）根目录而言
 """
 import os
 import json
-from re import S
+from copy import deepcopy
 from typing import List, Optional, Union
 
 import torch
@@ -15,71 +15,44 @@ from .base_config import Configs, ImageDecoderConfigs, JointAffordanceConfig, ML
 class DeepSpeedConfigs(Configs):
     """DeepSpeed 相关配置，所有项以属性存储，通过 to_dict() 转为 DeepSpeed 所需字典。"""
 
-    def __init__(
-        self,
+    defaults = {
         # 与 DeepSpeed 顶层键对应的属性
-        train_micro_batch_size_per_gpu: int = 1,
-        gradient_accumulation_steps: int = 1,
-        precision: Optional[torch.dtype] = 'fp32',
-        gradient_clipping: float = 1.0,
-
+        "train_micro_batch_size_per_gpu": 1,
+        "gradient_accumulation_steps": 1,
+        "precision": "fp32",
+        "gradient_clipping": 1.0,
         # zero_optimization 相关（默认 ZeRO-3：模型+优化器+梯度全分片）
-        zero_stage: int = 3,
-        allgather_partitions: bool = True,
-        allgather_bucket_size: float = 5e8,
-        overlap_comm: bool = True,
-        reduce_scatter: bool = True,
-        reduce_bucket_size: float = 5e8,
-        contiguous_gradients: bool = True,
+        "zero_stage": 3,
+        "allgather_partitions": True,
+        "allgather_bucket_size": 5e8,
+        "overlap_comm": True,
+        "reduce_scatter": True,
+        "reduce_bucket_size": 5e8,
+        "contiguous_gradients": True,
         # 优化器 Offload（显存不足时把优化器状态放 CPU）
-        offload_optimizer_device: str = "cpu",
-        offload_optimizer_pin_memory: bool = True,
-        # # 模型参数 Offload（大模型冷参数放 CPU）
-        # offload_param_device: str = "cpu",
-        # offload_param_pin_memory: bool = True,
+        "offload_optimizer_device": "cpu",
+        "offload_optimizer_pin_memory": True,
         # 是否使用分层学习率（为 True 时不写 optimizer/scheduler）
-        use_layerwise_lr: bool = True,
+        "use_layerwise_lr": True,
         # optimizer / scheduler 用到的训练参数
-        lr: float = 0.003,
-        weight_decay: float = 0.0,
-        beta1: float = 0.9,
-        beta2: float = 0.95,
-        epochs: int = 250,
-        steps_per_epoch: Optional[int] = None,
-        warmup_min_lr: float = 0.0,
-        warmup_num_steps: int = 100,
-        warmup_type: str = "linear",
-        **kwargs,
-    ):
-        precision = resolve_dtype(precision)
-        super().__init__(
-            train_micro_batch_size_per_gpu=train_micro_batch_size_per_gpu,
-            gradient_accumulation_steps=gradient_accumulation_steps,
-            precision=precision,
-            gradient_clipping=gradient_clipping,
-            zero_stage=zero_stage,
-            allgather_partitions=allgather_partitions,
-            allgather_bucket_size=allgather_bucket_size,
-            overlap_comm=overlap_comm,
-            reduce_scatter=reduce_scatter,
-            reduce_bucket_size=reduce_bucket_size,
-            contiguous_gradients=contiguous_gradients,
-            offload_optimizer_device=offload_optimizer_device,
-            offload_optimizer_pin_memory=offload_optimizer_pin_memory,
-            # offload_param_device=offload_param_device,
-            # offload_param_pin_memory=offload_param_pin_memory,
-            use_layerwise_lr=use_layerwise_lr,
-            lr=lr,
-            weight_decay=weight_decay,
-            beta1=beta1,
-            beta2=beta2,
-            epochs=epochs,
-            steps_per_epoch=steps_per_epoch,
-            warmup_min_lr=warmup_min_lr,
-            warmup_num_steps=warmup_num_steps,
-            warmup_type=warmup_type,
-            **kwargs,
-        )
+        "lr": 0.003,
+        "weight_decay": 0.0,
+        "beta1": 0.9,
+        "beta2": 0.95,
+        "epochs": 250,
+        "steps_per_epoch": None,
+        "warmup_min_lr": 0.0,
+        "warmup_num_steps": 100,
+        "warmup_type": "linear",
+    }
+
+    def __init__(self, config_dict: Optional[dict] = None, **overrides):
+        raw = {}
+        if config_dict is not None:
+            raw.update(config_dict)
+        raw.update(overrides)
+        raw["precision"] = resolve_dtype(raw.get("precision", self.defaults["precision"]))
+        super().__init__(raw)
 
     def to_dict(self) -> dict:
         """将当前属性转换为 DeepSpeed 配置字典（嵌套结构）。"""
@@ -136,25 +109,27 @@ class LoRAConfigs(Configs):
     - to_peft_config()：返回 peft.LoraConfig，供 get_peft_model 等直接使用。
     """
 
-    def __init__(
-        self,
-        lora_r: int = 8,
-        lora_alpha: int = 16,
-        lora_dropout: float = 0.05,
-        lora_target_modules: Union[str, List[str]] = "q_proj, k_proj, v_proj, o_proj",
-        bias: str = "none",
-        task_type: str = "CAUSAL_LM",
-        **kwargs,
-    ):
-        super().__init__(
-            lora_r=lora_r,
-            lora_alpha=lora_alpha,
-            lora_dropout=lora_dropout,
-            lora_target_modules=lora_target_modules if isinstance(lora_target_modules, list) else [m.strip() for m in lora_target_modules.split(",") if m.strip()],
-            bias=bias,
-            task_type=task_type,
-            **kwargs,
+    defaults = {
+        "lora_r": 8,
+        "lora_alpha": 16,
+        "lora_dropout": 0.05,
+        "lora_target_modules": "q_proj, k_proj, v_proj, o_proj",
+        "bias": "none",
+        "task_type": "CAUSAL_LM",
+    }
+
+    def __init__(self, config_dict: Optional[dict] = None, **overrides):
+        raw = {}
+        if config_dict is not None:
+            raw.update(config_dict)
+        raw.update(overrides)
+        target_modules = raw.get("lora_target_modules", self.defaults["lora_target_modules"])
+        raw["lora_target_modules"] = (
+            target_modules
+            if isinstance(target_modules, list)
+            else [m.strip() for m in str(target_modules).split(",") if m.strip()]
         )
+        super().__init__(raw)
 
     def to_dict(self) -> dict:
         """属性转成普通字典，便于序列化或日志。"""
@@ -183,180 +158,150 @@ class TrainingConfig(Configs):
     """
     训练配置类，用于存储模型训练的所有超参数。详细说明见同目录下README.md
     """
-    
+    defaults = {
+        # 基础配置
+        "local_rank": 0,
+        "vis_save_path": "./vis_output",
+        # 数据配置
+        "dataset_dir": "../datasets/merged1-2-3/",
+        "log_base_dir": "../runs",
+        "exp_name": "joint-aff-exp",
+        "image_size": (1024, 1024),
+        "num_points": 2048,
+        "train_ratio": 0.7,
+        "val_ratio": 0.15,
+        "test_ratio": 0.15,
+        "use_sample_cache": False,  # 是否启用样本缓存以提高数据加载速度，适用于小批量数据且显存充裕的情况
+        # 训练配置
+        "epochs": 250,
+        "samples_per_epoch": None,  # 数据大时设置为训练数据集的 70% 以上，比较小时设置为 90%以上。默认全量训练数据集
+        "steps_per_epoch": None,
+        "batch_size": 1,  # 每卡 batch 大小
+        "grad_accumulation_steps": 1,
+        "val_batch_size": 10,  # 验证时每卡 batch 大小
+        "workers": 4,
+        "print_freq": 1,
+        # 微调 mllm，其他全部需要训练
+        "name_of_params_to_train": "lm_head, embed_tokens, image_decoder, point_decoder, text_hidden_fcs",
+        # 优化器配置
+        "lr": 1e-3,
+        "beta1": 0.9,
+        "beta2": 0.95,
+        "weight_decay": 0.0,
+        # 分层学习率（可选）
+        "use_layerwise_lr": True,
+        "llm_lr": None,        # 默认为 lr * 0.01
+        "vision_2d_lr": None,  # 默认为 lr
+        "vision_3d_lr": None,  # 默认为 lr
+        # 学习率调度器配置
+        "warmup_num_steps": 100,
+        "warmup_min_lr": 0,
+        "warmup_type": "linear",
+        # 其他配置
+        "num_classes_per_sample": 3,
+        "mask_threshold_2d": 0.5,
+        "mask_threshold_3d": 0.5,
+        "gradient_checkpointing": True,
+        # 损失配置
+        "focal_loss_weight": 2.0,
+        "dice_loss_weight": 0.5,
+        "focal_alpha": 0.25,
+        "focal_gamma": 2.0,
+        "bce_loss_weight": 2.0,
+        "pc_dice_loss_weight": 0.5,
+        "ce_loss_weight": 1.0,
+        # 高级配置
+        "exclude_val": False,
+        "no_eval": False,
+        "eval_only": False,
+        "auto_resume": True,
+        "resume": "",
+        "start_epoch": 0,
+        # 运行时属性
+        "distributed": False,
+    }
+
     def __init__(
         self,
-        # 基础配置
-        local_rank=0,
-        model_config: Optional[JointAffordanceConfig] = None,
-        deepspeed_config: Optional[DeepSpeedConfigs] = None,
-        lora_config: Optional[LoRAConfigs] = None,
-        
-        # 数据配置
-        dataset_dir="../datasets/merged1-2-3/",
-        log_base_dir="../runs",
-        exp_name="joint-aff-exp",
-        image_size=(1024,1024),
-        num_points=2048,
-        train_ratio=0.7,
-        val_ratio=0.15,
-        test_ratio=0.15,
-        use_sample_cache=False,  # 是否启用样本缓存以提高数据加载速度，适用于小批量数据且显存充裕的情况
-        
-        # 训练配置
-        epochs=250,
-        samples_per_epoch=None,  # 数据大时设置为训练数据集的 70% 以上，比较小时设置为 90%以上。默认全量训练数据集
-        steps_per_epoch=None,
-        batch_size=1,  # 每卡 batch 大小
-        grad_accumulation_steps=1,
-        val_batch_size=10,  # 验证时每卡 batch 大小
-        workers=4,
-        print_freq=1,
-        # 微调 mllm，其他全部需要训练
-        name_of_params_to_train: Union[str, List[str]] = "lm_head, embed_tokens, image_decoder, point_decoder, text_hidden_fcs",
-
-        # 优化器配置
-        lr=1e-3,
-        beta1=0.9,
-        beta2=0.95,
-        weight_decay=0.0,
-        
-        # 分层学习率（可选）
-        use_layerwise_lr=True,
-        llm_lr=None,        # 默认为 lr * 0.01
-        vision_2d_lr=None,  # 默认为 lr
-        vision_3d_lr=None,  # 默认为 lr
-        
-        # 学习率调度器配置
-        warmup_num_steps=100,
-        warmup_min_lr=0,
-        warmup_type="linear",
-        
-        # 其他配置
-        num_classes_per_sample=3,
-        mask_threshold_2d=0.5,
-        mask_threshold_3d=0.5,
-        gradient_checkpointing=True,
-        
-        # 损失配置
-        focal_loss_weight=2.0,
-        dice_loss_weight=0.5,
-        focal_alpha=0.25,
-        focal_gamma=2.0,
-        bce_loss_weight=2.0,
-        pc_dice_loss_weight=0.5,
-        ce_loss_weight=1.0,
-        route_loss_weight=1.0,
-        route_exist_loss_weight=0.25,
-        route_sparse_loss_weight=0.05,
-        route_target_present_count=1.0,
-        
-        # 高级配置
-        exclude_val=False,
-        no_eval=False,
-        eval_only=False,
-        auto_resume=True,
-        resume="",
-        start_epoch=0,
-        vis_save_path="./vis_output",
+        config_dict: Optional[dict] = None,
+        model_config: Optional[JointAffordanceConfig | dict] = None,
+        deepspeed_config: Optional[DeepSpeedConfigs | dict] = None,
+        lora_config: Optional[LoRAConfigs | dict] = None,
         **kwargs,
-    ):  
-        if samples_per_epoch is not None and steps_per_epoch is None:
-            # 仅作为初始化兜底；train_fsdp.py 会在构建 DataLoader 后用真实值覆盖。
-            steps_per_epoch = max(1, (samples_per_epoch + batch_size - 1) // max(1, batch_size))
+    ):
+        raw = {}
+        if config_dict is not None:
+            raw.update(config_dict)
+        raw.update(kwargs)
 
-        deepspeed_config = deepspeed_config or DeepSpeedConfigs()
-        lora_config = lora_config or LoRAConfigs()
+        if model_config is None and "model_config" in raw:
+            model_config = raw.pop("model_config")
+        if deepspeed_config is None and "deepspeed_config" in raw:
+            deepspeed_config = raw.pop("deepspeed_config")
+        if deepspeed_config is None and "deepspeed" in raw:
+            deepspeed_config = raw.pop("deepspeed")
+        if lora_config is None and "lora_config" in raw:
+            lora_config = raw.pop("lora_config")
+        if lora_config is None and "lora" in raw:
+            lora_config = raw.pop("lora")
 
         if model_config is None:
             model_config = JointAffordanceConfig(
-                mllm_config=MLLMConfigs(compute_dtype='fp32'),  # Qwen必须使用bf16以使用flash-attn
-                image_decoder=ImageDecoderConfigs(compute_dtype='fp32'),  # 分布式训练要求保持参数精度一致
-                point_decoder=PointDecoderConfigs(compute_dtype='fp32'),
+                mllm_config=MLLMConfigs(compute_dtype="fp32"),  # Qwen必须使用bf16以使用flash-attn
+                image_decoder=ImageDecoderConfigs(compute_dtype="fp32"),  # 分布式训练要求保持参数精度一致
+                point_decoder=PointDecoderConfigs(compute_dtype="fp32"),
             )
-        
-        super().__init__(
-            # 基础配置
-            local_rank = local_rank,
+        elif not isinstance(model_config, JointAffordanceConfig):
+            model_config = JointAffordanceConfig(model_config)
 
-            model_config = model_config,
-            deepspeed = deepspeed_config,
-            lora = lora_config,
-            vis_save_path = vis_save_path,
-            
-            # 数据配置
-            dataset_dir = dataset_dir,
-            log_base_dir = log_base_dir,
-            exp_name = exp_name,
-            image_size = image_size,
-            num_points = num_points,
-            train_ratio = train_ratio,
-            val_ratio = val_ratio,
-            test_ratio = test_ratio,
-            use_sample_cache = use_sample_cache,
-            
-            # 训练配置
-            epochs = epochs,
-            steps_per_epoch = steps_per_epoch ,
-            samples_per_epoch = samples_per_epoch,
-            
-            batch_size = batch_size,
-            grad_accumulation_steps = grad_accumulation_steps,
-            val_batch_size = val_batch_size,
-            workers = workers,
-            print_freq = print_freq,
-            name_of_params_to_train = name_of_params_to_train if isinstance(name_of_params_to_train, list) else [m.strip() for m in name_of_params_to_train.split(",") if m.strip()],
-            
-            # 优化器配置
-            lr = lr,
-            beta1 = beta1,
-            beta2 = beta2,
-            weight_decay = weight_decay,
-            
-            # 分层学习率
-            use_layerwise_lr = use_layerwise_lr,
-            llm_lr = llm_lr if llm_lr is not None else lr * 0.01,
-            vision_2d_lr = vision_2d_lr if vision_2d_lr is not None else lr,
-            vision_3d_lr = vision_3d_lr if vision_3d_lr is not None else lr,
-            
-            # 学习率调度器配置
-            warmup_num_steps = warmup_num_steps,
-            warmup_min_lr = warmup_min_lr,
-            warmup_type = warmup_type,
-
-            
-            # 其他配置
-            num_classes_per_sample = num_classes_per_sample,
-            mask_threshold_2d = mask_threshold_2d,
-            mask_threshold_3d = mask_threshold_3d,
-            gradient_checkpointing = gradient_checkpointing,
-            
-            # 损失配置
-            focal_loss_weight = focal_loss_weight,
-            dice_loss_weight = dice_loss_weight,
-            focal_alpha = focal_alpha,
-            focal_gamma = focal_gamma,
-            bce_loss_weight = bce_loss_weight,
-            pc_dice_loss_weight = pc_dice_loss_weight,
-            ce_loss_weight = ce_loss_weight,
-            route_loss_weight = route_loss_weight,
-            route_exist_loss_weight = route_exist_loss_weight,
-            route_sparse_loss_weight = route_sparse_loss_weight,
-            route_target_present_count = route_target_present_count,
-
-            # 高级配置
-            exclude_val = exclude_val,
-            no_eval = no_eval,
-            eval_only = eval_only,
-            auto_resume = auto_resume,
-            resume = resume,
-            start_epoch = start_epoch,
-            
-            # 运行时属性
-            log_dir = os.path.join(log_base_dir, exp_name),
-            distributed = False,
-            **kwargs,
+        deepspeed_config = (
+            deepspeed_config
+            if isinstance(deepspeed_config, DeepSpeedConfigs)
+            else DeepSpeedConfigs(deepspeed_config)
         )
+        lora_config = (
+            lora_config
+            if isinstance(lora_config, LoRAConfigs)
+            else LoRAConfigs(lora_config)
+        )
+
+        batch_size = raw.get("batch_size", self.defaults["batch_size"])
+        samples_per_epoch = raw.get("samples_per_epoch", self.defaults["samples_per_epoch"])
+        steps_per_epoch = raw.get("steps_per_epoch", self.defaults["steps_per_epoch"])
+        if samples_per_epoch is not None and steps_per_epoch is None:
+            # 仅作为初始化兜底；train_fsdp.py 会在构建 DataLoader 后用真实值覆盖。
+            raw["steps_per_epoch"] = max(1, (samples_per_epoch + batch_size - 1) // max(1, batch_size))
+
+        params_to_train = raw.get("name_of_params_to_train", self.defaults["name_of_params_to_train"])
+        raw["name_of_params_to_train"] = (
+            params_to_train
+            if isinstance(params_to_train, list)
+            else [m.strip() for m in str(params_to_train).split(",") if m.strip()]
+        )
+
+        lr = raw.get("lr", self.defaults["lr"])
+        if raw.get("llm_lr", None) is None:
+            raw["llm_lr"] = lr * 0.01
+        if raw.get("vision_2d_lr", None) is None:
+            raw["vision_2d_lr"] = lr
+        if raw.get("vision_3d_lr", None) is None:
+            raw["vision_3d_lr"] = lr
+
+        log_base_dir = raw.get("log_base_dir", self.defaults["log_base_dir"])
+        exp_name = raw.get("exp_name", self.defaults["exp_name"])
+        raw["log_dir"] = os.path.join(log_base_dir, exp_name)
+
+        super().__init__(raw, model_config=model_config, deepspeed=deepspeed_config, lora=lora_config)
+
+    def to_json_dict(self, include_deepspeed: bool = True):
+        data = super().to_json_dict()
+        if not include_deepspeed:
+            data.pop("deepspeed", None)
+        return data
+
+    def save_json(self, path: str, include_deepspeed: bool = True):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.to_json_dict(include_deepspeed=include_deepspeed), f, ensure_ascii=False, indent=2)
 
     @classmethod
     def from_json_dict(cls, data: dict) -> "TrainingConfig":
@@ -394,10 +339,10 @@ class TrainingConfig(Configs):
             payload["image_size"] = tuple(payload["image_size"])
 
         return cls(
+            config_dict=payload,
             model_config=model_cfg,
             deepspeed_config=ds_cfg,
             lora_config=lora_cfg,
-            **payload,
         )
 
     @classmethod

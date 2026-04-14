@@ -12,7 +12,12 @@ from torch.utils.data import Dataset
 
 from model.qwenvl.data.rope2d import get_rope_index_3
 from utils.base_dataset import JointDataSample
-from utils.common import resolve_dtype, FUNCTIONAL_TOKENS, IGNORE_INDEX
+from utils.common import (
+    resolve_dtype,
+    FUNCTIONAL_TOKENS,
+    IGNORE_INDEX,
+    DEFAULT_PC_TOKEN,
+)
 
 
 def build_functional_tokens_from_samples(samples: List[JointDataSample]) -> Dict[str, Dict[str, str]]:
@@ -109,6 +114,12 @@ class JointAffordanceTorchDataset(Dataset):
         img_token = "<img_aff>"
         pc_token = "<pc_aff>"
         question = instruction or f"Please identify the {aff_type} affordance region of the {obj_type}."
+        # 点云输入占位：使用单锚点 <pointcloud>，在 MLLM 前向时动态展开为 K_i 个点云 token。
+        if has_pc:
+            question = (
+                f"{question}\n"
+                f"Point cloud input: {DEFAULT_PC_TOKEN}"
+            )
 
         answer_parts = []
         if has_image:

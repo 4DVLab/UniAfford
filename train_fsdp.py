@@ -49,6 +49,7 @@ from utils.metrics import (
     log_epoch_summary,
 )
 from utils.debug import log_param_dtype_stats, count_model_params, _collect_batch_runtime_stats
+from utils.model_io import build_portable_assets, build_portable_checkpoint_payload
 
 
 ENV_LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
@@ -58,6 +59,19 @@ def parse_args():
     parser = argparse.ArgumentParser(description="JointAffordance (Qwen) training with FSDP")
     parser.add_argument("--qwen_model", type=str, default=None, help="Qwen 模型路径或名称")
     parser.add_argument("--vision_pretrained", type=str, default=None, help="SAM 权重路径")
+    parser.add_argument("--point_backbone_pretrained", type=str, default=None, help="SONATA point backbone 预训练权重路径")
+    parser.add_argument("--point_backbone_pretrained_config", type=str, default=None,
+        help="SONATA point backbone 预训练配置路径；不传时默认尝试使用权重同目录下的 config.json",
+    )
+    parser.add_argument(
+        "--point_decoder_backbone_mode",
+        type=str,
+        default='shared',
+        choices=["shared", "independent"],
+        help="3D decoder backbone 模式：shared 为与 encoder 共用基座，independent 为独立随机初始化 backbone",
+    )
+    parser.add_argument("--batch_size", type=int, default=None, help="每卡训练 batch size（同时覆写 val_batch_size）")
+    parser.add_argument("--epochs", type=int, default=None, help="训练总 epoch 数")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
@@ -67,6 +81,20 @@ def parse_args():
     parser.add_argument("--resume_ckpt", type=str, default=None, help="断点续训 checkpoint 路径；为空则默认 latest_fsdp.pth")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
     return parser.parse_known_args()[0]
+
+
+def apply_point_decoder_backbone_mode(model_config, mode: str):
+    share_backbone = mode == "shared"
+    encoder_backbone_cfg = model_config.mllm.point_encoder_backbone.to_dict()
+    decoder_backbone_cfg = dict(encoder_backbone_cfg)
+    decoder_backbone_cfg["enc_mode"] = False
+    model_config.point_decoder.share_encoder_backbone = bool(share_backbone)
+    model_config.point_decoder.backbone_kwargs = decoder_backbone_cfg
+    model_config.point_decoder.backbone_out_channels = int(
+        decoder_backbone_cfg.get("dec_channels", (64,))[0]
+    )
+    if share_backbone:
+        model_config.mllm.enable_point_encoder = True
 
 
 # ===================== 模型初始化辅助 =====================
@@ -306,6 +334,21 @@ def main():
         model_config.mllm.qwen_model_name_or_path = args.qwen_model
     if args.vision_pretrained:
         model_config.image_decoder.vision_pretrained = args.vision_pretrained
+    if args.point_backbone_pretrained:
+        model_config.mllm.point_encoder_pretrained = args.point_backbone_pretrained
+    if args.point_backbone_pretrained_config:
+        model_config.mllm.point_encoder_pretrained_config = args.point_backbone_pretrained_config
+    decoder_backbone_mode = (
+        args.point_decoder_backbone_mode
+        if args.point_decoder_backbone_mode is not None
+        else ("shared" if bool(getattr(model_config.point_decoder, "share_encoder_backbone", True)) else "independent")
+    )
+    apply_point_decoder_backbone_mode(model_config, decoder_backbone_mode)
+    if args.batch_size is not None:
+        training_configs.batch_size = int(args.batch_size)
+        training_configs.val_batch_size = int(args.batch_size)
+    if args.epochs is not None:
+        training_configs.epochs = int(args.epochs)
     if args.dataset_dir:
         training_configs.dataset_dir = args.dataset_dir
     if args.log_dir:
@@ -381,6 +424,15 @@ def main():
     # ---------- 初始化模型 ----------
     logger.info("正在初始化模型...")
     model = JointAffordanceModel(model_config)
+    if getattr(model, "point_encoder", None) is not None and getattr(model.point_encoder, "pretrained_info", None):
+        load_info = model.point_encoder.pretrained_info
+        model_config.mllm.point_encoder_pretrained_config = load_info.get("config_path")
+        logger.info(
+            "已通过 PointCloudEncoder.from_pretrained 加载 point backbone: "
+            f"{load_info.get('weight_path')} | config={load_info.get('config_path')} | "
+            f"prefix={load_info['matched_prefix']} | loaded={load_info['loaded_tensors']} | "
+            f"missing={len(load_info['missing_keys'])} | unexpected={len(load_info['unexpected_keys'])}"
+        )
     # MLLM 完成 tokenizer 注入后，回写 FUNCTIONAL_TOKENS 为最终双向映射（token_name <-> token_id）
     FUNCTIONAL_TOKENS.clear()
     FUNCTIONAL_TOKENS.update(model.mllm.functional_token_ids)
@@ -420,6 +472,7 @@ def main():
         model.mllm.model = get_peft_model(model.mllm.model, training_configs.lora.to_peft_config())
 
     enable_trainable_modules(model, training_configs.name_of_params_to_train)
+    portable_asset_bundle = build_portable_assets(model)
     log_param_dtype_stats(model, logger, stage="before_fsdp")
     total_params, trainable_params = count_model_params(model)
     logger.info(
@@ -600,7 +653,7 @@ def main():
         if resume_payload is not None:
             writer.add_text("resume/info", f"resume_from={resume_path}, global_step={global_step}, start_epoch={start_epoch + 1}")
     if local_rank == 0:
-        training_configs.save_json(config_json_path)
+        training_configs.save_json(config_json_path, include_deepspeed=False)
         logger.info(f"配置已导出: {config_json_path}")
         logger.info(
             f"Checkpoint 保存策略: 直接保存完整 .pth（best/latest/fixed），latest 每 {update_epoch} epoch，固定存档每 {args.fixed_save_interval} epoch"
@@ -617,12 +670,12 @@ def main():
         ):
             full_state = model_fsdp.state_dict()
         if local_rank == 0:
-            payload = {
-                **meta,
-                "model_state_dict": full_state,
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-            }
+            payload = build_portable_checkpoint_payload(
+                model_state_dict=full_state,
+                meta=meta,
+                training_cfg=training_configs,
+                asset_bundle=portable_asset_bundle,
+            )
             torch.save(payload, os.path.join(ckpt_dir, filename))
 
     for epoch in range(start_epoch, training_configs.epochs):
@@ -689,8 +742,6 @@ def main():
                 if local_rank == 0:
                     logger.info(f"固定周期 checkpoint 已保存: {os.path.join(ckpt_dir, fixed_name)}")
                 did_save = True
-            if local_rank == 0:
-                training_configs.save_json(config_json_path)
         # 仅在发生保存时同步，避免每个 epoch 都阻塞等待
         if did_save:
             dist.barrier()
@@ -702,16 +753,18 @@ def main():
         ):
             final_state = model_fsdp.state_dict()
         torch.save(
-            {
-                "epoch": training_configs.epochs,
-                "global_step": global_step,
-                "best_epoch": best_epoch,
-                "best_val_loss": best_metric,
-                "val_metrics": last_val_metrics,
-                "model_state_dict": final_state,
-                "optimizer_state_dict": optimizer.state_dict(),
-                "scheduler_state_dict": scheduler.state_dict() if scheduler is not None else None,
-            },
+            build_portable_checkpoint_payload(
+                model_state_dict=final_state,
+                meta={
+                    "epoch": training_configs.epochs,
+                    "global_step": global_step,
+                    "best_epoch": best_epoch,
+                    "best_val_loss": best_metric,
+                    "val_metrics": last_val_metrics,
+                },
+                training_cfg=training_configs,
+                asset_bundle=portable_asset_bundle,
+            ),
             os.path.join(ckpt_dir, "latest_fsdp.pth"),
         )
         logger.info("训练结束：已额外导出完整 latest 权重 latest_fsdp.pth")

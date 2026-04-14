@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from configs import JointAffordanceConfig
 # from model.pointnet2 import PointCloudHiddenStateDecoder
-from model.pointcept import PointCloudHiddenStateDecoder
+from model.pointcept import PointCloudIndependentDecoder, PointCloudSharedBackboneDecoder
 from model.segment_anything import ImageHiddenStateDecoder
 from model.qwenvl import MLLMBackbone
 from model.HeadRouter import HeadRouter
@@ -16,6 +16,27 @@ from model.HeadRouter import HeadRouter
 
 class JointAffordanceModel(nn.Module):
     """模型管理基座，负责加载配置并组织各模块。"""
+
+    def _sync_point_decoder_config(self):
+        point_decoder_cfg = getattr(self.config, "point_decoder", None)
+        if point_decoder_cfg is None:
+            return
+
+        share_backbone = bool(getattr(point_decoder_cfg, "share_encoder_backbone", True))
+        point_decoder_cfg.share_encoder_backbone = share_backbone
+        if share_backbone:
+            encoder_backbone_cfg = self.config.mllm.point_encoder_backbone.to_dict()
+            decoder_backbone_cfg = dict(encoder_backbone_cfg)
+            decoder_backbone_cfg["enc_mode"] = False
+            point_decoder_cfg.backbone_kwargs = decoder_backbone_cfg
+            point_decoder_cfg.backbone_out_channels = int(
+                decoder_backbone_cfg.get("dec_channels", (64,))[0]
+            )
+        else:
+            point_decoder = getattr(self, "point_decoder", None)
+            if point_decoder is not None and hasattr(point_decoder, "config"):
+                point_decoder_cfg.backbone_kwargs = dict(point_decoder.config.backbone_kwargs)
+                point_decoder_cfg.backbone_out_channels = int(point_decoder.config.backbone_out_channels)
 
     def __init__(self, config: Optional[JointAffordanceConfig] = None):
         super().__init__()
@@ -26,7 +47,19 @@ class JointAffordanceModel(nn.Module):
         self.functional_token_ids = self.mllm.functional_token_ids
 
         self.image_decoder = ImageHiddenStateDecoder(self.config.image_decoder, self.config.mllm.hidden_size)
-        self.point_decoder = PointCloudHiddenStateDecoder(self.config.point_decoder, self.config.mllm.hidden_size)
+        self.share_point_encoder_backbone = bool(getattr(self.config.point_decoder, "share_encoder_backbone", True))
+        if self.share_point_encoder_backbone:
+            self.point_decoder = PointCloudSharedBackboneDecoder(
+                self.config.point_decoder,
+                self.config.mllm.hidden_size,
+                point_feature_size=point_feature_size,
+            )
+        else:
+            self.point_decoder = PointCloudIndependentDecoder(
+                self.config.point_decoder,
+                self.config.mllm.hidden_size,
+            )
+        self._sync_point_decoder_config()
 
         hidden_size = int(self.config.mllm.hidden_size)
         self.router = HeadRouter(
@@ -111,6 +144,14 @@ class JointAffordanceModel(nn.Module):
         **kwargs,
     ) -> Dict[str, Optional[torch.Tensor]]:
 
+        # ---- 0. 点云编码（单次 backbone，产出 token级 + 逐点级 两路特征）----
+        point_encoder_outputs = None
+        if self.point_encoder is not None and point_clouds is not None:
+            point_encoder_outputs = self.point_encoder.encode_shared(
+                point_clouds=point_clouds,
+                pc_valid_lengths=pc_valid_lengths,
+            )
+
         # ---- 1. MLLM 前向 ----
         mllm_out = self.mllm(
             input_ids=input_ids,
@@ -120,6 +161,8 @@ class JointAffordanceModel(nn.Module):
             image_grid_thw=image_grid_thw,
             point_clouds=point_clouds,
             pc_valid_lengths=pc_valid_lengths,
+            point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
+            point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
         )
         hidden_states = mllm_out["hidden_states"]  # [B, L, C]
         output_obj = mllm_out.get("output")
@@ -157,9 +200,6 @@ class JointAffordanceModel(nn.Module):
                 base_token_ids=logits_token_ids,
             )
 
-            image_pred_emb = self.image_decoder.project_hidden_states(route_out["img_emb"])
-            point_pred_emb = self.point_decoder.project_hidden_states(route_out["pc_emb"])
-
             # ---- 3. 2D 图像分割 ----
             image_embeddings = self.image_decoder.get_visual_embs(images)
             input_size = (images.shape[-2], images.shape[-1])
@@ -167,7 +207,7 @@ class JointAffordanceModel(nn.Module):
             # 推理保存时再按 original_size_list 缩放还原
             original_size = input_size
 
-            all_image_logits = self.image_decoder(image_pred_emb, image_embeddings, input_size, original_size)
+            all_image_logits = self.image_decoder(route_out["img_emb"], image_embeddings, input_size, original_size)
 
             # 将无效样本的输出置零（不影响 loss 计算）
             if img_valid_mask is not None:
@@ -177,10 +217,29 @@ class JointAffordanceModel(nn.Module):
                 image_logits = all_image_logits
 
             # ---- 4. 3D 点云分割 ----
-            all_point_logits = self.point_decoder(point_pred_emb, point_clouds)
+            has_per_point_features = (
+                point_encoder_outputs is not None
+                and point_encoder_outputs.get("per_point_features") is not None
+                and point_encoder_outputs.get("per_point_mask") is not None
+            )
+            if self.share_point_encoder_backbone and has_per_point_features and point_clouds is not None:
+                all_point_logits = self.point_decoder(
+                    pred_embeddings=route_out["pc_emb"],
+                    per_point_features=point_encoder_outputs.get("per_point_features"),
+                    per_point_mask=point_encoder_outputs.get("per_point_mask"),
+                )
+            elif (not self.share_point_encoder_backbone) and point_clouds is not None:
+                all_point_logits = self.point_decoder(
+                    pred_embeddings=route_out["pc_emb"],
+                    point_clouds=point_clouds,
+                )
+            else:
+                all_point_logits = None
 
             # 将无效样本的输出置零
-            if pc_valid_lengths is not None:
+            if all_point_logits is None:
+                point_logits = None
+            elif pc_valid_lengths is not None:
                 mask_3d = (pc_valid_lengths > 0).to(all_point_logits.dtype).unsqueeze(-1)
                 point_logits = all_point_logits * mask_3d
             else:
@@ -193,6 +252,7 @@ class JointAffordanceModel(nn.Module):
             "point_logits": point_logits,
             "token_ids": route_out["routed_token_ids"],
             "labels": model_labels,
+            "attention_mask": model_attention_mask,
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
             "ce_loss": ce_loss,
             "output": None,
@@ -226,5 +286,6 @@ __all__ = [
     "JointAffordanceModel",
     "MLLMBackbone",
     "ImageHiddenStateDecoder",
-    "PointCloudHiddenStateDecoder",
+    "PointCloudSharedBackboneDecoder",
+    "PointCloudIndependentDecoder",
 ]

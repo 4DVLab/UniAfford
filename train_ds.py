@@ -42,6 +42,7 @@ from utils.metrics import (
     log_epoch_summary,
 )
 from utils.debug import log_param_dtype_stats, count_model_params
+from utils.model_io import build_portable_assets, build_portable_checkpoint_payload
 
 
 ENV_LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
@@ -51,10 +52,40 @@ def parse_args():
     parser = argparse.ArgumentParser(description="JointAffordance (Qwen) training")
     parser.add_argument("--qwen_model", type=str, default=None, help="Qwen 模型路径或名称")
     parser.add_argument("--vision_pretrained", type=str, default=None, help="SAM 权重路径")
+    parser.add_argument("--point_backbone_pretrained", type=str, default=None, help="SONATA point backbone 预训练权重路径")
+    parser.add_argument(
+        "--point_backbone_pretrained_config",
+        type=str,
+        default=None,
+        help="SONATA point backbone 预训练配置路径；不传时默认尝试使用权重同目录下的 config.json",
+    )
+    parser.add_argument(
+        "--point_decoder_backbone_mode",
+        type=str,
+        default=None,
+        choices=["shared", "independent"],
+        help="3D decoder backbone 模式：shared 为与 encoder 共用基座，independent 为独立随机初始化 backbone",
+    )
+    parser.add_argument("--batch_size", type=int, default=None, help="每卡训练 batch size（同时覆写 val_batch_size）")
+    parser.add_argument("--epochs", type=int, default=None, help="训练总 epoch 数")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
     return parser.parse_known_args()[0]
+
+
+def apply_point_decoder_backbone_mode(model_config, mode: str):
+    share_backbone = mode == "shared"
+    encoder_backbone_cfg = model_config.mllm.point_encoder_backbone.to_dict()
+    decoder_backbone_cfg = dict(encoder_backbone_cfg)
+    decoder_backbone_cfg["enc_mode"] = False
+    model_config.point_decoder.share_encoder_backbone = bool(share_backbone)
+    model_config.point_decoder.backbone_kwargs = decoder_backbone_cfg
+    model_config.point_decoder.backbone_out_channels = int(
+        decoder_backbone_cfg.get("dec_channels", (64,))[0]
+    )
+    if share_backbone:
+        model_config.mllm.enable_point_encoder = True
 
 
 # ===================== 模型初始化辅助 =====================
@@ -219,6 +250,8 @@ def _save_model_state_to_cpu(
     client_state: Dict,
     local_rank: int,
     logger,
+    training_cfg=None,
+    asset_bundle: Dict | None = None,
     zero_stage: int = 3,
 ) -> bool:
     """
@@ -227,31 +260,40 @@ def _save_model_state_to_cpu(
     若当前不是 ZeRO-3 或 GatheredParameters 不可用，返回 False，调用方应回退到 save_checkpoint。
     """
     module = model_engine.module if hasattr(model_engine, "module") else model_engine
-    if zero_stage != 3:
-        return False
-    try:
-        from deepspeed.zero import GatheredParameters
-    except ImportError:
-        try:
-            from deepspeed.runtime.zero.stage3 import GatheredParameters
-        except ImportError:
-            return False
-
     state_cpu = OrderedDict()
-    # 逐参数 gather，只在 rank 0 上拷贝到 CPU，避免 GPU 上同时存在完整模型
-    for name, param in module.named_parameters():
-        with GatheredParameters([param]):
+
+    if zero_stage == 3:
+        try:
+            from deepspeed.zero import GatheredParameters
+        except ImportError:
+            try:
+                from deepspeed.runtime.zero.stage3 import GatheredParameters
+            except ImportError:
+                return False
+
+        # 逐参数 gather，只在 rank 0 上拷贝到 CPU，避免 GPU 上同时存在完整模型
+        for name, param in module.named_parameters():
+            with GatheredParameters([param]):
+                if local_rank == 0:
+                    state_cpu[name] = param.detach().cpu().clone()
+        for name, buf in module.named_buffers():
             if local_rank == 0:
-                state_cpu[name] = param.detach().cpu().clone()
-    for name, buf in module.named_buffers():
-        if local_rank == 0:
-            state_cpu[name] = buf.detach().cpu().clone()
+                state_cpu[name] = buf.detach().cpu().clone()
+    elif local_rank == 0:
+        for name, tensor in module.state_dict().items():
+            state_cpu[name] = tensor.detach().cpu().clone()
 
     if local_rank == 0:
-        ckpt = {"model_state_dict": state_cpu, **client_state}
+        ckpt = build_portable_checkpoint_payload(
+            model_state_dict=state_cpu,
+            meta=client_state,
+            training_cfg=training_cfg,
+            asset_bundle=asset_bundle,
+        )
         torch.save(ckpt, save_path)
-        logger.info(f"Best 权重已保存到 CPU 再落盘: {save_path}")
-    dist.barrier()
+        logger.info(f"完整推理权重已保存到 CPU 再落盘: {save_path}")
+    if dist.is_initialized():
+        dist.barrier()
     return True
 
 
@@ -265,6 +307,21 @@ def main():
         model_config.mllm.qwen_model_name_or_path = args.qwen_model
     if args.vision_pretrained:
         model_config.image_decoder.vision_pretrained = args.vision_pretrained
+    if args.point_backbone_pretrained:
+        model_config.mllm.point_encoder_pretrained = args.point_backbone_pretrained
+    if args.point_backbone_pretrained_config:
+        model_config.mllm.point_encoder_pretrained_config = args.point_backbone_pretrained_config
+    decoder_backbone_mode = (
+        args.point_decoder_backbone_mode
+        if args.point_decoder_backbone_mode is not None
+        else ("shared" if bool(getattr(model_config.point_decoder, "share_encoder_backbone", True)) else "independent")
+    )
+    apply_point_decoder_backbone_mode(model_config, decoder_backbone_mode)
+    if args.batch_size is not None:
+        training_configs.batch_size = int(args.batch_size)
+        training_configs.val_batch_size = int(args.batch_size)
+    if args.epochs is not None:
+        training_configs.epochs = int(args.epochs)
     if args.dataset_dir:
         training_configs.dataset_dir = args.dataset_dir
     if args.log_dir:
@@ -291,6 +348,15 @@ def main():
     # ---------- 初始化模型 ----------
     logger.info("正在初始化模型...")
     model = JointAffordanceModel(model_config)
+    if getattr(model, "point_encoder", None) is not None and getattr(model.point_encoder, "pretrained_info", None):
+        load_info = model.point_encoder.pretrained_info
+        model_config.mllm.point_encoder_pretrained_config = load_info.get("config_path")
+        logger.info(
+            "已通过 PointCloudEncoder.from_pretrained 加载 point backbone: "
+            f"{load_info.get('weight_path')} | config={load_info.get('config_path')} | "
+            f"prefix={load_info['matched_prefix']} | loaded={load_info['loaded_tensors']} | "
+            f"missing={len(load_info['missing_keys'])} | unexpected={len(load_info['unexpected_keys'])}"
+        )
     processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
     data_collator = partial(
         joint_affordance_collate_fn,
@@ -311,6 +377,7 @@ def main():
         model.mllm.model = get_peft_model(model.mllm.model, training_configs.lora.to_peft_config())
 
     enable_trainable_modules(model, training_configs.name_of_params_to_train)
+    portable_asset_bundle = build_portable_assets(model)
     log_param_dtype_stats(model, logger, stage="before_deepspeed")
     total_params, trainable_params = count_model_params(model)
     logger.info(
@@ -423,7 +490,7 @@ def main():
     os.makedirs(ckpt_dir, exist_ok=True)
     config_json_path = os.path.join(ckpt_dir, "training_config.json")
     if local_rank == 0:
-        training_configs.save_json(config_json_path)
+        training_configs.save_json(config_json_path, include_deepspeed=True)
         logger.info(f"配置已导出: {config_json_path}")
 
     for epoch in range(training_configs.epochs):
@@ -460,7 +527,14 @@ def main():
             zero_stage = getattr(training_configs.deepspeed, "zero_stage", 3)
             best_cpu_path = os.path.join(ckpt_dir, "best_cpu.pth")
             saved_to_cpu = _save_model_state_to_cpu(
-                model_engine, best_cpu_path, client_state, local_rank, logger, zero_stage=zero_stage
+                model_engine,
+                best_cpu_path,
+                client_state,
+                local_rank,
+                logger,
+                training_cfg=training_configs,
+                asset_bundle=portable_asset_bundle,
+                zero_stage=zero_stage,
             )
             if not saved_to_cpu:
                 logger.warning("Failed to save best checkpoint to CPU, falling back to ZeRO format")
@@ -471,8 +545,6 @@ def main():
                 )
                 if local_rank == 0:
                     logger.info(f"Best checkpoint (ZeRO 格式) 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
-            if local_rank == 0:
-                training_configs.save_json(config_json_path)
             if local_rank == 0:
                 if writer is not None:
                     log_scalar_dict(writer, "checkpoint",
@@ -494,8 +566,23 @@ def main():
         },
     )
     if local_rank == 0:
-        training_configs.save_json(config_json_path)
         logger.info(f"Latest checkpoint 已保存: epoch={final_epoch}, path={ckpt_dir}/latest")
+    latest_cpu_path = os.path.join(ckpt_dir, "latest_cpu.pth")
+    _save_model_state_to_cpu(
+        model_engine,
+        latest_cpu_path,
+        client_state={
+            "epoch": final_epoch,
+            "best_epoch": best_epoch,
+            "best_val_loss": best_metric,
+            "global_step": global_step,
+        },
+        local_rank=local_rank,
+        logger=logger,
+        training_cfg=training_configs,
+        asset_bundle=portable_asset_bundle,
+        zero_stage=zero_stage,
+    )
 
     logger.info("=" * 80)
     logger.info(

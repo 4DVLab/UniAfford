@@ -1,7 +1,8 @@
-from .decoder import PointCloudHiddenStateDecoder
-from .prefix_encoder import PointCloudPrefixEncoder
+from .decoder import PointCloudIndependentDecoder, PointCloudSharedBackboneDecoder
+from .encoder import PointCloudEncoder
 
 __all__ = [
-    "PointCloudHiddenStateDecoder",
-    "PointCloudPrefixEncoder",
+    "PointCloudSharedBackboneDecoder",
+    "PointCloudIndependentDecoder",
+    "PointCloudEncoder",
 ]

@@ -717,14 +717,24 @@ class PointTransformerV3(PointModule):
             if module.bias is not None:
                 nn.init.zeros_(module.bias)
 
-    def forward(self, data_dict):
+    def forward(self, data_dict, return_dual: bool = False):
         point = Point(data_dict)
         point = self.embedding(point)
 
         point.serialization(order=self.order, shuffle_orders=self.shuffle_orders)
         point.sparsify()
 
-        point = self.enc(point)
-        if not self.enc_mode:
-            point = self.dec(point)
+        enc_point = self.enc(point)
+        if self.enc_mode:
+            return enc_point
+
+        # 双输出模式：
+        # - enc_point: 编码器末端的稀疏/压缩语义 token，适合构造成较短的 MLLM 输入 token
+        # - dec_point: 解码器恢复后的逐点特征，适合直接做每点 affordance 响应场
+        if return_dual:
+            enc_snapshot = Point(enc_point)
+            dec_point = self.dec(enc_point)
+            return {"enc_point": enc_snapshot, "dec_point": dec_point}
+
+        point = self.dec(enc_point)
         return point
