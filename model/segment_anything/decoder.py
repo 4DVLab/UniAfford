@@ -71,7 +71,7 @@ class ImageHiddenStateDecoder(nn.Module):
         Returns:
             pred_masks: [B, H_orig, W_orig]
         """
-        pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
+        pred_embeddings = self.project_hidden_states(pred_embeddings).to(self.config.compute_dtype)
         image_embeddings = image_embeddings.to(self.config.compute_dtype)
 
         # [B, C] → [B, 1, C]，作为 prompt_encoder 的 text_embeds 输入
