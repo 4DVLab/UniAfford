@@ -386,7 +386,12 @@ def main():
         f"ratio={100.0 * trainable_params / max(1, total_params):.2f}%"
     )
     if local_rank == 0:
-        log_trainability_summary(model, logger, max_lines_per_state=160)
+        log_trainability_summary(
+            model,
+            logger,
+            output_path=os.path.join(training_configs.log_dir, "trainability_summary_ds.txt"),
+            max_lines_per_state=160,
+        )
 
     # ---------- 加载数据集（rank 0 读取后广播） ----------
     logger.info("加载数据集...")
