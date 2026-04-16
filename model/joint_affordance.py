@@ -8,7 +8,8 @@ import torch.nn.functional as F
 
 from configs import JointAffordanceConfig
 # from model.pointnet2 import PointCloudHiddenStateDecoder
-from model.pointcept import PointCloudIndependentDecoder, PointCloudSharedBackboneDecoder
+from model.pointcept import PointCloudIndependentDecoder
+from model.pointcept import PointCloudSharedBackboneSimilarityDecoder as PointCloudSharedBackboneDecoder
 from model.segment_anything import ImageHiddenStateDecoder
 from model.qwenvl import MLLMBackbone
 from model.HeadRouter import HeadRouter
