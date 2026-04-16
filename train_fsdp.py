@@ -50,6 +50,7 @@ from utils.metrics import (
 )
 from utils.debug import log_param_dtype_stats, count_model_params, _collect_batch_runtime_stats
 from utils.model_io import build_portable_assets, build_portable_checkpoint_payload
+from utils.trainability_summary import log_trainability_summary
 
 
 ENV_LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
@@ -479,6 +480,8 @@ def main():
         f"参数统计: total={total_params:,}, trainable={trainable_params:,}, "
         f"ratio={100.0 * trainable_params / max(1, total_params):.2f}%"
     )
+    if local_rank == 0:
+        log_trainability_summary(model, logger, max_lines_per_state=160)
 
     # ---------- 断点续训：先恢复模型权重（FSDP 包装前） ----------
     ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints_fsdp")

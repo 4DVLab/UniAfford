@@ -113,7 +113,7 @@ class LoRAConfigs(Configs):
         "lora_r": 8,
         "lora_alpha": 16,
         "lora_dropout": 0.05,
-        "lora_target_modules": "q_proj, k_proj, v_proj, o_proj",
+        "lora_target_modules": "q_proj, k_proj, v_proj, o_proj, up_proj, down_proj, gate_proj",
         "bias": "none",
         "task_type": "CAUSAL_LM",
     }
@@ -182,7 +182,7 @@ class TrainingConfig(Configs):
         "workers": 4,
         "print_freq": 1,
         # 微调 mllm，其他全部需要训练
-        "name_of_params_to_train": "lm_head, embed_tokens, image_decoder, point_decoder, text_hidden_fcs",
+        "name_of_params_to_train": "router, lm_head, embed_tokens, image_decoder, point_decoder, text_hidden_fcs",
         # 优化器配置
         "lr": 1e-3,
         "beta1": 0.9,
