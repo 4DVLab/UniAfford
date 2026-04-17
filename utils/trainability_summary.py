@@ -43,6 +43,16 @@ def _state_matches(trainable_params: int, total_params: int, state: str) -> bool
     raise ValueError(f"Unsupported state: {state}")
 
 
+def _state_label(trainable_params: int, total_params: int) -> str:
+    if total_params <= 0:
+        return "empty"
+    if trainable_params == total_params:
+        return "trainable"
+    if trainable_params == 0:
+        return "frozen"
+    return "mixed"
+
+
 def _aggregate_node(node: TreeNode) -> Tuple[int, int, int, int]:
     total_tensors = len(node.direct_params)
     trainable_tensors = sum(1 for p in node.direct_params if p.trainable)
@@ -69,6 +79,79 @@ def _merge_nodes(name: str, nodes: Iterable[TreeNode]) -> TreeNode:
                 [merged.children[child_name], child],
             )
     return merged
+
+
+def _serialize_param_groups(direct_params: List[ParamInfo], state: str) -> List[Dict]:
+    direct_groups: Dict[str, List[ParamInfo]] = defaultdict(list)
+    for param in direct_params:
+        param_name = param.name.rsplit(".", 1)[-1]
+        direct_groups[param_name].append(param)
+
+    serialized = []
+    for param_name in sorted(direct_groups.keys()):
+        group = direct_groups[param_name]
+        group_total_params = sum(x.numel for x in group)
+        group_trainable_params = sum(x.numel for x in group if x.trainable)
+        if not _state_matches(group_trainable_params, group_total_params, state):
+            continue
+        serialized.append(
+            {
+                "name": param_name,
+                "repeat": len(group),
+                "state": _state_label(group_trainable_params, group_total_params),
+                "trainable_tensors": sum(1 for x in group if x.trainable),
+                "total_tensors": len(group),
+                "trainable_params": group_trainable_params,
+                "total_params": group_total_params,
+            }
+        )
+    return serialized
+
+
+def serialize_tree(node: TreeNode, state: str = "all") -> Optional[Dict]:
+    total_tensors, trainable_tensors, total_params, trainable_params = _aggregate_node(node)
+    if not _state_matches(trainable_params, total_params, state):
+        return None
+
+    direct_parameters = _serialize_param_groups(node.direct_params, state)
+    named_children = []
+    indexed_children = []
+    for child_name in sorted(node.children.keys()):
+        child = node.children[child_name]
+        if _is_index(child_name):
+            indexed_children.append(child)
+        else:
+            child_payload = serialize_tree(child, state=state)
+            if child_payload is not None:
+                named_children.append(child_payload)
+
+    repeated_group = None
+    if indexed_children:
+        merged_indexed = _merge_nodes(node.name, indexed_children)
+        repeated_group = serialize_tree(merged_indexed, state=state)
+        if repeated_group is not None:
+            repeated_group["name"] = node.name
+            repeated_group["repeat"] = len(indexed_children)
+            repeated_group["compressed_indices"] = True
+
+    if repeated_group is not None and not direct_parameters and not named_children:
+        return repeated_group
+
+    payload = {
+        "name": node.name,
+        "state": _state_label(trainable_params, total_params),
+        "summary": {
+            "trainable_tensors": trainable_tensors,
+            "total_tensors": total_tensors,
+            "trainable_params": trainable_params,
+            "total_params": total_params,
+        },
+        "parameters": direct_parameters,
+        "children": named_children,
+    }
+    if repeated_group is not None:
+        payload["children"].append(repeated_group)
+    return payload
 
 
 def render_tree_lines(
@@ -182,6 +265,45 @@ def summarize_optimizer_groups(model) -> List[str]:
             f"  - {group_name}: tensors={len(params)}, params={total_numel:,}, examples={example_names}"
         )
     return lines
+
+
+def summarize_optimizer_groups_data(model) -> List[Dict]:
+    groups = {
+        "llm": [],
+        "vision_2d": [],
+        "vision_3d": [],
+        "other": [],
+    }
+    used_ids = set()
+
+    def collect(module, bucket_name: str) -> None:
+        if module is None:
+            return
+        for name, param in module.named_parameters():
+            if param.requires_grad and param.is_floating_point():
+                groups[bucket_name].append((name, param))
+                used_ids.add(id(param))
+
+    collect(getattr(model, "mllm", None), "llm")
+    collect(getattr(model, "image_decoder", None), "vision_2d")
+    collect(getattr(model, "point_decoder", None), "vision_3d")
+
+    for name, param in model.named_parameters():
+        if param.requires_grad and param.is_floating_point() and id(param) not in used_ids:
+            groups["other"].append((name, param))
+
+    data = []
+    for group_name in ("llm", "vision_2d", "vision_3d", "other"):
+        params = groups[group_name]
+        data.append(
+            {
+                "name": group_name,
+                "tensors": len(params),
+                "params": sum(p.numel() for _, p in params),
+                "example_names": [name for name, _ in params[:5]],
+            }
+        )
+    return data
 
 
 def format_trainability_summary(

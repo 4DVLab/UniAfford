@@ -1,4 +1,5 @@
 import argparse
+import json
 import os
 import sys
 
@@ -9,7 +10,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from configs import TrainingConfig
-from utils.trainability_summary import format_trainability_summary
+from utils.trainability_summary import build_tree_from_model, serialize_tree, summarize_optimizer_groups_data
 
 
 def apply_trainability_policy(model, training_cfg: TrainingConfig) -> None:
@@ -53,7 +54,7 @@ def load_training_config(args: argparse.Namespace) -> TrainingConfig:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="查看当前配置下模型哪些层被冻结/可训练，并按层级结构聚合打印。"
+        description="查看当前配置下模型哪些层被冻结/可训练，并导出为可读 JSON。"
     )
     parser.add_argument("--config_json", type=str, default=None, help="训练配置 JSON 路径；不传则使用默认 TrainingConfig")
     parser.add_argument("--qwen_model", type=str, default=None, help="覆写 qwen_model_name_or_path")
@@ -74,13 +75,7 @@ def parse_args() -> argparse.Namespace:
         "--output",
         type=str,
         default=None,
-        help="可选，将结果写入文件",
-    )
-    parser.add_argument(
-        "--max_lines_per_state",
-        type=int,
-        default=120,
-        help="每个状态最多打印多少行；<=0 表示不截断",
+        help="可选，将 JSON 结果写入文件",
     )
     return parser.parse_args()
 
@@ -92,29 +87,37 @@ def main() -> None:
 
     model = JointAffordanceModel(training_cfg.model_config)
     apply_trainability_policy(model, training_cfg)
-    max_lines = args.max_lines_per_state if args.max_lines_per_state > 0 else None
-    summary = format_trainability_summary(
-        model,
-        states=(args.state,) if args.state != "all" else ("trainable", "frozen"),
-        max_lines_per_state=max_lines,
-        include_optimizer_groups=True,
-    )
-    lines = [
-        f"Config source: {os.path.abspath(args.config_json) if args.config_json else 'TrainingConfig() defaults'}",
-        f"LoRA enabled: {training_cfg.lora.lora_r > 0}",
-        f"LoRA target modules: {training_cfg.lora.lora_target_modules}",
-        f"Trainable filters: {training_cfg.name_of_params_to_train}",
-        "",
-        summary,
-    ]
-    content = "\n".join(lines)
+    tree = build_tree_from_model(model)
+    payload = {
+        "config": {
+            "config_source": os.path.abspath(args.config_json) if args.config_json else "TrainingConfig() defaults",
+            "qwen_model": training_cfg.model_config.mllm.qwen_model_name_or_path,
+            "lora_enabled": training_cfg.lora.lora_r > 0,
+            "lora_r": training_cfg.lora.lora_r,
+            "lora_target_modules": training_cfg.lora.lora_target_modules,
+            "trainable_filters": training_cfg.name_of_params_to_train,
+            "requested_state": args.state,
+        },
+        "optimizer_groups": summarize_optimizer_groups_data(model),
+    }
+    if args.state == "all":
+        payload["module_trees"] = {
+            "all": serialize_tree(tree, state="all"),
+            "trainable": serialize_tree(tree, state="trainable"),
+            "frozen": serialize_tree(tree, state="frozen"),
+        }
+    else:
+        payload["module_tree"] = serialize_tree(tree, state=args.state)
+
+    content = json.dumps(payload, ensure_ascii=False, indent=2)
     print(content)
     if args.output:
         output_path = os.path.abspath(args.output)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(content)
-        print(f"\n[OK] Saved report to: {output_path}")
+            f.write("\n")
+        print(f"\n[OK] Saved JSON report to: {output_path}")
 
 
 if __name__ == "__main__":
