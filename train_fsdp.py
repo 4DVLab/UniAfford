@@ -340,8 +340,6 @@ def main():
         model_config.image_decoder.vision_pretrained = args.vision_pretrained
     if args.point_backbone_pretrained:
         model_config.mllm.point_encoder_pretrained = args.point_backbone_pretrained
-    if args.point_backbone_pretrained_config:
-        model_config.mllm.point_encoder_pretrained_config = args.point_backbone_pretrained_config
     decoder_backbone_mode = (
         args.point_decoder_backbone_mode
         if args.point_decoder_backbone_mode is not None
