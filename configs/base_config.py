@@ -181,9 +181,10 @@ class PointDecoderConfigs(Configs):
 
     defaults = {
         "compute_dtype": "fp32",
-        "hidden_size": 256,
+        "hidden_size": 512,
         "num_heads": 8,
-        "share_encoder_backbone": True,
+        "backbone_mode": "independent",     # {"shared", "independent"}
+        "decode_mode": "prompt",            # {"similarity", "prompt"}
         "grid_size": 0.02,
         "backbone_kwargs": None,
         "backbone_out_channels": 64,
@@ -194,6 +195,12 @@ class PointDecoderConfigs(Configs):
         if config_dict is not None:
             raw.update(config_dict)
         raw.update(overrides)
+        raw["backbone_mode"] = str(raw.get("backbone_mode", self.defaults["backbone_mode"])).lower()
+        assert raw["backbone_mode"] in {"shared", "independent"}, f"Unsupported point decoder backbone_mode: {raw['backbone_mode']}"
+
+        raw["decode_mode"] = str(raw.get("decode_mode", self.defaults["decode_mode"])).lower()
+        assert raw["decode_mode"] in {"similarity", "prompt"}, f"Unsupported point decoder decode_mode: {raw['decode_mode']}"
+
         raw["compute_dtype"] = resolve_dtype(raw.get("compute_dtype", self.defaults["compute_dtype"]))
         backbone_kwargs = raw.get("backbone_kwargs", self.defaults["backbone_kwargs"])
         if backbone_kwargs is None:

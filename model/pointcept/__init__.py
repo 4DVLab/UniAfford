@@ -1,13 +1,7 @@
-from .decoder import (
-    PointCloudIndependentDecoder,
-    PointCloudSharedBackbonePromptDecoder,
-    PointCloudSharedBackboneSimilarityDecoder,
-)
+from .decoder import PointCloudHiddenStateDecoder
 from .encoder import PointCloudEncoder
 
 __all__ = [
-    "PointCloudSharedBackbonePromptDecoder",
-    "PointCloudSharedBackboneSimilarityDecoder",
-    "PointCloudIndependentDecoder",
+    "PointCloudHiddenStateDecoder",
     "PointCloudEncoder",
 ]

@@ -1,13 +1,28 @@
-from configs.base_config import PointDecoderConfigs
-from typing import Optional, Dict, Tuple
+from collections import OrderedDict
+from typing import Dict, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from collections import OrderedDict
+
+from configs.base_config import PointDecoderConfigs
 
 from .models.point_prompt_training.point_transformer_v3m2_sonata import PointTransformerV3
 
 
+POINT_XYZ_CHANNELS = 3
+
+
+def _build_text_projection(text_hidden_size: int, hidden_size: int) -> nn.Sequential:
+    return nn.Sequential(
+        OrderedDict(
+            [
+                ("fc1", nn.Linear(text_hidden_size, 2 * text_hidden_size)),
+                ("relu", nn.ReLU(inplace=True)),
+                ("fc2", nn.Linear(2 * text_hidden_size, hidden_size)),
+            ]
+        )
+    )
 class _PromptMLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int, output_dim: int):
         super().__init__()
@@ -129,161 +144,37 @@ class _PointCloudTwoWayTransformer(nn.Module):
         return queries, keys
 
 
-class PointCloudSharedBackboneSimilarityDecoder(nn.Module):
-    """使用 encoder 输出的逐点特征与 aff token 做逐点相似度对齐的解码器。"""
+class _IndependentPointFeatureEncoder(nn.Module):
+    """独立模式下的 point backbone，负责从原始点云生成逐点特征。"""
 
-    def __init__(
-        self,
-        config: PointDecoderConfigs,
-        text_hidden_size: int,
-        point_feature_size: int,
-    ):
-        super().__init__()
-        self.config = config
-
-        text_fc = nn.Sequential(
-            OrderedDict(
-                [
-                    ("fc1", nn.Linear(text_hidden_size, 2 * text_hidden_size)),
-                    ("relu", nn.ReLU(inplace=True)),
-                    ("fc2", nn.Linear(2 * text_hidden_size, config.hidden_size)),
-                    # ("dropout", nn.Dropout(0.0)),
-                ]
-            )
-        )
-        self.text_hidden_fcs = nn.ModuleList([text_fc])
-        for param in self.text_hidden_fcs.parameters():
-            param.requires_grad = True
-
-        # 逐点特征维度由 point encoder backbone 的 dec_point 输出通道决定。
-        # 使用显式 Linear，避免 LazyLinear 在首次前向前参数未初始化，进而影响参数统计/FSDP 初始化。
-        self.point_proj = nn.Linear(point_feature_size, config.hidden_size)
-        # FSDP requires parameter tensors to be at least 1D.
-        self.logit_scale = nn.Parameter(torch.ones(1))
-
-        for param in self.point_proj.parameters():
-            param.requires_grad = True
-
-        self.to(dtype=self.config.compute_dtype)
-
-    def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
-        hidden_states = hidden_states.to(self.config.compute_dtype)
-        projected = self.text_hidden_fcs[0](hidden_states)
-        return projected
-
-    def forward(
-        self,
-        pred_embeddings: torch.Tensor,
-        per_point_features: Optional[torch.Tensor] = None,
-        per_point_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        """
-        批量生成 3D 分割掩码（目标文本概率）。
-
-        Args:
-            pred_embeddings: [B, C] — 每个样本的文本嵌入（可为 text_fc 前或后）
-            per_point_features: [B, N, C]，encoder 输出的逐点特征
-            per_point_mask: [B, N]，逐点特征有效位
-
-        Returns:
-            pred_masks: [B, N]，每个点属于目标文本的概率
-        """
-        if per_point_features is None or per_point_mask is None:
-            raise ValueError("Decoder requires per_point_features/per_point_mask.")
-
-        pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
-        point_feat = per_point_features.to(self.config.compute_dtype)
-        point_mask = per_point_mask.bool()
-
-        text_feat = F.normalize(self.project_hidden_states(pred_embeddings), p=2, dim=-1)  # [B, H]
-        point_feat = self.point_proj(point_feat)  # [B, K, H]
-        point_feat = F.normalize(point_feat, p=2, dim=-1)
-        point_feat = torch.where(point_mask.unsqueeze(-1), point_feat, torch.zeros_like(point_feat))
-
-        # 逐点响应场：每个点特征直接与 aff query 做相似度。
-        logits = (point_feat * text_feat.unsqueeze(1)).sum(dim=-1)  # [B, K]
-        logits = logits * self.logit_scale.exp().clamp(min=1e-4, max=100.0)
-        logits = torch.where(point_mask, logits, torch.zeros_like(logits))
-        return logits
-
-    def forward_with_loss(
-        self,
-        pred_embeddings: torch.Tensor,
-        gt_masks: torch.Tensor,
-        per_point_features: Optional[torch.Tensor] = None,
-        per_point_mask: Optional[torch.Tensor] = None,
-        loss_fn: Optional[nn.Module] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Optional helper for training:
-        - pred_embeddings: [B, C]
-        - gt_masks: [B, N] (0/1)
-        """
-        if loss_fn is None:
-            loss_fn = nn.BCELoss()
-        pred_masks = self.forward(
-            pred_embeddings=pred_embeddings,
-            per_point_features=per_point_features,
-            per_point_mask=per_point_mask,
-        )
-        loss = loss_fn(pred_masks, gt_masks.to(pred_masks.dtype))
-        return dict(loss=loss, pred_masks=pred_masks)
-
-class PointCloudIndependentDecoder(nn.Module):
-    """使用与 encoder 独立的随机初始化 point backbone 的解码器。"""
-
-    def __init__(
-        self,
-        config: PointDecoderConfigs,
-        text_hidden_size: int,
-    ):
+    def __init__(self, config: PointDecoderConfigs):
         super().__init__()
         self.config = config
         self.point_backbone = PointTransformerV3(**config.backbone_kwargs)
+        self.in_channels = int(config.backbone_kwargs.get("in_channels", POINT_XYZ_CHANNELS))
 
-        text_fc = nn.Sequential(
-            OrderedDict(
-                [
-                    ("fc1", nn.Linear(text_hidden_size, 2 * text_hidden_size)),
-                    ("relu", nn.ReLU(inplace=True)),
-                    ("fc2", nn.Linear(2 * text_hidden_size, config.hidden_size)),
-                    # ("dropout", nn.Dropout(0.0)),
-                ]
-            )
-        )
-        self.text_hidden_fcs = nn.ModuleList([text_fc])
-        for param in self.text_hidden_fcs.parameters():
-            param.requires_grad = True
-
-        # v1m3-style point projection + normalized similarity scoring.
-        self.point_proj = nn.Linear(config.backbone_out_channels, config.hidden_size)
-        # FSDP requires parameter tensors to be at least 1D.
-        self.logit_scale = nn.Parameter(torch.ones(1))
-
-        for param in self.point_backbone.parameters():
-            param.requires_grad = True
-        for param in self.point_proj.parameters():
-            param.requires_grad = True
-
-        self.to(dtype=self.config.compute_dtype)
-
-    def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """将 LLM 隐藏状态投影到点云分割器的嵌入空间。"""
-        hidden_states = hidden_states.to(self.config.compute_dtype)
-        projected = self.text_hidden_fcs[0](hidden_states)
-        return projected
+    @staticmethod
+    def _normalize_point_clouds(point_clouds: torch.Tensor) -> torch.Tensor:
+        if point_clouds.dim() != 3:
+            raise ValueError(f"point_clouds should be [B, N, 3] or [B, 3, N], got {tuple(point_clouds.shape)}")
+        if point_clouds.shape[-1] == 3:
+            return point_clouds.contiguous()
+        if point_clouds.shape[1] == 3:
+            return point_clouds.permute(0, 2, 1).contiguous()
+        raise ValueError(f"point_clouds last dim must be 3, got {tuple(point_clouds.shape)}")
 
     @staticmethod
     def _build_pointcept_batch(
-        point_clouds: torch.Tensor, grid_size: float
+        point_clouds: torch.Tensor,
+        grid_size: float,
+        in_channels: int,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Build Pointcept-compatible input dict from [B, 3, N] points.
-        """
-        bsz, _, num_points = point_clouds.shape
-        coord = point_clouds.permute(0, 2, 1).reshape(-1, 3).contiguous()
-        feat = coord
+        bsz, num_points, _ = point_clouds.shape
+        coord = point_clouds.reshape(-1, 3).contiguous()
+        if in_channels < POINT_XYZ_CHANNELS:
+            raise ValueError(f"point backbone in_channels must be >= 3, got {in_channels}")
+        feat = coord.new_zeros((coord.shape[0], in_channels))
+        feat[:, :POINT_XYZ_CHANNELS] = coord
         batch = (
             torch.arange(bsz, device=point_clouds.device)
             .unsqueeze(1)
@@ -305,76 +196,63 @@ class PointCloudIndependentDecoder(nn.Module):
 
     @staticmethod
     def _unflatten_by_batch(feat: torch.Tensor, batch: torch.Tensor) -> torch.Tensor:
-        """
-        Convert flattened [sum(N), C] to dense [B, N, C].
-        Assumes each batch item has identical point count.
-        """
         bsz = int(batch.max().item()) + 1
         counts = torch.bincount(batch, minlength=bsz)
-        assert torch.all(
-            counts == counts[0]
-        ), "All samples must share the same point count in this adapter."
+        if not torch.all(counts == counts[0]):
+            raise ValueError("All samples must share the same point count in the independent decoder adapter.")
         num_points = int(counts[0].item())
         return feat.reshape(bsz, num_points, feat.shape[-1])
+
+    def forward(self, point_clouds: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        point_clouds = self._normalize_point_clouds(point_clouds).to(self.config.compute_dtype)
+        data_dict = self._build_pointcept_batch(
+            point_clouds=point_clouds,
+            grid_size=self.config.grid_size,
+            in_channels=self.in_channels,
+        )
+        point = self.point_backbone(data_dict)
+        point_feat = self._unflatten_by_batch(point.feat, point.batch).to(self.config.compute_dtype)
+        point_mask = torch.ones(
+            point_feat.shape[:2],
+            dtype=torch.bool,
+            device=point_feat.device,
+        )
+        return point_feat, point_mask
+
+
+class _SimilarityDecoderHead(nn.Module):
+    """使用逐点特征与文本隐状态做相似度对齐的解码头。"""
+
+    def __init__(self, config: PointDecoderConfigs, point_feature_size: int):
+        super().__init__()
+        self.config = config
+        self.point_proj = nn.Linear(point_feature_size, config.hidden_size)
+        self.logit_scale = nn.Parameter(torch.ones(1))
 
     def forward(
         self,
         pred_embeddings: torch.Tensor,
-        point_clouds: torch.Tensor,
+        per_point_features: torch.Tensor,
+        per_point_mask: torch.Tensor,
+        projected_text: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        批量生成 3D 分割掩码（目标文本概率）。
-
-        Args:
-            pred_embeddings: [B, C] — 每个样本的文本嵌入（可为 text_fc 前或后）
-            point_clouds: [B, N, 3] 或 [B, 3, N]
-
-        Returns:
-            pred_masks: [B, N]，每个点属于目标文本的概率
-        """
-        if point_clouds.shape[1] != 3:
-            point_clouds = point_clouds.permute(0, 2, 1)
-
         pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
-        point_clouds = point_clouds.to(self.config.compute_dtype)
+        del pred_embeddings
+        point_feat = per_point_features.to(self.config.compute_dtype)
+        point_mask = per_point_mask.bool()
 
-        # 与 shared decoder 保持一致：先把 LLM hidden 投影到 point decoder 的隐空间，
-        # 再与逐点特征做相似度，避免 text/point 维度不一致。
-        text_feat = F.normalize(self.project_hidden_states(pred_embeddings), p=2, dim=-1)
-
-        data_dict = self._build_pointcept_batch(point_clouds, self.config.grid_size)
-        point = self.point_backbone(data_dict)
-        point_feat = self._unflatten_by_batch(point.feat, point.batch)  # [B, N, Cb]
-        point_feat = self.point_proj(point_feat)  # [B, N, H]
+        text_feat = F.normalize(projected_text.to(self.config.compute_dtype), p=2, dim=-1)
+        point_feat = self.point_proj(point_feat)
         point_feat = F.normalize(point_feat, p=2, dim=-1)
+        point_feat = torch.where(point_mask.unsqueeze(-1), point_feat, torch.zeros_like(point_feat))
 
-        # v1m3-style similarity, now single-target text per sample.
         logits = (point_feat * text_feat.unsqueeze(1)).sum(dim=-1)
         logits = logits * self.logit_scale.exp().clamp(min=1e-4, max=100.0)
-        # pred_masks = torch.sigmoid(logits)
+        logits = torch.where(point_mask, logits, torch.zeros_like(logits))
         return logits
 
-    def forward_with_loss(
-        self,
-        pred_embeddings: torch.Tensor,
-        point_clouds: torch.Tensor,
-        gt_masks: torch.Tensor,
-        loss_fn: Optional[nn.Module] = None,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Optional helper for training:
-        - pred_embeddings: [B, C]
-        - point_clouds: [B, N, 3] or [B, 3, N]
-        - gt_masks: [B, N] (0/1)
-        """
-        if loss_fn is None:
-            loss_fn = nn.BCELoss()
-        pred_masks = self.forward(pred_embeddings, point_clouds)
-        loss = loss_fn(pred_masks, gt_masks.to(pred_masks.dtype))
-        return dict(loss=loss, pred_masks=pred_masks)
 
-
-class PointCloudSharedBackbonePromptDecoder(nn.Module):
+class _PromptDecoderHead(nn.Module):
     """
     迁移 SAM 核心思路到 3D：
     - 将文本/路由 token 视作 sparse prompt token
@@ -383,25 +261,9 @@ class PointCloudSharedBackbonePromptDecoder(nn.Module):
     - 使用 mask token 的动态权重生成逐点 mask logits
     """
 
-    def __init__(
-        self,
-        config: PointDecoderConfigs,
-        text_hidden_size: int,
-        point_feature_size: int,
-    ):
+    def __init__(self, config: PointDecoderConfigs, point_feature_size: int):
         super().__init__()
         self.config = config
-
-        text_fc = nn.Sequential(
-            OrderedDict(
-                [
-                    ("fc1", nn.Linear(text_hidden_size, 2 * text_hidden_size)),
-                    ("relu", nn.ReLU(inplace=True)),
-                    ("fc2", nn.Linear(2 * text_hidden_size, config.hidden_size)),
-                ]
-            )
-        )
-        self.text_hidden_fcs = nn.ModuleList([text_fc])
         self.point_proj = nn.Linear(point_feature_size, config.hidden_size)
         self.mask_token = nn.Embedding(1, config.hidden_size)
         self.prompt_transformer = _PointCloudTwoWayTransformer(
@@ -419,43 +281,23 @@ class PointCloudSharedBackbonePromptDecoder(nn.Module):
             nn.LayerNorm(int(config.hidden_size)),
             nn.Linear(int(config.hidden_size), int(config.hidden_size)),
         )
-        # 没有显式 3D 坐标 PE 时，使用一个可学习的 dense bias 充当点域 prompt prior。
         self.no_dense_prompt = nn.Embedding(1, config.hidden_size)
-
-        for module in (
-            self.text_hidden_fcs,
-            self.point_proj,
-            self.mask_token,
-            self.prompt_transformer,
-            self.output_hypernet,
-            self.output_point_refine,
-            self.no_dense_prompt,
-        ):
-            for param in module.parameters():
-                param.requires_grad = True
-
-        self.to(dtype=self.config.compute_dtype)
-
-    def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = hidden_states.to(self.config.compute_dtype)
-        return self.text_hidden_fcs[0](hidden_states)
 
     def forward(
         self,
         pred_embeddings: torch.Tensor,
-        per_point_features: Optional[torch.Tensor] = None,
-        per_point_mask: Optional[torch.Tensor] = None,
+        per_point_features: torch.Tensor,
+        per_point_mask: torch.Tensor,
+        projected_text: torch.Tensor,
     ) -> torch.Tensor:
-        if per_point_features is None or per_point_mask is None:
-            raise ValueError("Prompt decoder requires per_point_features/per_point_mask.")
-
         pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
+        del pred_embeddings
         point_feat = per_point_features.to(self.config.compute_dtype)
         point_mask = per_point_mask.bool()
 
-        prompt_tokens = self.project_hidden_states(pred_embeddings).unsqueeze(1)  # [B, 1, H]
+        prompt_tokens = projected_text.to(self.config.compute_dtype).unsqueeze(1)
         mask_token = self.mask_token.weight.unsqueeze(0).expand(prompt_tokens.shape[0], -1, -1)
-        sparse_prompt_tokens = torch.cat([mask_token, prompt_tokens], dim=1)  # [B, 2, H]
+        sparse_prompt_tokens = torch.cat([mask_token, prompt_tokens], dim=1)
 
         point_tokens = self.point_proj(point_feat)
         dense_prompt = self.no_dense_prompt.weight.view(1, 1, -1).to(point_tokens.dtype)
@@ -469,16 +311,97 @@ class PointCloudSharedBackbonePromptDecoder(nn.Module):
         )
 
         mask_token_out = prompt_out[:, 0, :]
-        dynamic_mask_weight = self.output_hypernet(mask_token_out)  # [B, H]
+        dynamic_mask_weight = self.output_hypernet(mask_token_out)
         refined_point = self.output_point_refine(point_out)
         logits = (refined_point * dynamic_mask_weight.unsqueeze(1)).sum(dim=-1)
         logits = torch.where(point_mask, logits, torch.zeros_like(logits))
         return logits
 
+
+class PointCloudHiddenStateDecoder(nn.Module):
+    """统一的 3D hidden-state decoder，按配置切换共享/独立 backbone 与 prompt/相似度解码。"""
+
+    def __init__(
+        self,
+        config: PointDecoderConfigs,
+        text_hidden_size: int,
+        point_feature_size: Optional[int] = None,
+    ):
+        super().__init__()
+        self.config = config
+        self.backbone_mode = str(config.backbone_mode).lower()
+        self.decode_mode = str(config.decode_mode).lower()
+
+        self.text_hidden_fcs = nn.ModuleList(
+            [_build_text_projection(text_hidden_size, int(config.hidden_size))]
+        )
+
+        if self.backbone_mode == "shared":
+            if point_feature_size is None:
+                raise ValueError("Shared point decoder requires `point_feature_size` from the point encoder.")
+            self.point_feature_encoder = None
+            head_input_dim = int(point_feature_size)
+        elif self.backbone_mode == "independent":
+            self.point_feature_encoder = _IndependentPointFeatureEncoder(config)
+            head_input_dim = int(config.backbone_out_channels)
+        else:
+            raise ValueError(f"Unsupported point decoder backbone mode: {self.backbone_mode}")
+
+        if self.decode_mode == "similarity":
+            self.decoder_head = _SimilarityDecoderHead(config, head_input_dim)
+        elif self.decode_mode == "prompt":
+            self.decoder_head = _PromptDecoderHead(config, head_input_dim)
+        else:
+            raise ValueError(f"Unsupported point decoder decode mode: {self.decode_mode}")
+
+        self.to(dtype=self.config.compute_dtype)
+
+    def project_hidden_states(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states = hidden_states.to(self.config.compute_dtype)
+        return self.text_hidden_fcs[0](hidden_states)
+
+    def _prepare_point_features(
+        self,
+        point_clouds: Optional[torch.Tensor] = None,
+        per_point_features: Optional[torch.Tensor] = None,
+        per_point_mask: Optional[torch.Tensor] = None,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if self.backbone_mode == "shared":
+            if per_point_features is None or per_point_mask is None:
+                raise ValueError("Shared point decoder requires per_point_features/per_point_mask.")
+            return per_point_features, per_point_mask
+
+        if point_clouds is None:
+            raise ValueError("Independent point decoder requires raw point_clouds.")
+        if self.point_feature_encoder is None:
+            raise RuntimeError("Independent point decoder is missing its point feature encoder.")
+        return self.point_feature_encoder(point_clouds)
+
+    def forward(
+        self,
+        pred_embeddings: torch.Tensor,
+        point_clouds: Optional[torch.Tensor] = None,
+        per_point_features: Optional[torch.Tensor] = None,
+        per_point_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        point_feat, point_mask = self._prepare_point_features(
+            point_clouds=point_clouds,
+            per_point_features=per_point_features,
+            per_point_mask=per_point_mask,
+        )
+        projected_text = self.project_hidden_states(pred_embeddings)
+        return self.decoder_head(
+            pred_embeddings=pred_embeddings,
+            per_point_features=point_feat,
+            per_point_mask=point_mask,
+            projected_text=projected_text,
+        )
+
     def forward_with_loss(
         self,
         pred_embeddings: torch.Tensor,
         gt_masks: torch.Tensor,
+        point_clouds: Optional[torch.Tensor] = None,
         per_point_features: Optional[torch.Tensor] = None,
         per_point_mask: Optional[torch.Tensor] = None,
         loss_fn: Optional[nn.Module] = None,
@@ -487,6 +410,7 @@ class PointCloudSharedBackbonePromptDecoder(nn.Module):
             loss_fn = nn.BCELoss()
         pred_masks = self.forward(
             pred_embeddings=pred_embeddings,
+            point_clouds=point_clouds,
             per_point_features=per_point_features,
             per_point_mask=per_point_mask,
         )

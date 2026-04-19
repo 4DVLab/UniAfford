@@ -7,9 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from configs import JointAffordanceConfig
-# from model.pointnet2 import PointCloudHiddenStateDecoder
-from model.pointcept import PointCloudIndependentDecoder
-from model.pointcept import PointCloudSharedBackboneSimilarityDecoder as PointCloudSharedBackboneDecoder
+from model.pointcept import PointCloudHiddenStateDecoder
 from model.segment_anything import ImageHiddenStateDecoder
 from model.qwenvl import MLLMBackbone
 from model.HeadRouter import HeadRouter
@@ -23,9 +21,8 @@ class JointAffordanceModel(nn.Module):
         if point_decoder_cfg is None:
             return
 
-        share_backbone = bool(getattr(point_decoder_cfg, "share_encoder_backbone", True))
-        point_decoder_cfg.share_encoder_backbone = share_backbone
-        if share_backbone:
+        point_decoder_cfg.backbone_mode = str(point_decoder_cfg.backbone_mode).lower()
+        if point_decoder_cfg.backbone_mode == "shared":
             encoder_backbone_cfg = self.config.mllm.point_encoder_backbone.to_dict()
             decoder_backbone_cfg = dict(encoder_backbone_cfg)
             decoder_backbone_cfg["enc_mode"] = False
@@ -55,18 +52,12 @@ class JointAffordanceModel(nn.Module):
         else:
             point_feature_size = int(getattr(self.config.mllm.point_encoder_backbone, "dec_channels", (64,))[0])
 
-        self.share_point_encoder_backbone = bool(getattr(self.config.point_decoder, "share_encoder_backbone", True))
-        if self.share_point_encoder_backbone:
-            self.point_decoder = PointCloudSharedBackboneDecoder(
-                self.config.point_decoder,
-                self.config.mllm.hidden_size,
-                point_feature_size=point_feature_size,
-            )
-        else:
-            self.point_decoder = PointCloudIndependentDecoder(
-                self.config.point_decoder,
-                self.config.mllm.hidden_size,
-            )
+        self.point_decoder_uses_shared_backbone = str(self.config.point_decoder.backbone_mode).lower() == "shared"
+        self.point_decoder = PointCloudHiddenStateDecoder(
+            self.config.point_decoder,
+            self.config.mllm.hidden_size,
+            point_feature_size=point_feature_size if self.point_decoder_uses_shared_backbone else None,
+        )
         self._sync_point_decoder_config()
 
         hidden_size = int(self.config.mllm.hidden_size)
@@ -230,16 +221,12 @@ class JointAffordanceModel(nn.Module):
                 and point_encoder_outputs.get("per_point_features") is not None
                 and point_encoder_outputs.get("per_point_mask") is not None
             )
-            if self.share_point_encoder_backbone and has_per_point_features and point_clouds is not None:
-                all_point_logits = self.point_decoder(
-                    pred_embeddings=route_out["pc_emb"],
-                    per_point_features=point_encoder_outputs.get("per_point_features"),
-                    per_point_mask=point_encoder_outputs.get("per_point_mask"),
-                )
-            elif (not self.share_point_encoder_backbone) and point_clouds is not None:
+            if point_clouds is not None and (has_per_point_features or not self.point_decoder_uses_shared_backbone):
                 all_point_logits = self.point_decoder(
                     pred_embeddings=route_out["pc_emb"],
                     point_clouds=point_clouds,
+                    per_point_features=None if not has_per_point_features else point_encoder_outputs.get("per_point_features"),
+                    per_point_mask=None if not has_per_point_features else point_encoder_outputs.get("per_point_mask"),
                 )
             else:
                 all_point_logits = None
@@ -294,6 +281,5 @@ __all__ = [
     "JointAffordanceModel",
     "MLLMBackbone",
     "ImageHiddenStateDecoder",
-    "PointCloudSharedBackboneDecoder",
-    "PointCloudIndependentDecoder",
+    "PointCloudHiddenStateDecoder",
 ]

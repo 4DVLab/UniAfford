@@ -85,16 +85,15 @@ def parse_args():
 
 
 def apply_point_decoder_backbone_mode(model_config, mode: str):
-    share_backbone = mode == "shared"
     encoder_backbone_cfg = model_config.mllm.point_encoder_backbone.to_dict()
     decoder_backbone_cfg = dict(encoder_backbone_cfg)
     decoder_backbone_cfg["enc_mode"] = False
-    model_config.point_decoder.share_encoder_backbone = bool(share_backbone)
+    model_config.point_decoder.backbone_mode = mode
     model_config.point_decoder.backbone_kwargs = decoder_backbone_cfg
     model_config.point_decoder.backbone_out_channels = int(
         decoder_backbone_cfg.get("dec_channels", (64,))[0]
     )
-    if share_backbone:
+    if mode == "shared":
         model_config.mllm.enable_point_encoder = True
 
 
@@ -342,7 +341,7 @@ def main():
     decoder_backbone_mode = (
         args.point_decoder_backbone_mode
         if args.point_decoder_backbone_mode is not None
-        else ("shared" if bool(getattr(model_config.point_decoder, "share_encoder_backbone", True)) else "independent")
+        else str(model_config.point_decoder.backbone_mode).lower()
     )
     apply_point_decoder_backbone_mode(model_config, decoder_backbone_mode)
     if args.batch_size is not None:
