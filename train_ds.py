@@ -67,6 +67,13 @@ def parse_args():
         choices=["shared", "independent"],
         help="3D decoder backbone 模式：shared 为与 encoder 共用基座，independent 为独立随机初始化 backbone",
     )
+    parser.add_argument(
+        "--point_decoder_decode_mode",
+        type=str,
+        default=None,
+        choices=["prompt", "similarity"],
+        help="3D decoder 后端对齐方式：prompt 为 prompt-based 解码，similarity 为逐点相似度对齐",
+    )
     parser.add_argument("--batch_size", type=int, default=None, help="每卡训练 batch size（同时覆写 val_batch_size）")
     parser.add_argument("--epochs", type=int, default=None, help="训练总 epoch 数")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
@@ -76,15 +83,15 @@ def parse_args():
 
 
 def apply_point_decoder_backbone_mode(model_config, mode: str):
-    encoder_backbone_cfg = model_config.mllm.point_encoder_backbone.to_dict()
-    decoder_backbone_cfg = dict(encoder_backbone_cfg)
-    decoder_backbone_cfg["enc_mode"] = False
     model_config.point_decoder.backbone_mode = mode
-    model_config.point_decoder.backbone_kwargs = decoder_backbone_cfg
-    model_config.point_decoder.backbone_out_channels = int(
-        decoder_backbone_cfg.get("dec_channels", (64,))[0]
-    )
     if mode == "shared":
+        encoder_backbone_cfg = model_config.mllm.point_encoder_backbone.to_dict()
+        decoder_backbone_cfg = dict(encoder_backbone_cfg)
+        decoder_backbone_cfg["enc_mode"] = False
+        model_config.point_decoder.backbone_kwargs = decoder_backbone_cfg
+        model_config.point_decoder.backbone_out_channels = int(
+            decoder_backbone_cfg.get("dec_channels", (64,))[0]
+        )
         model_config.mllm.enable_point_encoder = True
 
 
@@ -317,6 +324,13 @@ def main():
         else str(model_config.point_decoder.backbone_mode).lower()
     )
     apply_point_decoder_backbone_mode(model_config, decoder_backbone_mode)
+    decoder_decode_mode = (
+        args.point_decoder_decode_mode
+        if args.point_decoder_decode_mode is not None
+        else str(model_config.point_decoder.decode_mode).lower()
+    )
+    model_config.point_decoder.decode_mode = decoder_decode_mode
+
     if args.batch_size is not None:
         training_configs.batch_size = int(args.batch_size)
         training_configs.val_batch_size = int(args.batch_size)
