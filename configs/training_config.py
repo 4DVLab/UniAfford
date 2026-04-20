@@ -181,8 +181,9 @@ class TrainingConfig(Configs):
         "val_batch_size": 10,  # 验证时每卡 batch 大小
         "workers": 4,
         "print_freq": 1,
-        # 微调 mllm，其他全部需要训练
-        "name_of_params_to_train": "router, lm_head, embed_tokens, image_decoder, point_decoder, text_hidden_fcs",
+        # 训练策略：默认全量训练，需要冻结的模块统一写到 name_of_params_to_freeze
+        # 例如：["mllm.model"] 冻结整个 Qwen 主干；["mllm.model.visual"] 冻结 Qwen 视觉编码器
+        "name_of_params_to_freeze": "mllm.model.visual, point_encoder.point_backbone",
         # 优化器配置
         "lr": 1e-3,
         "beta1": 0.9,
@@ -272,11 +273,11 @@ class TrainingConfig(Configs):
             # 仅作为初始化兜底；train_fsdp.py 会在构建 DataLoader 后用真实值覆盖。
             raw["steps_per_epoch"] = max(1, (samples_per_epoch + batch_size - 1) // max(1, batch_size))
 
-        params_to_train = raw.get("name_of_params_to_train", self.defaults["name_of_params_to_train"])
-        raw["name_of_params_to_train"] = (
-            params_to_train
-            if isinstance(params_to_train, list)
-            else [m.strip() for m in str(params_to_train).split(",") if m.strip()]
+        params_to_freeze = raw.get("name_of_params_to_freeze", self.defaults["name_of_params_to_freeze"])
+        raw["name_of_params_to_freeze"] = (
+            params_to_freeze
+            if isinstance(params_to_freeze, list)
+            else [m.strip() for m in str(params_to_freeze).split(",") if m.strip()]
         )
 
         lr = raw.get("lr", self.defaults["lr"])

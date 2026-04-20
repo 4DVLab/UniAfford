@@ -1,4 +1,5 @@
 import os
+import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
@@ -333,22 +334,30 @@ def format_trainability_summary(
     return "\n".join(sections)
 
 
+def build_trainability_summary_data(
+    model,
+    states: Sequence[str] = ("trainable", "frozen"),
+) -> Dict:
+    tree = build_tree_from_model(model)
+    payload = {
+        "optimizer_groups": summarize_optimizer_groups_data(model),
+        "module_trees": {},
+    }
+    for state in states:
+        payload["module_trees"][state] = serialize_tree(tree, state=state)
+    return payload
+
+
 def log_trainability_summary(
     model,
     logger,
     output_path: str,
     states: Sequence[str] = ("trainable", "frozen"),
-    max_lines_per_state: Optional[int] = 120,
 ) -> None:
-    summary = format_trainability_summary(
-        model,
-        states=states,
-        max_lines_per_state=max_lines_per_state,
-        include_optimizer_groups=True,
-    )
+    summary = build_trainability_summary_data(model, states=states)
     output_path = os.path.abspath(output_path)
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
-        f.write(summary)
+        json.dump(summary, f, ensure_ascii=False, indent=2)
         f.write("\n")
     logger.info(f"Trainability summary saved to: {output_path}")

@@ -384,6 +384,7 @@ class PointCloudHiddenStateDecoder(nn.Module):
         per_point_features: Optional[torch.Tensor] = None,
         per_point_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """返回逐点 mask logits，值域为未归一化实数。"""
         point_feat, point_mask = self._prepare_point_features(
             point_clouds=point_clouds,
             per_point_features=per_point_features,
@@ -407,12 +408,12 @@ class PointCloudHiddenStateDecoder(nn.Module):
         loss_fn: Optional[nn.Module] = None,
     ) -> Dict[str, torch.Tensor]:
         if loss_fn is None:
-            loss_fn = nn.BCELoss()
-        pred_masks = self.forward(
+            loss_fn = nn.BCEWithLogitsLoss()
+        pred_logits = self.forward(
             pred_embeddings=pred_embeddings,
             point_clouds=point_clouds,
             per_point_features=per_point_features,
             per_point_mask=per_point_mask,
         )
-        loss = loss_fn(pred_masks, gt_masks.to(pred_masks.dtype))
-        return dict(loss=loss, pred_masks=pred_masks)
+        loss = loss_fn(pred_logits, gt_masks.to(pred_logits.dtype))
+        return dict(loss=loss, pred_masks=pred_logits)

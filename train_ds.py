@@ -10,6 +10,7 @@ Joint Affordance 训练脚本（新版，基于 Qwen MLLM）
 
 import argparse
 import os
+import time
 from collections import OrderedDict
 from functools import partial
 from typing import Dict
@@ -97,11 +98,26 @@ def apply_point_decoder_backbone_mode(model_config, mode: str):
 
 # ===================== 模型初始化辅助 =====================
 
-def enable_trainable_modules(model, name_filters):
-    """按关键字列表解冻参数"""
-    for name, param in model.named_parameters():
-        if any(key in name for key in name_filters):
+def apply_trainability_policy(model, training_configs, logger):
+    def enable_all_trainable(model):
+        """默认将全部参数设为可训练。"""
+        for _, param in model.named_parameters():
             param.requires_grad = True
+
+    def freeze_modules_by_name(model, name_filters):
+        """按关键字列表冻结参数，保留 LoRA 参数可训练"""
+        if not name_filters:
+            return
+        for name, param in model.named_parameters():
+            if any(key in name for key in name_filters):
+                if "lora_" in name:
+                    continue
+                param.requires_grad = False
+
+    """默认全量训练；LoRA 开启时自动冻结 MLLM 原始参数；额外冻结统一走黑名单。"""
+    if training_configs.lora.lora_r > 0:
+        freeze_modules_by_name(model, ["mllm.model"])
+    freeze_modules_by_name(model, training_configs.name_of_params_to_freeze)
 
 
 def create_param_groups(model, config, logger):
@@ -382,15 +398,13 @@ def main():
         point_precision=model_config.point_decoder.compute_dtype,
     )
 
-    # ---------- 冻结 → LoRA → 解冻关键模块 ----------
-    for p in model.parameters():
-        p.requires_grad = False
-
+    # ---------------- 配置LORA ------------------  
     if training_configs.lora.lora_r > 0:
         logger.info(f"应用 LoRA: r={training_configs.lora.lora_r}, alpha={training_configs.lora.lora_alpha}")
         model.mllm.model = get_peft_model(model.mllm.model, training_configs.lora.to_peft_config())
 
-    enable_trainable_modules(model, training_configs.name_of_params_to_train)
+    # ---------- 冻结模块 统计参数 ----------
+    apply_trainability_policy(model, training_configs, logger)
     portable_asset_bundle = build_portable_assets(model)
     log_param_dtype_stats(model, logger, stage="before_deepspeed")
     total_params, trainable_params = count_model_params(model)
@@ -399,12 +413,7 @@ def main():
         f"ratio={100.0 * trainable_params / max(1, total_params):.2f}%"
     )
     if local_rank == 0:
-        log_trainability_summary(
-            model,
-            logger,
-            output_path=os.path.join(training_configs.log_dir, "trainability_summary_ds.txt"),
-            max_lines_per_state=160,
-        )
+        log_trainability_summary(model, logger, output_path=os.path.join(training_configs.log_dir, f"params_summary_{time.strftime('%Y%m%d_%H%M%S')}.json"))
 
     # ---------- 加载数据集（rank 0 读取后广播） ----------
     logger.info("加载数据集...")
