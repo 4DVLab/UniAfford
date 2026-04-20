@@ -17,14 +17,6 @@ class ImageHiddenStateDecoder(nn.Module):
         self.config = config
         self.visual_model = build_sam_vit_h(getattr(config, "vision_pretrained", None))
 
-        for param in self.visual_model.parameters():
-            param.requires_grad = False
-        if getattr(config, "train_mask_decoder", False):
-            self.visual_model.mask_decoder.train()
-            for param in self.visual_model.mask_decoder.parameters():
-                param.requires_grad = True
-
-
         text_fc = nn.Sequential(OrderedDict([
             ("fc1", nn.Linear(text_hidden_size, 2*text_hidden_size)),
             ("relu", nn.ReLU(inplace=True)),
@@ -32,7 +24,7 @@ class ImageHiddenStateDecoder(nn.Module):
             # ("dropout", nn.Dropout(0.0)),
         ]))
         self.text_hidden_fcs = nn.ModuleList([text_fc])
-        for param in self.text_hidden_fcs.parameters():
+        for param in self.parameters():
             param.requires_grad = True
 
         self.image_encoder = self.visual_model.image_encoder

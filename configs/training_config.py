@@ -182,8 +182,8 @@ class TrainingConfig(Configs):
         "workers": 4,
         "print_freq": 1,
         # 训练策略：默认全量训练，需要冻结的模块统一写到 name_of_params_to_freeze
-        # 例如：["mllm.model"] 冻结整个 Qwen 主干；["mllm.model.visual"] 冻结 Qwen 视觉编码器
-        "name_of_params_to_freeze": "mllm.model.visual, point_encoder.point_backbone",
+        # 默认冻结qwen的视觉编码器， point_encoder (pretrained SONATA)的点云编码器， image_decoder (SAM)的图像编码器
+        "name_of_params_to_freeze": "mllm.model.visual, point_encoder.point_backbone, image_decoder.visual_model.image_encoder",
         # 优化器配置
         "lr": 1e-3,
         "beta1": 0.9,
