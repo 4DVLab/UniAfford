@@ -184,7 +184,7 @@ class PointDecoderConfigs(Configs):
         "hidden_size": 512,
         "num_heads": 8,
         "backbone_mode": "independent",     # {"shared", "independent"}
-        "decode_mode": "prompt",            # {"similarity", "prompt"}
+        "decode_mode": "similarity",        # {"similarity", "prompt"}
         "grid_size": 0.02,
         "backbone_kwargs": None,
         "backbone_out_channels": 64,
