@@ -2,6 +2,7 @@ from configs import ImageDecoderConfigs
 import torch
 import torch.nn as nn
 from collections import OrderedDict
+from typing import Optional
 from .build_sam import build_sam_vit_h
 
 
@@ -38,6 +39,28 @@ class ImageHiddenStateDecoder(nn.Module):
         projected = self.text_hidden_fcs[0](hidden_states)
         return projected
 
+    @staticmethod
+    def _pool_query_tokens(
+        query_tokens: torch.Tensor,
+        query_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """将 token 级 query 按 mask 聚合成 SAM 所需的样本级 prompt 向量。"""
+        if query_tokens.dim() == 2:
+            return query_tokens
+        if query_tokens.dim() != 3:
+            raise ValueError(f"Image decoder expects [B, C] or [B, K, C] query tokens, got {tuple(query_tokens.shape)}")
+        if query_mask is None:
+            return query_tokens.mean(dim=1)
+        query_mask = query_mask.bool().to(query_tokens.device)
+        if query_mask.shape != query_tokens.shape[:2]:
+            raise ValueError(
+                "query_mask shape mismatch: "
+                f"expected {tuple(query_tokens.shape[:2])}, got {tuple(query_mask.shape)}"
+            )
+        weight = query_mask.unsqueeze(-1).to(query_tokens.dtype)
+        denom = weight.sum(dim=1).clamp_min(1.0)
+        return (query_tokens * weight).sum(dim=1) / denom
+
     def get_visual_embs(self, pixel_values: torch.FloatTensor):
         """使用 SAM image_encoder 提取图像特征，不计算梯度。"""
         pixel_values = pixel_values.to(dtype=self.config.compute_dtype)
@@ -50,12 +73,13 @@ class ImageHiddenStateDecoder(nn.Module):
         image_embeddings: torch.Tensor,
         input_size: tuple,
         original_size: tuple,
+        query_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         批量生成 2D 分割掩码。
 
         Args:
-            pred_embeddings: [B, C] — 每个样本的 SEG token 投影嵌入（已 mean-pool）
+            pred_embeddings: [B, K, C] 或 [B, C] — token 级 query 序列或已聚合 query
             image_embeddings: [B, C_sam, H_emb, W_emb] — SAM 图像编码特征
             input_size: (H, W) — 输入图像尺寸（batch 内统一）
             original_size: (H, W) — 原始图像尺寸（batch 内统一）
@@ -63,6 +87,7 @@ class ImageHiddenStateDecoder(nn.Module):
         Returns:
             pred_masks: [B, H_orig, W_orig]
         """
+        pred_embeddings = self._pool_query_tokens(pred_embeddings, query_mask=query_mask)
         pred_embeddings = self.project_hidden_states(pred_embeddings).to(self.config.compute_dtype)
         image_embeddings = image_embeddings.to(self.config.compute_dtype)
 

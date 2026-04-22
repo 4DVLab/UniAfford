@@ -206,7 +206,13 @@ class JointAffordanceModel(nn.Module):
             # 推理保存时再按 original_size_list 缩放还原
             original_size = input_size
 
-            all_image_logits = self.image_decoder(route_out["img_emb"], image_embeddings, input_size, original_size)
+            all_image_logits = self.image_decoder(
+                route_out["img_query_tokens"],
+                image_embeddings,
+                input_size,
+                original_size,
+                query_mask=route_out.get("img_query_mask"),
+            )
 
             # 将无效样本的输出置零（不影响 loss 计算）
             if img_valid_mask is not None:
@@ -223,10 +229,11 @@ class JointAffordanceModel(nn.Module):
             )
             if point_clouds is not None and (has_per_point_features or not self.point_decoder_uses_shared_backbone):
                 all_point_logits = self.point_decoder(
-                    pred_embeddings=route_out["pc_emb"],
                     point_clouds=point_clouds,
                     per_point_features=None if not has_per_point_features else point_encoder_outputs.get("per_point_features"),
                     per_point_mask=None if not has_per_point_features else point_encoder_outputs.get("per_point_mask"),
+                    query_embeddings=route_out.get("pc_query_tokens"),
+                    query_mask=route_out.get("pc_query_mask"),
                 )
             else:
                 all_point_logits = None

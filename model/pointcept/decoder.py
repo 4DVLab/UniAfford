@@ -84,8 +84,19 @@ class _PointCloudTwoWayAttentionBlock(nn.Module):
         prompt_tokens: torch.Tensor,
         point_tokens: torch.Tensor,
         point_mask: Optional[torch.Tensor] = None,
+        prompt_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        prompt_tokens = self.norm1(prompt_tokens + self.self_attn(prompt_tokens, prompt_tokens, prompt_tokens))
+        prompt_tokens = self.norm1(
+            prompt_tokens
+            + self.self_attn(
+                prompt_tokens,
+                prompt_tokens,
+                prompt_tokens,
+                key_padding_mask=None if prompt_mask is None else (~prompt_mask.bool()),
+            )
+        )
+        if prompt_mask is not None:
+            prompt_tokens = torch.where(prompt_mask.unsqueeze(-1), prompt_tokens, torch.zeros_like(prompt_tokens))
 
         prompt_tokens = self.norm2(
             prompt_tokens
@@ -96,10 +107,19 @@ class _PointCloudTwoWayAttentionBlock(nn.Module):
                 key_padding_mask=None if point_mask is None else (~point_mask.bool()),
             )
         )
+        if prompt_mask is not None:
+            prompt_tokens = torch.where(prompt_mask.unsqueeze(-1), prompt_tokens, torch.zeros_like(prompt_tokens))
 
         prompt_tokens = self.norm3(prompt_tokens + self.prompt_mlp(prompt_tokens))
+        if prompt_mask is not None:
+            prompt_tokens = torch.where(prompt_mask.unsqueeze(-1), prompt_tokens, torch.zeros_like(prompt_tokens))
 
-        point_delta = self.cross_attn_point_to_prompt(point_tokens, prompt_tokens, prompt_tokens)
+        point_delta = self.cross_attn_point_to_prompt(
+            point_tokens,
+            prompt_tokens,
+            prompt_tokens,
+            key_padding_mask=None if prompt_mask is None else (~prompt_mask.bool()),
+        )
         point_tokens = self.norm4(point_tokens + point_delta)
         if point_mask is not None:
             point_tokens = torch.where(point_mask.unsqueeze(-1), point_tokens, torch.zeros_like(point_tokens))
@@ -127,11 +147,12 @@ class _PointCloudTwoWayTransformer(nn.Module):
         prompt_tokens: torch.Tensor,
         point_tokens: torch.Tensor,
         point_mask: Optional[torch.Tensor] = None,
+        prompt_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         queries = prompt_tokens
         keys = point_tokens
         for layer in self.layers:
-            queries, keys = layer(queries, keys, point_mask=point_mask)
+            queries, keys = layer(queries, keys, point_mask=point_mask, prompt_mask=prompt_mask)
         queries = self.norm_final(
             queries
             + self.final_attn_prompt_to_point(
@@ -141,6 +162,8 @@ class _PointCloudTwoWayTransformer(nn.Module):
                 key_padding_mask=None if point_mask is None else (~point_mask.bool()),
             )
         )
+        if prompt_mask is not None:
+            queries = torch.where(prompt_mask.unsqueeze(-1), queries, torch.zeros_like(queries))
         return queries, keys
 
 
@@ -229,19 +252,46 @@ class _SimilarityDecoderHead(nn.Module):
         self.point_proj = nn.Linear(point_feature_size, config.hidden_size)
         self.logit_scale = nn.Parameter(torch.ones(1))
 
+    @staticmethod
+    def _pool_query_tokens(
+        projected_text: torch.Tensor,
+        query_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        if projected_text.dim() == 2:
+            return projected_text
+        if projected_text.dim() != 3:
+            raise ValueError(
+                "Similarity decoder expects [B, H] or [B, K, H] query embeddings, "
+                f"got {tuple(projected_text.shape)}"
+            )
+        if query_mask is None:
+            return projected_text.mean(dim=1)
+        query_mask = query_mask.bool().to(projected_text.device)
+        if query_mask.shape != projected_text.shape[:2]:
+            raise ValueError(
+                "query_mask shape mismatch: "
+                f"expected {tuple(projected_text.shape[:2])}, got {tuple(query_mask.shape)}"
+            )
+        weight = query_mask.unsqueeze(-1).to(projected_text.dtype)
+        denom = weight.sum(dim=1).clamp_min(1.0)
+        return (projected_text * weight).sum(dim=1) / denom
+
     def forward(
         self,
-        pred_embeddings: torch.Tensor,
+        query_embeddings: torch.Tensor,
         per_point_features: torch.Tensor,
         per_point_mask: torch.Tensor,
         projected_text: torch.Tensor,
+        query_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
-        del pred_embeddings
+        del query_embeddings
         point_feat = per_point_features.to(self.config.compute_dtype)
         point_mask = per_point_mask.bool()
-
-        text_feat = F.normalize(projected_text.to(self.config.compute_dtype), p=2, dim=-1)
+        pooled_text = self._pool_query_tokens(
+            projected_text.to(self.config.compute_dtype),
+            query_mask=query_mask,
+        )
+        text_feat = F.normalize(pooled_text, p=2, dim=-1)
         point_feat = self.point_proj(point_feat)
         point_feat = F.normalize(point_feat, p=2, dim=-1)
         point_feat = torch.where(point_mask.unsqueeze(-1), point_feat, torch.zeros_like(point_feat))
@@ -254,11 +304,11 @@ class _SimilarityDecoderHead(nn.Module):
 
 class _PromptDecoderHead(nn.Module):
     """
-    迁移 SAM 核心思路到 3D：
-    - 将文本/路由 token 视作 sparse prompt token
+    受 SeqAfford / SAM 思路启发的 3D prompt 解码头：
+    - 将 routed 3D token 序列视作 sparse prompt tokens
     - 将 per-point feature 视作 dense point tokens
-    - 使用轻量 two-way transformer 做 prompt<->point 双向交互
-    - 使用 mask token 的动态权重生成逐点 mask logits
+    - 使用轻量 two-way transformer 做多 query token 与逐点特征的交互
+    - 由交互后的 mask token 汇总全局条件，再通过 point-wise MLP 生成逐点 logits
     """
 
     def __init__(self, config: PointDecoderConfigs, point_feature_size: int):
@@ -272,32 +322,67 @@ class _PromptDecoderHead(nn.Module):
             num_heads=int(config.num_heads),
             mlp_dim=int(getattr(config, "prompt_decoder_mlp_dim", 4 * config.hidden_size)),
         )
-        self.output_hypernet = _PromptMLP(
-            input_dim=int(config.hidden_size),
-            hidden_dim=int(config.hidden_size),
-            output_dim=int(config.hidden_size),
-        )
         self.output_point_refine = nn.Sequential(
             nn.LayerNorm(int(config.hidden_size)),
             nn.Linear(int(config.hidden_size), int(config.hidden_size)),
+            nn.GELU(),
+        )
+        self.prompt_context_proj = nn.Sequential(
+            nn.LayerNorm(int(config.hidden_size)),
+            nn.Linear(int(config.hidden_size), int(config.hidden_size)),
+        )
+        self.output_mask_head = nn.Sequential(
+            nn.LayerNorm(int(config.hidden_size)),
+            nn.Linear(int(config.hidden_size), int(config.hidden_size)),
+            nn.GELU(),
+            nn.Linear(int(config.hidden_size), 1),
         )
         self.no_dense_prompt = nn.Embedding(1, config.hidden_size)
 
     def forward(
         self,
-        pred_embeddings: torch.Tensor,
+        query_embeddings: torch.Tensor,
         per_point_features: torch.Tensor,
         per_point_mask: torch.Tensor,
         projected_text: torch.Tensor,
+        query_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        pred_embeddings = pred_embeddings.to(self.config.compute_dtype)
-        del pred_embeddings
+        del query_embeddings
         point_feat = per_point_features.to(self.config.compute_dtype)
         point_mask = per_point_mask.bool()
+        prompt_tokens = projected_text.to(self.config.compute_dtype)
+        if prompt_tokens.dim() == 2:
+            prompt_tokens = prompt_tokens.unsqueeze(1)
+        elif prompt_tokens.dim() != 3:
+            raise ValueError(f"Prompt decoder expects [B, H] or [B, K, H] projected_text, got {tuple(prompt_tokens.shape)}")
 
-        prompt_tokens = projected_text.to(self.config.compute_dtype).unsqueeze(1)
+        if query_mask is None:
+            query_mask = torch.ones(
+                prompt_tokens.shape[:2],
+                dtype=torch.bool,
+                device=prompt_tokens.device,
+            )
+        else:
+            query_mask = query_mask.bool().to(prompt_tokens.device)
+            if query_mask.shape != prompt_tokens.shape[:2]:
+                raise ValueError(
+                    "query_mask shape mismatch: "
+                    f"expected {tuple(prompt_tokens.shape[:2])}, got {tuple(query_mask.shape)}"
+                )
+
         mask_token = self.mask_token.weight.unsqueeze(0).expand(prompt_tokens.shape[0], -1, -1)
         sparse_prompt_tokens = torch.cat([mask_token, prompt_tokens], dim=1)
+        sparse_prompt_mask = torch.cat(
+            [
+                torch.ones(
+                    (prompt_tokens.shape[0], 1),
+                    dtype=torch.bool,
+                    device=prompt_tokens.device,
+                ),
+                query_mask,
+            ],
+            dim=1,
+        )
 
         point_tokens = self.point_proj(point_feat)
         dense_prompt = self.no_dense_prompt.weight.view(1, 1, -1).to(point_tokens.dtype)
@@ -308,12 +393,14 @@ class _PromptDecoderHead(nn.Module):
             prompt_tokens=sparse_prompt_tokens,
             point_tokens=point_tokens,
             point_mask=point_mask,
+            prompt_mask=sparse_prompt_mask,
         )
 
         mask_token_out = prompt_out[:, 0, :]
-        dynamic_mask_weight = self.output_hypernet(mask_token_out)
         refined_point = self.output_point_refine(point_out)
-        logits = (refined_point * dynamic_mask_weight.unsqueeze(1)).sum(dim=-1)
+        prompt_context = self.prompt_context_proj(mask_token_out).unsqueeze(1)
+        conditioned_point = refined_point + prompt_context
+        logits = self.output_mask_head(conditioned_point).squeeze(-1)
         logits = torch.where(point_mask, logits, torch.zeros_like(logits))
         return logits
 
@@ -379,10 +466,11 @@ class PointCloudHiddenStateDecoder(nn.Module):
 
     def forward(
         self,
-        pred_embeddings: torch.Tensor,
         point_clouds: Optional[torch.Tensor] = None,
         per_point_features: Optional[torch.Tensor] = None,
         per_point_mask: Optional[torch.Tensor] = None,
+        query_embeddings: Optional[torch.Tensor] = None,
+        query_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """返回逐点 mask logits，值域为未归一化实数。"""
         point_feat, point_mask = self._prepare_point_features(
@@ -390,30 +478,35 @@ class PointCloudHiddenStateDecoder(nn.Module):
             per_point_features=per_point_features,
             per_point_mask=per_point_mask,
         )
-        projected_text = self.project_hidden_states(pred_embeddings)
+        assert query_embeddings is not None, "Point decoder requires token-level query_embeddings."
+        
+        projected_text = self.project_hidden_states(query_embeddings)
         return self.decoder_head(
-            pred_embeddings=pred_embeddings,
+            query_embeddings=query_embeddings,
             per_point_features=point_feat,
             per_point_mask=point_mask,
             projected_text=projected_text,
+            query_mask=query_mask,
         )
 
     def forward_with_loss(
         self,
-        pred_embeddings: torch.Tensor,
         gt_masks: torch.Tensor,
         point_clouds: Optional[torch.Tensor] = None,
         per_point_features: Optional[torch.Tensor] = None,
         per_point_mask: Optional[torch.Tensor] = None,
+        query_embeddings: Optional[torch.Tensor] = None,
+        query_mask: Optional[torch.Tensor] = None,
         loss_fn: Optional[nn.Module] = None,
     ) -> Dict[str, torch.Tensor]:
         if loss_fn is None:
             loss_fn = nn.BCEWithLogitsLoss()
         pred_logits = self.forward(
-            pred_embeddings=pred_embeddings,
             point_clouds=point_clouds,
             per_point_features=per_point_features,
             per_point_mask=per_point_mask,
+            query_embeddings=query_embeddings,
+            query_mask=query_mask,
         )
         loss = loss_fn(pred_logits, gt_masks.to(pred_logits.dtype))
         return dict(loss=loss, pred_masks=pred_logits)
