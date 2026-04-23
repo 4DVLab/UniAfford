@@ -561,7 +561,7 @@ class AGD20k_IMG(Image):
             if base in ('Seen', 'Unseen'):
                 return os.path.dirname(root), (base,)
             if splits is None:
-                splits = ('Seen', 'Unseen')
+                splits = ('Seen', )#'Unseen')
             return root, tuple(splits)
 
         root, split_list = resolve_agd_root_and_splits(dataset_root_path, splits)
@@ -600,11 +600,10 @@ class AGD20k_IMG(Image):
 
                             aff_label = aff_name.replace('_', ' ')
                             obj_label = obj_id.replace('_', ' ')
-                            obj_type = f'{aff_label}_{obj_label}'
                             print(f'loading IMG: {img_path}')
                             yield cls(
                                 img,
-                                obj_type=obj_type,
+                                obj_type=obj_label,
                                 aff_mask_dict={aff_label: aff_mask},
                             )
 
@@ -784,7 +783,7 @@ if __name__ == "__main__":
                     case 'RAGNet':
                         RAGNet.load_and_save(input_dir, output_dir)
                     case 'AGD20K' | 'AGD20k':
-                        AGD20k_IMG.load_and_save(input_dir, output_dir, keep_id=keep_id)
+                        AGD20k_IMG.load_and_save(input_dir, output_dir)
                     case e:
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
