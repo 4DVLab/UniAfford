@@ -350,9 +350,8 @@ class GEAL_PC(PointCloud):
                 if mask.shape[0] != pts.shape[0]:
                     continue
                 aff_mask_dict = {aff: mask}
-                obj_key = f"{subset_label}_{obj_c}"
-                print(f"loading GEAL_PC [{base_msg}] -> {obj_key} / {aff}")
-                yield cls(points=pts, obj_type=obj_key, aff_mask_dict=aff_mask_dict)
+                print(f"loading GEAL_PC [{base_msg}] -> {obj_c} / {aff}")
+                yield cls(points=pts, obj_type=obj_c, aff_mask_dict=aff_mask_dict)
 
         def iterator():
             found_any_subset = False
