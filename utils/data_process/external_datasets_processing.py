@@ -5,6 +5,7 @@
 
 import sys
 import os
+import warnings
 import numpy as np
 import cv2
 from collections import defaultdict
@@ -279,6 +280,111 @@ class AffordanceNet3D_PC(PointCloud):
         return iterator()
 
 
+class GEAL_PC(PointCloud):
+    """
+    适配 GEAL 论文中的 Corrupted 3D Affordance 数据（LASO-C / PIAD-C，与 Hugging Face 发布结构一致），
+    将 `dataset/corrupt.py` 中 CorruptDataset 所使用的 pickle 标注转为 `PointCloud`（进而可配合
+    `PointCloud.save_all` / JointDataset 目录格式）。
+
+    期望 **父目录** 下并列两个子数据集（名称可通过 ``subset_names`` 修改）::
+
+        parent_root/
+          LASO-C/
+            point/
+              {corrupt_type}_{level}.pkl
+              ...
+            text/
+              Affordance-Question.csv
+          PIAD-C/
+            point/
+              ...
+            text/
+              ...
+
+    ``load_all`` 会依次扫描各子集 ``point/`` 下所有 ``.pkl``，将物体类别写为
+    ``{子集名}_{class}``（如 ``LASO-C_Bed``），避免两子集类别名冲突、并保留来源。
+
+    每条 pickle 记录需包含：class, affordance, mask, point。
+    点云坐标按 pickle 内存储的（已损坏）坐标原样写入，不做 ``normalize_point_cloud``。
+    """
+
+    _DEFAULT_SUBSETS = ("LASO-C", "PIAD-C")
+
+    @classmethod
+    def load_all(
+        cls,
+        dataset_root_path,
+        aff_type=None,
+        obj_type=None,
+        **kwargs,
+    ):
+        import pickle
+
+        root = resolve_path(dataset_root_path)
+
+        aff_set = None
+        if aff_type is not None:
+            aff_set = {aff_type} if isinstance(aff_type, str) else set(map(str, aff_type))
+        obj_set = None
+        if obj_type is not None:
+            obj_set = {obj_type} if isinstance(obj_type, str) else set(obj_type)
+
+        def _yield_from_pkl(pkl_path: str, subset_label: str):
+            with open(pkl_path, "rb") as f:
+                annotations = pickle.load(f)
+            if not isinstance(annotations, (list, tuple)):
+                warnings.warn(f"GEAL_PC: 跳过非列表 pkl: {pkl_path}")
+                return
+            base_msg = os.path.relpath(pkl_path, root)
+            for data in annotations:
+                obj_c = str(data.get("class", ""))
+                aff = str(data.get("affordance", ""))
+                if obj_set is not None and obj_c not in obj_set:
+                    continue
+                if aff_set is not None and aff not in aff_set:
+                    continue
+                pts = np.asarray(data.get("point"), dtype=np.float32)
+                if pts.ndim != 2 or pts.shape[1] != 3:
+                    continue
+                mask = np.asarray(data.get("mask"), dtype=np.float32).reshape(-1)
+                if mask.shape[0] != pts.shape[0]:
+                    continue
+                aff_mask_dict = {aff: mask}
+                obj_key = f"{subset_label}_{obj_c}"
+                print(f"loading GEAL_PC [{base_msg}] -> {obj_key} / {aff}")
+                yield cls(points=pts, obj_type=obj_key, aff_mask_dict=aff_mask_dict)
+
+        def iterator():
+            found_any_subset = False
+            for subset in cls._DEFAULT_SUBSETS:
+                sub_root = os.path.join(root, subset)
+                if not os.path.isdir(sub_root):
+                    warnings.warn(f"GEAL_PC: 子数据集目录不存在，已跳过: {sub_root}")
+                    continue
+                found_any_subset = True
+                point_dir = os.path.join(sub_root, "point")
+                if not os.path.isdir(point_dir):
+                    warnings.warn(f"GEAL_PC: 无 point 目录，已跳过: {point_dir}")
+                    continue
+                pkl_files = sorted(
+                    f for f in os.listdir(point_dir) if f.lower().endswith(".pkl")
+                )
+                if not pkl_files:
+                    warnings.warn(f"GEAL_PC: point 目录内无 pkl: {point_dir}")
+                    continue
+                for fname in pkl_files:
+                    pkl_path = os.path.join(point_dir, fname)
+                    if not os.path.isfile(pkl_path):
+                        continue
+                    yield from _yield_from_pkl(pkl_path, subset)
+            if not found_any_subset:
+                raise FileNotFoundError(
+                    f"GEAL_PC: 在 {root} 下未找到任何子数据集目录 {cls._DEFAULT_SUBSETS}，请检查路径与子文件夹命名。"
+                )
+        
+        return iterator()
+
+
 """  ----------------------------------------------- Image classes ----------------------------------------------  """
 
 class BoxedImage(Image):
@@ -300,12 +406,6 @@ class BoxedImage(Image):
             self.aff_mask_dict[str(aff_type)] = box_mask
         self.dtype = 'Boxed'
 
-class HeatImage(Image):
-    def __init__(self, img:np.ndarray, obj_type, aff_mask_dict: dict = None, obj_mask:np.ndarray=None):
-        aff_mask_dict = dict(aff_mask_dict) if aff_mask_dict is not None else {}
-        super().__init__(img, obj_type=obj_type, aff_mask_dict=aff_mask_dict, obj_mask=obj_mask)
-        self.dtype = 'HeatMap'
-    # TODO: 热力图的标注转换
 
 class HANDAL_IMG(Image):
     directory_to_category = {
@@ -422,7 +522,107 @@ class HANDAL_IMG(Image):
             dir_path = os.path.join(output_root, img.obj_type, 'Image')
             img.save_to(dir_path)
 
-class AGD20k_IMG(HeatImage):...
+class AGD20k_IMG(Image):
+    """
+    AGD20K（Cross-View-AG）第一人称测试集：目录为
+    ``{root}/{Seen|Unseen}/testset/egocentric/{affordance_name}/{object_name}/{rgb}``，
+    像素级 GT 为同结构的 ``.../testset/GT/.../*.png``（灰度图，与 rgb 同名改扩展名）。
+
+    导出时 ``obj_type`` 为 ``{affordance_name}_{object_name}``（文件夹名中的下划线已改为空格，二者之间仍用下划线连接），
+    避免不同动作下相同物体文件夹名冲突；``aff_mask_dict`` 的 key 为规范化后的动作名（下划线→空格）。
+    """
+
+    _VALID_RGB_EXT = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+
+    def __init__(self, img, obj_type, aff_mask_dict=None, obj_mask=None, visible_mask=None, **kwargs):
+        super().__init__(
+            img=img,
+            obj_type=obj_type,
+            aff_mask_dict=aff_mask_dict,
+            obj_mask=obj_mask,
+            visible_mask=visible_mask,
+            **kwargs,
+        )
+
+    @classmethod
+    def load_all(cls, dataset_root_path, splits=None, subset='testset', **kwargs):
+        """
+        Args:
+            dataset_root_path: AGD20K 根目录（含 Seen/ Unseen），或某一划分目录
+            splits: 遍历的划分，默认 ``('Seen', 'Unseen')``；若 *dataset_root_path* 已为划分子目录则忽略
+            subset: 含 GT 的子集名，默认为 ``testset``（与官方训练代码一致）
+        """
+        kwargs.pop('keep_id', None)
+
+        def resolve_agd_root_and_splits(dataset_root_path, splits):
+            """支持 ``AGD20K`` 根目录，或直接传入 ``.../Seen``、``.../Unseen`` 子目录。"""
+            root = os.path.normpath(dataset_root_path)
+            base = os.path.basename(root)
+            if base in ('Seen', 'Unseen'):
+                return os.path.dirname(root), (base,)
+            if splits is None:
+                splits = ('Seen', 'Unseen')
+            return root, tuple(splits)
+
+        root, split_list = resolve_agd_root_and_splits(dataset_root_path, splits)
+
+        def iterator():
+            for sp in split_list:
+                ego_root = os.path.join(root, sp, subset, 'egocentric')
+                gt_root = os.path.join(root, sp, subset, 'GT')
+                if not os.path.isdir(ego_root) or not os.path.isdir(gt_root):
+                    continue
+
+                for aff_name in sorted(os.listdir(ego_root)):
+                    aff_ego = os.path.join(ego_root, aff_name)
+                    if not os.path.isdir(aff_ego):
+                        continue
+                    for obj_id in sorted(os.listdir(aff_ego)):
+                        obj_dir = os.path.join(aff_ego, obj_id)
+                        if not os.path.isdir(obj_dir):
+                            continue
+                        for fname in sorted(os.listdir(obj_dir)):
+                            lower = fname.lower()
+                            if not lower.endswith(cls._VALID_RGB_EXT):
+                                continue
+                            stem, _ = os.path.splitext(fname)
+                            mask_path = os.path.join(gt_root, aff_name, obj_id, stem + '.png')
+                            if not os.path.isfile(mask_path):
+                                continue
+
+                            img_path = os.path.join(obj_dir, fname)
+                            img = cv2.imread(img_path)
+                            if img is None:
+                                continue
+                            aff_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                            if aff_mask is None:
+                                continue
+
+                            aff_label = aff_name.replace('_', ' ')
+                            obj_label = obj_id.replace('_', ' ')
+                            obj_type = f'{aff_label}_{obj_label}'
+                            print(f'loading IMG: {img_path}')
+                            yield cls(
+                                img,
+                                obj_type=obj_type,
+                                aff_mask_dict={aff_label: aff_mask},
+                            )
+
+        return iterator()
+
+    @classmethod
+    def load_and_save(cls, input_root, output_root, splits=None, subset='testset', **kwargs):
+        id_counter = {}
+        for img in cls.load_all(input_root, splits=splits, subset=subset, **kwargs):
+            dir_path = os.path.join(output_root, img.obj_type, 'Image')
+            if not os.path.exists(dir_path):
+                os.makedirs(dir_path, exist_ok=True)
+            else:
+                id_counter[img.obj_type] = id_counter.get(img.obj_type, 0) + 1
+                file_id = id_counter[img.obj_type]
+            img.save_to(dir_path)
+            img.free_memory()
+
 
 class RAGNet(Image):
     sub_dataset = [
@@ -493,7 +693,7 @@ if __name__ == "__main__":
     parser.add_argument("-m", "--modality", type=str, nargs="+", help="手动添加数据的模态，可选一个或多个",
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
     parser.add_argument("-d", "--dataset", type=str, help="按照预设定数据集整理",
-                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'LASO', 'AffordanceNet3D'])
+                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'LASO', 'AffordanceNet3D', 'GEAL'])
     parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
     parser.add_argument("-t", "--obj_type", type=str, help="物体类型", default=None)
     parser.add_argument('-s', '--show', type=str, nargs="+", help='直接渲染点云文件的路径，选择时只执行渲染操作', default=[])
@@ -539,6 +739,11 @@ if __name__ == "__main__":
                         pc = AGPIL_PC.load_file(file_path)
                     case 'PIADv2':
                         pc = PIADv2_PC.load_file(file_path)
+                    case 'GEAL':
+                        raise TypeError(
+                            'GEAL（-d GEAL）为 pickle 批量导出，不支持 -s/--show；'
+                            '请对导出的 CSV 使用 -d None -s <path>'
+                        )
                     case e:
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
                 pc.show()
@@ -560,6 +765,8 @@ if __name__ == "__main__":
                         LASO_PC.load_and_save(input_dir, output_dir)
                     case 'AffordanceNet3D':
                         AffordanceNet3D_PC.load_and_save(input_dir, output_dir)
+                    case 'GEAL':
+                        GEAL_PC.load_and_save(input_dir, output_dir)
                     case e:
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
@@ -576,7 +783,8 @@ if __name__ == "__main__":
                         )
                     case 'RAGNet':
                         RAGNet.load_and_save(input_dir, output_dir)
-                    case 'AGD20K' | 'AGD20k': ...
+                    case 'AGD20K' | 'AGD20k':
+                        AGD20k_IMG.load_and_save(input_dir, output_dir, keep_id=keep_id)
                     case e:
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
