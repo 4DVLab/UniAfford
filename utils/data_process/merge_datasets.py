@@ -46,7 +46,7 @@ def copy_obj(obj_path, obj_name):
         elif m.endswith('.csv'):
             # 处理CSV文件
             output_csv = os.path.join(obj_output_path, m)
-            fieldnames = ['ins', 'obj_type', 'aff_type', 'id']
+            fieldnames = ['ins', 'obj_type', 'aff_type', 'id', 'img_id', 'pc_id']
 
             # 如果输出CSV已存在，追加模式；否则创建新文件
             mode = 'a' if os.path.exists(output_csv) else 'w'
@@ -62,7 +62,9 @@ def copy_obj(obj_path, obj_name):
                             'ins': clean_quotes(row.get("ins", "")),  # 兼容之前的问题
                             'obj_type': row.get('obj_type', ''),
                             'aff_type': row.get('aff_type', ''),
-                            'id': row.get('id', '')
+                            'id': row.get('id', ''),
+                            'img_id': row.get('img_id', ''),
+                            'pc_id': row.get('pc_id', ''),
                         }
                         writer.writerow(processed_row)
 

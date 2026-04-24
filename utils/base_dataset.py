@@ -107,6 +107,13 @@ def save_info(output_dir: str, info_dict: Dict[str, Dict[str, Dict[str, int]]] =
 
 """ ------------------------------------ 3种基础模态的支持 ----------------------------------- """
 class Modality:
+    @staticmethod
+    def _normalize_label(label: Optional[Any]) -> Optional[str]:
+        """统一规范标签文本：转字符串、去首尾空白并默认转小写。"""
+        if label is None:
+            return None
+        return str(label).strip().lower()
+
     @classmethod
     def get_by_id(cls, obj_type, idx):
         # 优先使用 id->object 索引表
@@ -168,8 +175,8 @@ class Modality:
         if arg is None:
             return None
         if isinstance(arg, str):
-            return {arg}
-        return set(arg)
+            return {Modality._normalize_label(arg)}
+        return {Modality._normalize_label(item) for item in arg if item is not None}
     
     @staticmethod
     def normalize_filter_args(obj_type, target_ids_dict=None):
@@ -182,13 +189,34 @@ class Modality:
         # 2. 处理 target_ids_dict 对 obj_type 的限制
         # 如果提供了 target_ids_dict，优先使用其中的 key 作为 obj_set 的基础
         if target_ids_dict is not None:
-            target_obj_keys = set(target_ids_dict.keys())
+            target_obj_keys = {Modality._normalize_label(key) for key in target_ids_dict.keys()}
             if obj_type_set is not None:
                 obj_type_set = obj_type_set & target_obj_keys # 取交集
             else:
                 obj_type_set = target_obj_keys
             
         return obj_type_set
+
+    @staticmethod
+    def _normalize_target_ids_dict(target_ids_dict):
+        """标准化 target_ids_dict 的 obj/aff key，保持 value 原样。"""
+        if target_ids_dict is None:
+            return None
+
+        normalized = {}
+        for obj_type, aff_dict in target_ids_dict.items():
+            norm_obj = Modality._normalize_label(obj_type)
+            if norm_obj is None:
+                continue
+
+            normalized_aff = {}
+            for aff_type, target_ids in (aff_dict or {}).items():
+                norm_aff = Modality._normalize_label(aff_type)
+                if norm_aff is None:
+                    continue
+                normalized_aff[norm_aff] = target_ids
+            normalized[norm_obj] = normalized_aff
+        return normalized
 
     @staticmethod
     def _normalize_aff_mask_dict(aff_mask_dict):
@@ -199,7 +227,7 @@ class Modality:
         for aff_type, mask_col in aff_mask_dict.items():
             if aff_type is None or mask_col is None:
                 continue
-            normalized[str(aff_type)] = np.asarray(mask_col)
+            normalized[Modality._normalize_label(aff_type)] = np.asarray(mask_col)
         return normalized
 
     def get_aff_types(self) -> List[str]:
@@ -212,6 +240,7 @@ class Modality:
 
     def get_aff_index(self, aff_type: str):
         """返回 aff_type 在 aff_types 列表中的索引，不存在则返回 None。"""
+        aff_type = self._normalize_label(aff_type)
         aff_types = self.get_aff_types()
         if not aff_types:
             return None
@@ -231,7 +260,7 @@ class Modality:
         """根据 aff_type 返回 mask。无 aff_mask_dict 的模态（如 Instruction）返回 None。"""
         if aff_type is None:
             return None
-        return getattr(self, 'aff_mask_dict', {}).get(aff_type)
+        return getattr(self, 'aff_mask_dict', {}).get(self._normalize_label(aff_type))
 
     def get_mask_by_index(self, idx: int):
         """根据索引返回 mask。"""
@@ -261,15 +290,15 @@ class PointCloud(Modality):
 
     def __init__(self, points, obj_type, aff_mask_dict: Optional[Dict[str, np.ndarray]] = None, given_id:int=None):
         self.points = points
-        self.obj_type = obj_type
+        self.obj_type = Modality._normalize_label(obj_type)
        
-        PointCloud.all[obj_type].append(self)
-        PointCloud.count[obj_type]['ID'] += 1
-        self.id = PointCloud.count[obj_type]['ID'] if given_id is None else given_id
-        PointCloud.index[obj_type][self.id] = self
+        PointCloud.all[self.obj_type].append(self)
+        PointCloud.count[self.obj_type]['ID'] += 1
+        self.id = PointCloud.count[self.obj_type]['ID'] if given_id is None else given_id
+        PointCloud.index[self.obj_type][self.id] = self
         self.aff_mask_dict = Modality._normalize_aff_mask_dict(aff_mask_dict)
         for l in self.aff_mask_dict.keys():
-            PointCloud.count[obj_type][l] += 1
+            PointCloud.count[self.obj_type][l] += 1
 
         self.is_sorted = False
         self._hash = None
@@ -330,6 +359,7 @@ class PointCloud(Modality):
             keep_id: 是否保持文件的id，默认False加载时重新分配id
         """
         obj_type = os.path.basename(os.path.dirname(filepath)) if obj_type is None else obj_type
+        obj_type = Modality._normalize_label(obj_type)
 
         with open(filepath, 'r') as f:
             first_line = f.readline().strip()
@@ -343,7 +373,7 @@ class PointCloud(Modality):
             given_id = None
 
         if len(header) > 3:
-            labels = header[3:]
+            labels = [Modality._normalize_label(label) for label in header[3:]]
             mask = data[:, 3:]
 
             # 根据 aff_type 过滤列（aff_type 为 None 时保留全部）
@@ -399,24 +429,43 @@ class PointCloud(Modality):
                              如果提供了此参数，只加载字典中存在的 obj_type 及其对应的 IDs。
         """
         # 确定要加载的文件
-        obj_set = cls.normalize_filter_args(obj_type, target_ids_dict)
-        all_objs = set([d for d in os.listdir(dataset_root_path) if os.path.isdir(os.path.join(dataset_root_path, d))])
+        normalized_target_ids_dict = Modality._normalize_target_ids_dict(target_ids_dict)
+        obj_set = cls.normalize_filter_args(obj_type, normalized_target_ids_dict)
+        obj_dir_map = {
+            Modality._normalize_label(d): d
+            for d in os.listdir(dataset_root_path)
+            if os.path.isdir(os.path.join(dataset_root_path, d))
+        }
+        all_objs = set(obj_dir_map.keys())
         if obj_set is not None:
             all_objs &= obj_set
         
         def iterator():
             for obj_type_name in tqdm(sorted(all_objs), desc='加载PointCloud'):
-                dir_path = os.path.join(dataset_root_path, obj_type_name, 'PointCloud')
+                real_obj_dir = obj_dir_map[obj_type_name]
+                dir_path = os.path.join(dataset_root_path, real_obj_dir, 'PointCloud')
                 if not os.path.exists(dir_path):
                     continue
                 
-                # 注意：target_ids_dict 的 key 必须与文件夹名完全一致
-                if target_ids_dict:
+                if normalized_target_ids_dict:
                     files_id_to_load = set()
-                    for _aff, target_ids in target_ids_dict.get(obj_type_name, {}).items():
+                    for _aff, target_ids in normalized_target_ids_dict.get(obj_type_name, {}).items():
                         for entry in target_ids:
                             files_id_to_load.add(entry)
-                    files_to_load = [f"{obj_type_name}_{target_id}.csv" for target_id in sorted(files_id_to_load)]
+                    files_to_load = []
+                    for target_id in sorted(files_id_to_load):
+                        candidate_names = [
+                            f"{obj_type_name}_{target_id}.csv",
+                            f"{real_obj_dir}_{target_id}.csv",
+                        ]
+                        matched = next(
+                            (name for name in candidate_names if os.path.exists(os.path.join(dir_path, name))),
+                            None,
+                        )
+                        if matched is not None:
+                            files_to_load.append(matched)
+                        else:
+                            warnings.warn(f"PointCloud file not found: {obj_type_name}_{target_id}.csv")
                 else:
                     files_to_load = [f for f in os.listdir(dir_path) if f.endswith('.csv')]
             
@@ -595,13 +644,13 @@ class Image(Modality):
         if self.img.ndim == 2:  # 灰度图转三通道
             self.img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
 
+        self.obj_type = Modality._normalize_label(obj_type)
         self.aff_mask_dict = Modality._normalize_aff_mask_dict(aff_mask_dict)
         for l in self.aff_mask_dict.keys():
-            Image.count[obj_type][l] += 1
+            Image.count[self.obj_type][l] += 1
 
         self.dtype = 'No-mask' if not self.aff_mask_dict else 'Segmented'
-        self.obj_type = obj_type
-        Image.all[obj_type].append(self)
+        Image.all[self.obj_type].append(self)
 
         Image.count[self.obj_type]['ID'] += 1
         self.id = Image.count[self.obj_type]['ID'] if given_id is None else given_id
@@ -899,6 +948,7 @@ class Image(Modality):
        
         if obj_type is None:
             obj_type = inferred_obj_type
+        obj_type = Modality._normalize_label(obj_type)
        
         # 加载RGB图片
         img = cv2.imread(filepath)
@@ -912,20 +962,29 @@ class Image(Modality):
             aff_set = Modality.normalize_to_set(aff_type)
 
             # 遍历mask目录下的所有label子目录
-            for aff in os.listdir(mask_dir):
+            for raw_aff in os.listdir(mask_dir):
+                aff = Modality._normalize_label(raw_aff)
                 # aff 过滤：如果指定了 aff_type，则只加载在列表中的子目录
                 if aff_set is not None and aff not in aff_set:
                     continue
 
-                label_path = os.path.join(mask_dir, aff)
+                label_path = os.path.join(mask_dir, raw_aff)
                 if not os.path.isdir(label_path):
                     continue
                
                 # 查找对应的mask文件: {obj_type}_{id}_{label}.png
-                mask_filename = f'{obj_type}_{inferred_id}_{aff}.png'
-                mask_filepath = os.path.join(label_path, mask_filename)
+                candidate_filenames = [
+                    f'{obj_type}_{inferred_id}_{aff}.png',
+                    f'{inferred_obj_type}_{inferred_id}_{raw_aff}.png',
+                ]
+                mask_filepath = None
+                for mask_filename in candidate_filenames:
+                    candidate_path = os.path.join(label_path, mask_filename)
+                    if os.path.exists(candidate_path):
+                        mask_filepath = candidate_path
+                        break
                
-                if os.path.exists(mask_filepath):
+                if mask_filepath is not None and os.path.exists(mask_filepath):
                     mask = cv2.imread(mask_filepath, cv2.IMREAD_GRAYSCALE)
                     if mask is not None:
                         aff_mask_dict[aff] = mask
@@ -976,22 +1035,29 @@ class Image(Modality):
         VALID_EXTS = ('.png', '.jpg', '.jpeg') # 定义支持的图片后缀
 
         # 确定要遍历的物体类型列表
-        obj_set = cls.normalize_filter_args(obj_type, target_ids_dict)
-        all_objs = set([d for d in os.listdir(dataset_root_path) if os.path.isdir(os.path.join(dataset_root_path, d))])
+        normalized_target_ids_dict = Modality._normalize_target_ids_dict(target_ids_dict)
+        obj_set = cls.normalize_filter_args(obj_type, normalized_target_ids_dict)
+        obj_dir_map = {
+            Modality._normalize_label(d): d
+            for d in os.listdir(dataset_root_path)
+            if os.path.isdir(os.path.join(dataset_root_path, d))
+        }
+        all_objs = set(obj_dir_map.keys())
         if obj_set is not None:
             all_objs &= obj_set
 
         def iterator():
             for obj_type_name in tqdm(sorted(all_objs), desc='加载Image'):
-                rgb_dir = os.path.join(dataset_root_path, obj_type_name, 'Image', 'rgb')
+                real_obj_dir = obj_dir_map[obj_type_name]
+                rgb_dir = os.path.join(dataset_root_path, real_obj_dir, 'Image', 'rgb')
                 if not os.path.exists(rgb_dir):
                     continue
                 
                 files_to_load = set()
                 # 构造指定id的rgb文件名
-                if target_ids_dict is not None:
+                if normalized_target_ids_dict is not None:
                     # 这里虽然多了一层循环，但在 ID 确定的情况下，比 os.listdir 依然快得多
-                    for _aff, target_ids in target_ids_dict.get(obj_type_name, dict()).items():
+                    for _aff, target_ids in normalized_target_ids_dict.get(obj_type_name, dict()).items():
                         for target_entry in sorted(target_ids):
                             if isinstance(target_entry, (list, tuple)):
                                 if len(target_entry) == 0:
@@ -1002,11 +1068,16 @@ class Image(Modality):
                             found = False
                             # 尝试构造文件名
                             for ext in VALID_EXTS:
-                                filename = f"{obj_type_name}_{target_id}{ext}"
-                                # 只有文件真实存在时，才加入待加载列表
-                                if os.path.exists(os.path.join(rgb_dir, filename)):
-                                    files_to_load.add(filename)
-                                    found = True
+                                for filename in (
+                                    f"{obj_type_name}_{target_id}{ext}",
+                                    f"{real_obj_dir}_{target_id}{ext}",
+                                ):
+                                    # 只有文件真实存在时，才加入待加载列表
+                                    if os.path.exists(os.path.join(rgb_dir, filename)):
+                                        files_to_load.add(filename)
+                                        found = True
+                                        break
+                                if found:
                                     break
                             
                             if not found:
@@ -1077,13 +1148,32 @@ class Instruction(Modality):
     count = defaultdict(lambda: defaultdict(int))
     index = defaultdict(dict)
 
-    def __init__(self, ins, obj_type:str=None, aff_type:str=None, given_id:int=None):
-        self.ins = ins
-        self.obj_type = obj_type
+    @staticmethod
+    def _normalize_optional_id(value):
+        if value in (None, "", "None", "none"):
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
 
-        self.aff_type = aff_type
-        if aff_type is not None:
-            Instruction.count[obj_type][aff_type] += 1
+    def __init__(
+        self,
+        ins,
+        obj_type: str = None,
+        aff_type: str = None,
+        img_id: Optional[int] = None,
+        pc_id: Optional[int] = None,
+        given_id: int = None,
+    ):
+        self.ins = ins
+        self.obj_type = Modality._normalize_label(obj_type)
+
+        self.aff_type = Modality._normalize_label(aff_type)
+        self.img_id = self._normalize_optional_id(img_id)
+        self.pc_id = self._normalize_optional_id(pc_id)
+        if self.aff_type is not None:
+            Instruction.count[self.obj_type][self.aff_type] += 1
         
         # Note: 这里我们假设如果是指定ID加载，外部逻辑会保证ID的唯一性和正确性
         Instruction.count[self.obj_type]['ID'] += 1  # Note: Ins的ID并不是最大的id，仅表示计数
@@ -1102,7 +1192,19 @@ class Instruction(Modality):
         aff_set = Modality.normalize_to_set(aff_type)
         
         # 将 target_ids 转为 set 以优化查找速度
-        target_ids_set = set(target_ids) if target_ids is not None else None
+        target_ids_set = None
+        if target_ids is not None:
+            target_ids_set = set()
+            for entry in target_ids:
+                if isinstance(entry, dict):
+                    entry_id = entry.get("id", entry.get("ins_id"))
+                elif isinstance(entry, (list, tuple)):
+                    entry_id = entry[0] if len(entry) > 0 else None
+                else:
+                    entry_id = entry
+                normalized_id = cls._normalize_optional_id(entry_id)
+                if normalized_id is not None:
+                    target_ids_set.add(normalized_id)
 
         # 加载csv文件，包含header
         instructions = []
@@ -1110,8 +1212,10 @@ class Instruction(Modality):
             reader = csv.DictReader(f)
             for row in reader:  # 读文件的行很快，不用tqdm
                 ins = row.get('ins')
-                obj = row.get('obj_type')
-                aff = row.get('aff_type')
+                obj = Modality._normalize_label(row.get('obj_type'))
+                aff = Modality._normalize_label(row.get('aff_type'))
+                img_id = cls._normalize_optional_id(row.get('img_id'))
+                pc_id = cls._normalize_optional_id(row.get('pc_id'))
                 
                 # 1. Affordance 过滤
                 if aff_set is not None and aff not in aff_set: continue
@@ -1128,7 +1232,16 @@ class Instruction(Modality):
                 else:
                     given_id = row_id
 
-                instructions.append(cls(ins, obj_type=obj, aff_type=aff, given_id=given_id))
+                instructions.append(
+                    cls(
+                        ins,
+                        obj_type=obj,
+                        aff_type=aff,
+                        img_id=img_id,
+                        pc_id=pc_id,
+                        given_id=given_id,
+                    )
+                )
         return instructions
 
     @classmethod
@@ -1139,21 +1252,37 @@ class Instruction(Modality):
                              如果提供了此参数，只加载字典中存在的 obj_type 及其对应的 IDs。
         """
         """一次加载一个物体，不使用迭代器"""
-        obj_set = cls.normalize_filter_args(obj_type, target_ids_dict)
+        normalized_target_ids_dict = Modality._normalize_target_ids_dict(target_ids_dict)
+        obj_set = cls.normalize_filter_args(obj_type, normalized_target_ids_dict)
         # 合并 obj_set 和目录下所有文件夹名，确保 tqdm 数量正确（处理全部可能出现的 obj_type）
-        all_objs = set([d for d in os.listdir(dataset_root_path) if os.path.isdir(os.path.join(dataset_root_path, d))])
+        obj_dir_map = {
+            Modality._normalize_label(d): d
+            for d in os.listdir(dataset_root_path)
+            if os.path.isdir(os.path.join(dataset_root_path, d))
+        }
+        all_objs = set(obj_dir_map.keys())
         if obj_set is not None:
             all_objs &= obj_set
         
         for obj in tqdm(sorted(all_objs), desc='加载Instruction'):
-            file_path = os.path.join(dataset_root_path, obj, 'Instruction.csv')
+            real_obj_dir = obj_dir_map[obj]
+            file_path = os.path.join(dataset_root_path, real_obj_dir, 'Instruction.csv')
             if os.path.exists(file_path):
                 # 获取当前物体需要加载的具体 ID 列表
                 current_target_ids = None
-                if target_ids_dict is not None:
+                if normalized_target_ids_dict is not None:
                     files_id_to_load = set()
-                    for _aff, target_ids in target_ids_dict.get(obj, {}).items():
-                        files_id_to_load |= set(target_ids)  # 直接取并集
+                    for _aff, target_ids in normalized_target_ids_dict.get(obj, {}).items():
+                        for entry in target_ids:
+                            if isinstance(entry, dict):
+                                entry_id = entry.get("id", entry.get("ins_id"))
+                            elif isinstance(entry, (list, tuple)):
+                                entry_id = entry[0] if len(entry) > 0 else None
+                            else:
+                                entry_id = entry
+                            normalized_id = cls._normalize_optional_id(entry_id)
+                            if normalized_id is not None:
+                                files_id_to_load.add(normalized_id)
                     current_target_ids = sorted(files_id_to_load)
                 
                 cls.load_file(file_path, aff_type=aff_type, keep_id=keep_id, target_ids=current_target_ids)
@@ -1167,7 +1296,7 @@ class Instruction(Modality):
             keep_id: 是否保持对象的 id，False 时按顺序重新分配 id
         """
         # 保存为csv文件，包含header
-        fieldnames = ['ins', 'obj_type', 'aff_type', 'id']
+        fieldnames = ['ins', 'obj_type', 'aff_type', 'id', 'img_id', 'pc_id']
         if isinstance(obj_type, str):
             obj_type = [obj_type]
 
@@ -1197,6 +1326,8 @@ class Instruction(Modality):
                             inst.obj_type,
                             inst.aff_type,
                             inst.id,
+                            '' if inst.img_id is None else inst.img_id,
+                            '' if inst.pc_id is None else inst.pc_id,
                         ])
                 else:
                     # 按顺序重新分配 id
@@ -1208,6 +1339,8 @@ class Instruction(Modality):
                             inst.obj_type,
                             inst.aff_type,
                             id_counter,
+                            '' if inst.img_id is None else inst.img_id,
+                            '' if inst.pc_id is None else inst.pc_id,
                         ])
 
 
@@ -1245,7 +1378,7 @@ class JointDataSample:
             obj_type = ins.obj_type
             aff_type_val = ins.aff_type
         elif aff_type is not None:
-            aff_type_val = aff_type
+            aff_type_val = Modality._normalize_label(aff_type)
             if img is not None:
                 obj_type = img.obj_type
                 if img.get_aff_index(aff_type_val) is None:
@@ -1259,8 +1392,8 @@ class JointDataSample:
         else:
             raise ValueError('需提供 ins 或 aff_type')
 
-        self.aff_type = aff_type_val
-        self.obj_type = obj_type
+        self.aff_type = Modality._normalize_label(aff_type_val)
+        self.obj_type = Modality._normalize_label(obj_type)
 
         # 如果没有 ins 参数输入，则使用点云的物体和类别作为 ins
         if ins is None and pc is not None:
@@ -1279,6 +1412,8 @@ class JointDataSample:
                 ins=default_ins_text,
                 obj_type=obj_type,
                 aff_type=aff_type_val,
+                img_id=img.id if img is not None else None,
+                pc_id=pc.id if pc is not None else None,
             )
 
         JointDataSample.start_id += 1
@@ -1381,12 +1516,125 @@ class JointDataset:
 
     @staticmethod
     def _entry_primary_id(entry):
-        """从 split entry 中提取主 id（兼容 int / [id, ...] / (id, ...)）。"""
+        """从 split entry 中提取主 id（兼容 int / [id, ...] / dict）。"""
+        if isinstance(entry, dict):
+            value = entry.get("id", entry.get("ins_id", None))
+            if value in (None, "", "None", "none"):
+                return None
+            return int(value)
         if isinstance(entry, (list, tuple)):
             return int(entry[0]) if len(entry) > 0 else None
         if entry is None:
             return None
         return int(entry)
+
+    @staticmethod
+    def _entry_linked_id(entry, key: str):
+        """从 split entry 中提取绑定到其他模态的 id。"""
+        if not isinstance(entry, dict):
+            return None
+        value = entry.get(key)
+        if value in (None, "", "None", "none"):
+            return None
+        return int(value)
+
+    @staticmethod
+    def _normalize_instruction_entry(entry):
+        """归一化 Instruction entry，兼容旧 int / 新 dict 结构。"""
+        if entry is None:
+            return None
+        if isinstance(entry, dict):
+            ins_id = JointDataset._entry_primary_id(entry)
+            img_id = JointDataset._entry_linked_id(entry, "img_id")
+            pc_id = JointDataset._entry_linked_id(entry, "pc_id")
+            if ins_id is None and img_id is None and pc_id is None:
+                return None
+            return {"id": ins_id, "img_id": img_id, "pc_id": pc_id}
+        if isinstance(entry, (list, tuple)):
+            if len(entry) == 0:
+                return None
+            return {
+                "id": int(entry[0]),
+                "img_id": int(entry[1]) if len(entry) > 1 and entry[1] is not None else None,
+                "pc_id": int(entry[2]) if len(entry) > 2 and entry[2] is not None else None,
+            }
+        return {"id": int(entry), "img_id": None, "pc_id": None}
+
+    @staticmethod
+    def _compose_group_entries(ins_entries, img_entries, pc_entries):
+        """将同一 obj/aff 组的多模态 entry 组装为样本索引。"""
+        normalized_ins = []
+        for entry in ins_entries or []:
+            normalized = JointDataset._normalize_instruction_entry(entry)
+            if normalized is not None:
+                normalized_ins.append(normalized)
+
+        remaining_img = list(img_entries or [])
+        remaining_pc = list(pc_entries or [])
+        img_entry_by_id = {
+            JointDataset._entry_primary_id(entry): entry
+            for entry in remaining_img
+            if JointDataset._entry_primary_id(entry) is not None
+        }
+        pc_entry_by_id = {
+            JointDataset._entry_primary_id(entry): entry
+            for entry in remaining_pc
+            if JointDataset._entry_primary_id(entry) is not None
+        }
+        used_img_ids = set()
+        used_pc_ids = set()
+        grouped_entries = []
+
+        def _next_unused(entries, used_ids):
+            for entry in entries:
+                entry_id = JointDataset._entry_primary_id(entry)
+                if entry_id is None or entry_id not in used_ids:
+                    if entry_id is not None:
+                        used_ids.add(entry_id)
+                    return entry
+            return None
+
+        for ins_entry in normalized_ins:
+            bound_img_id = ins_entry.get("img_id")
+            bound_pc_id = ins_entry.get("pc_id")
+
+            if bound_img_id is not None:
+                img_entry = img_entry_by_id.get(bound_img_id, bound_img_id)
+                used_img_ids.add(bound_img_id)
+            else:
+                img_entry = _next_unused(remaining_img, used_img_ids)
+
+            if bound_pc_id is not None:
+                pc_entry = pc_entry_by_id.get(bound_pc_id, bound_pc_id)
+                used_pc_ids.add(bound_pc_id)
+            else:
+                pc_entry = _next_unused(remaining_pc, used_pc_ids)
+
+            grouped_entries.append(
+                {
+                    "ins_entry": ins_entry,
+                    "img_entry": img_entry,
+                    "pc_entry": pc_entry,
+                }
+            )
+
+        leftover_img = [entry for entry in remaining_img if JointDataset._entry_primary_id(entry) not in used_img_ids]
+        leftover_pc = [entry for entry in remaining_pc if JointDataset._entry_primary_id(entry) not in used_pc_ids]
+        max_leftover = max(len(leftover_img), len(leftover_pc))
+        for i in range(max_leftover):
+            img_entry = leftover_img[i] if i < len(leftover_img) else None
+            pc_entry = leftover_pc[i] if i < len(leftover_pc) else None
+            if img_entry is None and pc_entry is None:
+                continue
+            grouped_entries.append(
+                {
+                    "ins_entry": None,
+                    "img_entry": img_entry,
+                    "pc_entry": pc_entry,
+                }
+            )
+
+        return grouped_entries
 
     def _build_lazy_sample_index(self) -> List[Dict[str, Any]]:
         """根据 sample_ids 构建轻量样本索引，不加载图像/点云本体。"""
@@ -1406,16 +1654,11 @@ class JointDataset:
                 ins_ids = self.sample_ids.get('ins', {}).get(obj_type, {}).get(aff_type, [])
                 img_ids = self.sample_ids.get('img', {}).get(obj_type, {}).get(aff_type, [])
                 pc_ids = self.sample_ids.get('pc', {}).get(obj_type, {}).get(aff_type, [])
-
-                max_len = max(len(ins_ids), len(img_ids), len(pc_ids))
-                if max_len == 0:
-                    continue
-
-                for i in range(max_len):
-                    ins_entry = ins_ids[i] if i < len(ins_ids) else None
-                    img_entry = img_ids[i] if i < len(img_ids) else None
-                    pc_entry = pc_ids[i] if i < len(pc_ids) else None
-                    # 至少一个模态可用才纳入索引
+                group_entries = self._compose_group_entries(ins_ids, img_ids, pc_ids)
+                for entry_group in group_entries:
+                    ins_entry = entry_group["ins_entry"]
+                    img_entry = entry_group["img_entry"]
+                    pc_entry = entry_group["pc_entry"]
                     if ins_entry is None and img_entry is None and pc_entry is None:
                         continue
                     sample_index.append(
@@ -1451,6 +1694,45 @@ class JointDataset:
             return None
         # aff_type 不一致时也返回文本（兼容历史数据），仅做轻提示过滤逻辑
         return row.get("ins")
+
+    def _collect_linked_target_ids(self, filter_by_ids, linked_key: str):
+        """从 Instruction entry 中收集绑定到其他模态的目标 id。"""
+        collected = defaultdict(lambda: defaultdict(set))
+        if filter_by_ids is None:
+            return collected
+        ins_data = filter_by_ids.get('ins', filter_by_ids.get('Instruction', {}))
+        for obj_type, aff_map in ins_data.items():
+            for aff_type, entries in aff_map.items():
+                for entry in entries:
+                    linked_id = self._entry_linked_id(entry, linked_key)
+                    if linked_id is not None:
+                        collected[obj_type][aff_type].add(linked_id)
+        return collected
+
+    @staticmethod
+    def _merge_target_ids_dict(primary, extra):
+        """合并两个 target_ids_dict，value 统一为去重后的升序列表。"""
+        if primary is None and not extra:
+            return None
+
+        merged = defaultdict(lambda: defaultdict(set))
+        for source in (primary or {}, extra or {}):
+            for obj_type, aff_map in source.items():
+                for aff_type, entries in aff_map.items():
+                    for entry in entries:
+                        if isinstance(entry, (list, tuple)):
+                            if len(entry) == 0:
+                                continue
+                            merged[obj_type][aff_type].add(entry[0])
+                        else:
+                            merged[obj_type][aff_type].add(entry)
+
+        normalized = {}
+        for obj_type, aff_map in merged.items():
+            normalized[obj_type] = {}
+            for aff_type, entries in aff_map.items():
+                normalized[obj_type][aff_type] = sorted(entries)
+        return normalized
 
     def _load_image_by_id(self, obj_type: str, img_id: Optional[int], aff_type: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
         """按 id 读取单张 RGB 与指定 aff 的 mask。"""
@@ -1539,11 +1821,34 @@ class JointDataset:
             except (TypeError, ValueError):
                 return value
 
+        def _normalize_instruction_entry(entry):
+            normalized = JointDataset._normalize_instruction_entry(entry)
+            if normalized is None:
+                return None
+            if normalized.get("img_id") is None and normalized.get("pc_id") is None:
+                return normalized["id"]
+            return normalized
+
         def _dedup_entries(entries):
             deduped = []
             seen = set()
             for entry in entries:
-                key = tuple(entry) if isinstance(entry, (list, tuple)) else entry
+                if isinstance(entry, dict):
+                    normalized_entry = _normalize_instruction_entry(entry)
+                    if normalized_entry is None:
+                        continue
+                    if isinstance(normalized_entry, dict):
+                        key = (
+                            normalized_entry.get("id"),
+                            normalized_entry.get("img_id"),
+                            normalized_entry.get("pc_id"),
+                        )
+                        entry = normalized_entry
+                    else:
+                        key = normalized_entry
+                        entry = normalized_entry
+                else:
+                    key = tuple(entry) if isinstance(entry, (list, tuple)) else entry
                 if key in seen:
                     continue
                 seen.add(key)
@@ -1558,7 +1863,15 @@ class JointDataset:
         for modality in ("ins", "img", "pc"):
             for _, aff_map in sample_ids.get(modality, {}).items():
                 for aff_name, entries in list(aff_map.items()):
-                    aff_map[aff_name] = _dedup_entries(entries)
+                    if modality == "ins":
+                        normalized_entries = []
+                        for entry in entries:
+                            normalized = _normalize_instruction_entry(entry)
+                            if normalized is not None:
+                                normalized_entries.append(normalized)
+                        aff_map[aff_name] = _dedup_entries(normalized_entries)
+                    else:
+                        aff_map[aff_name] = _dedup_entries(entries)
 
         return sample_ids
 
@@ -1568,13 +1881,22 @@ class JointDataset:
         
         if filter_by_ids is None and self.split_file is not None:
             filter_by_ids=self.sample_ids
+
+        extra_img_ids = self._collect_linked_target_ids(filter_by_ids, "img_id")
+        extra_pc_ids = self._collect_linked_target_ids(filter_by_ids, "pc_id")
         
         def load_pc_wrapper():
-            target_ids_dict = filter_by_ids['pc'] if filter_by_ids is not None else None
+            target_ids_dict = self._merge_target_ids_dict(
+                filter_by_ids['pc'] if filter_by_ids is not None else None,
+                extra_pc_ids,
+            )
             for _ in PointCloud.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id, target_ids_dict=target_ids_dict): pass
 
         def load_img_wrapper():
-            target_ids_dict = filter_by_ids['img'] if filter_by_ids is not None else None
+            target_ids_dict = self._merge_target_ids_dict(
+                filter_by_ids['img'] if filter_by_ids is not None else None,
+                extra_img_ids,
+            )
             for _ in Image.load_all(self.dataset_root, obj_type=self.obj_type, aff_type=self.aff_type, keep_id=self.keep_id, target_ids_dict=target_ids_dict): pass
 
         def load_ins_wrapper():
@@ -1619,7 +1941,15 @@ class JointDataset:
                                 pc_id = entry[0] if isinstance(entry, (list, tuple)) else entry
                                 pc_ids[obj_type_name].add(pc_id)
                             elif modality == 'Instruction':
-                                ins_ids[obj_type_name].add(int(entry))
+                                ins_entry = self._normalize_instruction_entry(entry)
+                                if ins_entry is None:
+                                    continue
+                                if ins_entry.get('id') is not None:
+                                    ins_ids[obj_type_name].add(int(ins_entry['id']))
+                                if ins_entry.get('img_id') is not None:
+                                    img_ids[obj_type_name].add(int(ins_entry['img_id']))
+                                if ins_entry.get('pc_id') is not None:
+                                    pc_ids[obj_type_name].add(int(ins_entry['pc_id']))
                             else:
                                 img_id = entry[0] if isinstance(entry, (list, tuple)) else int(entry)
                                 img_ids[obj_type_name].add(img_id)
@@ -1713,24 +2043,23 @@ class JointDataset:
                 ins_ids = self.sample_ids.get('ins', {}).get(obj_type, {}).get(aff_type, [])
                 img_ids = self.sample_ids.get('img', {}).get(obj_type, {}).get(aff_type, [])
                 pc_ids = self.sample_ids.get('pc', {}).get(obj_type, {}).get(aff_type, [])
-                
-                # 计算最大长度
-                max_len = max(len(ins_ids), len(img_ids), len(pc_ids))
-                
-                if max_len == 0:
-                    continue
-                
-                # 按位置配对，不足的用 None 补充
-                for i in range(max_len):
-                    # 获取 Instruction
-                    ins = Instruction.get_by_id(obj_type, ins_ids[i]) if i < len(ins_ids) else None
-                    
+                group_entries = self._compose_group_entries(ins_ids, img_ids, pc_ids)
+
+                for entry_group in group_entries:
+                    ins_entry = entry_group["ins_entry"]
+                    img_entry = entry_group["img_entry"]
+                    pc_entry = entry_group["pc_entry"]
+                    linked_img_id = self._entry_linked_id(ins_entry, "img_id")
+                    linked_pc_id = self._entry_linked_id(ins_entry, "pc_id")
+
+                    ins_id = self._entry_primary_id(ins_entry)
+                    ins = Instruction.get_by_id(obj_type, ins_id) if ins_id is not None else None
+
                     # 获取 Image（按 aff_type 检查是否包含该 affordance）
                     image = None
-                    if i < len(img_ids):
-                        img_entry = img_ids[i]
-                        img_id = img_entry[0] if isinstance(img_entry, (list, tuple)) and len(img_entry) > 0 else img_entry
-                        image = Image.get_by_id(obj_type, img_id)
+                    if img_entry is not None:
+                        img_id = self._entry_primary_id(img_entry)
+                        image = Image.get_by_id(obj_type, img_id) if img_id is not None else None
                         if image is not None:
                             has_aff = image.get_aff_index(aff_type) is not None
                             if not has_aff and isinstance(img_entry, (list, tuple)) and len(img_entry) > 1:
@@ -1744,13 +2073,12 @@ class JointDataset:
                                     )
                             if not has_aff:
                                 image = None
-                    
+
                     # 获取 PointCloud（按 aff_type 检查是否包含该 affordance）
                     pc = None
-                    if i < len(pc_ids):
-                        pc_entry = pc_ids[i]
-                        pc_id = pc_entry[0] if isinstance(pc_entry, (list, tuple)) and len(pc_entry) > 0 else pc_entry
-                        pc = PointCloud.get_by_id(obj_type, pc_id)
+                    if pc_entry is not None:
+                        pc_id = self._entry_primary_id(pc_entry)
+                        pc = PointCloud.get_by_id(obj_type, pc_id) if pc_id is not None else None
                         if pc is not None:
                             has_aff = pc.get_aff_index(aff_type) is not None
                             if not has_aff and isinstance(pc_entry, (list, tuple)) and len(pc_entry) > 1:
@@ -1765,13 +2093,13 @@ class JointDataset:
                                     )
                             if not has_aff:
                                 pc = None
-                    
+
                     # 至少有一个模态有数据才创建样本
                     if (ins or image or pc) is not None:
                         data_source_id = {
                             'ins_id': ins.id if ins is not None else None,
-                            'img_id': image.id if image is not None else None,
-                            'pc_id': pc.id if pc is not None else None,
+                            'img_id': image.id if image is not None else linked_img_id,
+                            'pc_id': pc.id if pc is not None else linked_pc_id,
                             'aff_type': aff_type,
                         }
                         sample = JointDataSample(
@@ -1830,10 +2158,16 @@ class JointDataset:
             aff_type = meta["aff_type"]
             ins_id = self._entry_primary_id(meta.get("ins_entry"))
             img_id = self._entry_primary_id(meta.get("img_entry"))
+            if img_id is None:
+                img_id = self._entry_linked_id(meta.get("ins_entry"), "img_id")
+            pc_id = self._entry_primary_id(meta.get("pc_entry"))
+            if pc_id is None:
+                pc_id = self._entry_linked_id(meta.get("ins_entry"), "pc_id")
 
             ins_text = self._load_instruction_by_id(obj_type, ins_id, aff_type)
             img, img_gt = self._load_image_by_id(obj_type, img_id, aff_type)
-            pc, pc_gt = self._load_point_cloud_by_id(obj_type, meta.get("pc_entry"), aff_type)
+            pc_entry = meta.get("pc_entry") if meta.get("pc_entry") is not None else pc_id
+            pc, pc_gt = self._load_point_cloud_by_id(obj_type, pc_entry, aff_type)
 
             return {
                 "ins": ins_text,
@@ -1844,7 +2178,7 @@ class JointDataset:
                 "data_source_id": {
                     "ins_id": ins_id,
                     "img_id": img_id,
-                    "pc_id": self._entry_primary_id(meta.get("pc_entry")),
+                    "pc_id": pc_id,
                     "aff_type": aff_type,
                 },
                 "index": index,

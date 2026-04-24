@@ -22,8 +22,53 @@ def _new_ids_struct():
     }
 
 
-def _normalize_ids(sample_ids: Dict) -> Dict[str, Dict[str, Dict[str, list[int]]]]:
-    """归一化为 {Instruction/Image/PointCloud: {obj: {aff: [ids...]}}}。"""
+def _entry_sort_key(entry):
+    if isinstance(entry, dict):
+        return (
+            int(entry.get("id", -1)) if entry.get("id") not in (None, "", "None", "none") else -1,
+            int(entry.get("img_id", -1)) if entry.get("img_id") not in (None, "", "None", "none") else -1,
+            int(entry.get("pc_id", -1)) if entry.get("pc_id") not in (None, "", "None", "none") else -1,
+        )
+    try:
+        return (int(entry), -1, -1)
+    except (TypeError, ValueError):
+        return (-1, -1, -1)
+
+
+def _normalize_optional_int(value):
+    if value in (None, "", "None", "none"):
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_instruction_entry(entry):
+    if isinstance(entry, str):
+        stripped = entry.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                entry = json.loads(stripped)
+            except json.JSONDecodeError:
+                pass
+    if isinstance(entry, dict):
+        ins_id = _normalize_optional_int(entry.get("id", entry.get("ins_id")))
+        img_id = _normalize_optional_int(entry.get("img_id"))
+        pc_id = _normalize_optional_int(entry.get("pc_id"))
+        if ins_id is None and img_id is None and pc_id is None:
+            return None
+        if img_id is None and pc_id is None:
+            return ins_id
+        return {"id": ins_id, "img_id": img_id, "pc_id": pc_id}
+    try:
+        return int(entry)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_ids(sample_ids: Dict) -> Dict[str, Dict[str, Dict[str, list]]]:
+    """归一化为 {Instruction/Image/PointCloud: {obj: {aff: [entries...]}}}。"""
     out = {"Instruction": {}, "Image": {}, "PointCloud": {}}
     alias = {"Instruction": ("Instruction", "ins"), "Image": ("Image", "img"), "PointCloud": ("PointCloud", "pc")}
     for mod, keys in alias.items():
@@ -38,12 +83,28 @@ def _normalize_ids(sample_ids: Dict) -> Dict[str, Dict[str, Dict[str, list[int]]
             for aff, ids in aff_map.items():
                 cleaned = []
                 for x in ids:
-                    try:
-                        cleaned.append(int(x))
-                    except (TypeError, ValueError):
-                        continue
+                    if mod == "Instruction":
+                        normalized = _normalize_instruction_entry(x)
+                        if normalized is not None:
+                            cleaned.append(normalized)
+                    else:
+                        try:
+                            cleaned.append(int(x))
+                        except (TypeError, ValueError):
+                            continue
                 if cleaned:
-                    out[mod][obj][aff] = sorted(list(set(cleaned)))
+                    deduped = []
+                    seen = set()
+                    for entry in cleaned:
+                        if isinstance(entry, dict):
+                            key = (entry.get("id"), entry.get("img_id"), entry.get("pc_id"))
+                        else:
+                            key = entry
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        deduped.append(entry)
+                    out[mod][obj][aff] = sorted(deduped, key=_entry_sort_key)
     return out
 
 
@@ -99,10 +160,20 @@ class SplitManager:
                         sid = row.get("id")
                         if not aff or sid is None:
                             continue
-                        try:
-                            all_ids["Instruction"][obj_type][aff].add(int(sid))
-                        except ValueError:
+                        ins_id = _normalize_optional_int(sid)
+                        if ins_id is None:
                             continue
+                        img_id = _normalize_optional_int(row.get("img_id"))
+                        pc_id = _normalize_optional_int(row.get("pc_id"))
+                        if img_id is None and pc_id is None:
+                            all_ids["Instruction"][obj_type][aff].add(ins_id)
+                        else:
+                            all_ids["Instruction"][obj_type][aff].add(
+                                json.dumps(
+                                    {"id": ins_id, "img_id": img_id, "pc_id": pc_id},
+                                    sort_keys=True,
+                                )
+                            )
 
             mask_root = os.path.join(obj_dir, "Image", "mask")
             if os.path.isdir(mask_root):
@@ -154,7 +225,15 @@ class SplitManager:
             for ins in items:
                 if ins is None:
                     continue
-                all_ids["Instruction"][obj_type][str(ins.aff_type)].add(int(ins.id))
+                if getattr(ins, "img_id", None) is None and getattr(ins, "pc_id", None) is None:
+                    all_ids["Instruction"][obj_type][str(ins.aff_type)].add(int(ins.id))
+                else:
+                    all_ids["Instruction"][obj_type][str(ins.aff_type)].add(
+                        json.dumps(
+                            {"id": int(ins.id), "img_id": ins.img_id, "pc_id": ins.pc_id},
+                            sort_keys=True,
+                        )
+                    )
 
         for obj_type, items in Image.all.items():
             for img in items:
@@ -277,7 +356,7 @@ class SplitManager:
         }
         needs_holdout = (val_ratio > 0 or test_ratio > 0)
 
-        def _apply_sampling(ids: list[int], obj: str, aff: str) -> list[int]:
+        def _apply_sampling(ids: list, obj: str, aff: str) -> list:
             if sample_rate is None:
                 return ids
             group_seed = hash((obj, aff, random_seed)) % (2 ** 32)
@@ -287,9 +366,9 @@ class SplitManager:
             if max_sample_per_group is not None:
                 n_target = min(n_target, int(max_sample_per_group))
             n_target = min(max(1, n_target), n_total)
-            return sorted(rng.sample(ids, n_target))
+            return sorted(rng.sample(ids, n_target), key=_entry_sort_key)
 
-        def _split_one_group(ids: list[int], obj: str, aff: str):
+        def _split_one_group(ids: list, obj: str, aff: str):
             ids = _apply_sampling(ids, obj, aff)
             n = len(ids)
             if n == 0:
@@ -315,9 +394,9 @@ class SplitManager:
             else:
                 n_test = 0
                 n_val = 0
-            train = sorted(shuffled[n_test + n_val:])
-            val = sorted(shuffled[n_test:n_test + n_val])
-            test = sorted(shuffled[:n_test])
+            train = sorted(shuffled[n_test + n_val:], key=_entry_sort_key)
+            val = sorted(shuffled[n_test:n_test + n_val], key=_entry_sort_key)
+            test = sorted(shuffled[:n_test], key=_entry_sort_key)
             return train, val, test
 
         for modality in ("Instruction", "Image", "PointCloud"):

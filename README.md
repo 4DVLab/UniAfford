@@ -13,25 +13,25 @@
 
 ```bash
 dataset_root/
-├── Spoon/
-│   ├── Instruction.csv  # instruction, obj, aff, img_id
+├── spoon/
+│   ├── Instruction.csv  # ins, obj_type, aff_type, id, img_id, pc_id
 │   ├── Image/
-│   │   ├── rgb/  # 假设 Spoon_1 同时包含grasp、contain的标注，Spoon_2只有grasp，and Spoon_3只有contain
-│   │   │   ├── Spoon_1.png
-│   │   │   ├── Spoon_2.png
-│   │   │   └── Spoon_3.png
+│   │   ├── rgb/  # 假设 spoon_1 同时包含 grasp、contain 的标注，spoon_2 只有 grasp，spoon_3 只有 contain
+│   │   │   ├── spoon_1.png
+│   │   │   ├── spoon_2.png
+│   │   │   └── spoon_3.png
 │   │   └── mask/
 │   │       ├── grasp/
-│   │       │   ├── Spoon_1_grasp.png  # 命名： obj_id_aff.png
-│   │       │   └── Spoon_2_grasp.png
+│   │       │   ├── spoon_1_grasp.png  # 命名：{obj_type}_{id}_{aff_type}.png
+│   │       │   └── spoon_2_grasp.png
 │   │       └── contain/
-│   │           ├── Spoon_1_contain.png
-│   │           └── Spoon_3_contain.png
+│   │           ├── spoon_1_contain.png
+│   │           └── spoon_3_contain.png
 │   └── PointCloud/
-│       ├── Spoon_1.csv  # x, y, z, aff1的分布概率, aff2(如有), ...
-│       ├── Spoon_2.csv
-│       └── Spoon_3.csv
-├── Mug/...
+│       ├── spoon_1.csv  # header: x,y,z,<aff_type_1>,<aff_type_2>,...
+│       ├── spoon_2.csv
+│       └── spoon_3.csv
+├── mug/...
 ├── metadata.json  # 分割统计信息（比例、样本数、随机种子等）
 ├── train.json      # 训练集分割
 ├── val.json        # 验证集分割
@@ -40,8 +40,21 @@ dataset_root/
 
 说明：
 
-- `Ins` 和 `Image` 共用 id 编码，其是从 `RAGNet` 的数据集中获取； `Point` 则单独编码，其是从 `PIADv2` 和 `AGPIL` 数据集中获取的。
+- `Instruction`、`Image`、`PointCloud` 各自维护自身的 `id` 编码；若需要跨模态关联，可通过 `Instruction.csv` 中的 `img_id` / `pc_id` 显式绑定。
 - `Image` 的 mask 按 `aff_type` 分子目录保存，`Ins` 和 `Point` 的则将 `aff_type` 写入  `obj_type` 对应的行内。
+
+## 命名与格式规范
+
+- 默认规范化为小写：读取外部数据集并保存为统一格式时，`obj_type` 与 `aff_type` 会默认转为小写。
+- 规范化生效范围：目录名、文件名、`Instruction.csv` 中的 `obj_type/aff_type` 字段、`train|val|test.json` 中的 key，均使用小写。
+- `obj_type` 规范：使用语义类别名，推荐仅包含小写字母、数字和下划线；统一保存后目录名即为 `obj_type`。
+- `aff_type` 规范：使用 affordance 语义名，推荐仅包含小写字母、数字和下划线；`Image` 模态下同时作为 `mask/<aff_type>/` 子目录名。
+- `Instruction.csv` 格式固定为 `ins,obj_type,aff_type,id,img_id,pc_id` 六列。
+- 其中 `id` 是 instruction 自身的唯一 id，不再默认与 `Image` 或 `PointCloud` 的 id 绑定。
+- `img_id` / `pc_id` 为可选绑定列：可以只绑定图片、只绑定点云、同时绑定两者，或都留空。
+- `Image/rgb/` 文件名格式固定为 `{obj_type}_{id}.png`，`Image/mask/<aff_type>/` 文件名格式固定为 `{obj_type}_{id}_{aff_type}.png`。
+- `PointCloud/` 文件名格式固定为 `{obj_type}_{id}.csv`，前三列为 `x,y,z`，之后每一列对应一个 `aff_type`。
+- 兼容性说明：历史数据中若目录名或文件名前缀仍为旧的大写/驼峰形式，当前加载逻辑会尽量兼容；重新保存后会统一写成小写规范。
 
 ## 分割配置文件
 
@@ -52,20 +65,20 @@ dataset_root/
 ```json
 {
   "Instruction": {
-    "Spoon": {
+    "spoon": {
       "grasp": [1, 2, 3, 4, 5],
       "contain": [1, 2, 3],
       "lift": [1, 2]
     }
   },
   "Image": {
-    "Spoon": {
+    "spoon": {
       "grasp": [101, 102, 103],
       "contain": [101, 104]
     }
   },
   "PointCloud": {
-    "Spoon": {
+    "spoon": {
       "grasp": [301, 302, 303],
       "contain": [301, 304]
     }
@@ -151,7 +164,7 @@ dataset_root/
 {
     # 元信息
     "sample_id": int,           # 样本全局 id
-    "obj_type": str,            # 物体类型，如 "Chair"
+    "obj_type": str,            # 物体类型，如 "chair"
     "aff_type": str,            # affordance 类型，如 "sit"
 
     # MLLM 文本与 Qwen3-VL 视觉

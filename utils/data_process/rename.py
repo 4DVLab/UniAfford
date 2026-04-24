@@ -126,6 +126,8 @@ def rename_obj_type(dataset_root, obj_rename, aff_rename=None):
                     inst.ins,
                     obj_type=new_obj_type,
                     aff_type=new_aff_type,
+                    img_id=inst.img_id,
+                    pc_id=inst.pc_id,
                     given_id=inst.id
                 )
     

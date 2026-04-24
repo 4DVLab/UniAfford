@@ -642,7 +642,8 @@ class RAGNet(Image):
     @classmethod
     def load_all(cls, dataset_root_path, **kwargs):
         """
-        同时加载图片和文本数据集（绑定id）
+        同时加载图片和文本数据集。
+        Instruction 不再与图片共享自身 id，而是通过 img_id 手动绑定到对应图像模态。
         """
         import pickle
 
@@ -671,7 +672,8 @@ class RAGNet(Image):
                             obj['answer'],
                             obj_type=obj['task_object_class'].capitalize(),
                             aff_type='None',  # HACK: 数据集里没有明确指定aff类型，需要再做处理
-                            given_id=img_obj.id
+                            img_id=img_obj.id,
+                            pc_id=None,
                         )
 
                     yield img_obj
