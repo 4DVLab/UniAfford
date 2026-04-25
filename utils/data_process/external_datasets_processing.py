@@ -6,6 +6,7 @@
 import sys
 import os
 import warnings
+import json
 import numpy as np
 import cv2
 from collections import defaultdict
@@ -622,7 +623,132 @@ class AGD20k_IMG(Image):
             img.free_memory()
 
 
-class RAGNet(Image):
+class InsPart_IMG(Image):
+    """
+    InstructPart 图片数据集：
+    默认导出 ``train/train1800`` 与 ``test`` 两个子集。
+
+    每个 ``part_list`` 条目导出为一条 Image 样本；``obj_type`` 为 object，
+    ``aff_type`` 优先使用 affordance，其次 action，最后 part。若有 instruction，
+    则创建独立 Instruction，并通过 ``img_id`` 绑定到对应 Image。
+    """
+    sub_dataset = [
+        ('train/train1800', 'train'),
+        ('test', 'test'),
+    ]
+
+    def __init__(self, img, obj_type, aff_mask_dict=None, obj_mask=None, visible_mask=None, **kwargs):
+        super().__init__(
+            img=img,
+            obj_type=obj_type,
+            aff_mask_dict=aff_mask_dict,
+            obj_mask=obj_mask,
+            visible_mask=visible_mask,
+            **kwargs,
+        )
+
+    @classmethod
+    def load_all(cls, dataset_root_path, **kwargs):
+        """
+        Args:
+            dataset_root_path: ``InstructPart`` 根目录，或包含 ``InstructPart`` 的上级目录。
+        """
+        kwargs.pop('keep_id', None)
+
+        valid_img_ext = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
+        instruction_id = 0
+
+        def normalize_name(name, fallback='unknown'):
+            if name is None:
+                return fallback
+            name = str(name).strip()
+            return name if name else fallback
+
+
+        def resolve_split_dir(root, split):
+            if split.startswith('train/'):
+                subset = split.split('/', 1)[1]
+                return os.path.join(root, 'train', subset)
+            return os.path.join(root, split)
+
+        def find_mask_path(masks_dir, image_path, obj_name, part_name):
+            def safe_file_token(name):
+                return normalize_name(name).replace(' ', '_')
+            stem, _ = os.path.splitext(os.path.basename(image_path))
+            obj_token = safe_file_token(obj_name)
+            part_token = safe_file_token(part_name)
+            base = f'{stem}-{obj_token}-{part_token}'
+            for ext in valid_img_ext:
+                candidate = os.path.join(masks_dir, base + ext)
+                if os.path.isfile(candidate):
+                    return candidate
+            return None
+
+
+        def iterator():
+            for split, json_suffix in cls.sub_dataset:
+                split_dir = resolve_split_dir(dataset_root_path, split)
+                images_dir = os.path.join(split_dir, 'images')
+                masks_dir = os.path.join(split_dir, 'masks')
+                json_path = os.path.join(split_dir, f'data_{json_suffix}.json')
+                if not os.path.isdir(images_dir) or not os.path.isdir(masks_dir) or not os.path.isfile(json_path):
+                    warnings.warn(f'InsPart_IMG: split 路径不完整，已跳过: {split_dir}')
+                    continue
+
+                with open(json_path, 'r', encoding='utf-8') as f:
+                    entries = json.load(f)
+
+                for entry in entries:
+                    image_rel = entry.get('image_path')
+                    if not image_rel:
+                        continue
+                    image_path = os.path.join(images_dir, os.path.basename(image_rel))
+                    if not os.path.isfile(image_path):
+                        image_path = os.path.join(split_dir, image_rel)
+                    img = cv2.imread(image_path)
+                    if img is None:
+                        continue
+
+                    for item in entry.get('part_list', []):
+                        obj_label = normalize_name(item.get('object'))
+                        part_label = normalize_name(item.get('part'), fallback='part')
+                        aff_label = normalize_name(
+                            item.get('affordance') or item.get('action') or part_label,
+                            fallback=part_label,
+                        )
+                        mask_path = find_mask_path(masks_dir, image_rel, obj_label, part_label)
+                        if mask_path is None:
+                            continue
+                        aff_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                        if aff_mask is None:
+                            continue
+
+                        print(f'loading IMG: {image_path} | mask: {mask_path}')
+                        img_obj = cls(
+                            img=img.copy(),
+                            obj_type=obj_label,
+                            aff_mask_dict={aff_label: aff_mask},
+                        )
+
+                        instructions = item.get('instruction') or []
+                        if instructions:
+                            if 0 <= int(instruction_id) < len(instructions):
+                                instruction = instructions[int(instruction_id)]
+                            else:
+                                instruction = instructions[0]
+                            Instruction(
+                                instruction,
+                                obj_type=obj_label,
+                                aff_type=aff_label,
+                                img_id=img_obj.id,
+                                pc_id=None,
+                            )
+                        yield img_obj
+
+        return iterator()
+
+
+class RAGNet_IMG(Image):
     sub_dataset = [
         '3doi_easy_reasoning_val.pkl',
         # '3doi_val.pkl',
@@ -648,7 +774,7 @@ class RAGNet(Image):
         import pickle
 
         def iterator():
-            for sub_dataset in RAGNet.sub_dataset:
+            for sub_dataset in RAGNet_IMG.sub_dataset:
                 with open(os.path.join(dataset_root_path, sub_dataset), 'rb') as f:
                     pickled_data = pickle.load(f)
                     pickled_data.sort(key=lambda x: x['frame_path'])
@@ -661,7 +787,7 @@ class RAGNet(Image):
                     if img is None: continue
                     print(f"loading IMG: {obj['frame_path']}")
 
-                    img_obj = RAGNet(
+                    img_obj = RAGNet_IMG(
                         img=img,
                         obj_mask=None,
                         aff_mask_dict={'None': cv2.imread(obj['mask_path'], cv2.IMREAD_GRAYSCALE)},
@@ -693,7 +819,7 @@ if __name__ == "__main__":
     parser.add_argument("-m", "--modality", type=str, nargs="+", help="手动添加数据的模态，可选一个或多个",
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
     parser.add_argument("-d", "--dataset", type=str, help="按照预设定数据集整理",
-                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'LASO', 'AffordanceNet3D', 'GEAL'])
+                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'InsPart', 'InstructPart', 'LASO', 'AffordanceNet3D', 'GEAL'])
     parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
     parser.add_argument("-t", "--obj_type", type=str, help="物体类型", default=None)
     parser.add_argument('-s', '--show', type=str, nargs="+", help='直接渲染点云文件的路径，选择时只执行渲染操作', default=[])
@@ -782,14 +908,17 @@ if __name__ == "__main__":
                             aff_type=args.aff_type or 'grasp',
                         )
                     case 'RAGNet':
-                        RAGNet.load_and_save(input_dir, output_dir)
+                        RAGNet_IMG.load_and_save(input_dir, output_dir)
                     case 'AGD20K' | 'AGD20k':
                         AGD20k_IMG.load_and_save(input_dir, output_dir)
+                    case 'InsPart' | 'InstructPart':
+                        assert False, 'InstructPart is not available! Fuck the author!!'
+                        InsPart_IMG.load_and_save(input_dir, output_dir)
                     case e:
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
             if 'ins' in selected_modalities:
-                if args.dataset == 'RAGNet':
+                if args.dataset in ('RAGNet', ):#'InsPart', 'InstructPart'):
                     Instruction.save_all(output_dir)  # 直接保存之前加载的数据
     except Exception as e:
         err = e
