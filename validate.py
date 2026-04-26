@@ -66,6 +66,8 @@ def parse_args():
                         help="SAM 权重路径（覆盖 TrainingConfig.model_config.image_decoder.vision_pretrained）")
     parser.add_argument("--log_name", type=str, default="validate",
                         help="日志名/实验名（用于输出目录命名）")
+    parser.add_argument("--lazy_load", dest="lazy_load", action="store_true",
+                        help="启用数据懒加载（默认启用）", default=True)
     return parser.parse_args()
 
 
@@ -85,6 +87,7 @@ def build_dataloader_for_split(
     model_cfg,
     infer_cfg: InferenceConfig,
     processor,
+    lazy_load: bool = True,
 ):
     """根据 split（train/val/test）构建对应的 DataLoader。"""
     collator = partial(
@@ -100,9 +103,11 @@ def build_dataloader_for_split(
     joint_dataset = JointDataset(
         dataset_root=training_cfg.dataset_dir,
         split_file=f"{infer_cfg.split}.json",
-    ).load_all_data()
+        lazy_load=lazy_load,
+    )
+    samples = joint_dataset if lazy_load else joint_dataset.load_all_data().samples
     torch_dataset = JointAffordanceTorchDataset(
-        joint_dataset.samples,
+        samples,
         processor=processor,
         image_size=training_cfg.image_size,
         num_points=training_cfg.num_points,
@@ -121,7 +126,6 @@ def build_dataloader_for_split(
         collate_fn=collator,
     )
     return loader, torch_dataset, processor
-
 
 
 def save_batch_predictions(
@@ -457,8 +461,13 @@ def main():
 
     # DataLoader
     val_loader, torch_dataset, processor = build_dataloader_for_split(
-        training_cfg, model_cfg, infer_cfg, processor=model.mllm.processor
+        training_cfg,
+        model_cfg,
+        infer_cfg,
+        processor=model.mllm.processor,
+        lazy_load=args.lazy_load,
     )
+    print(f"数据加载模式: {'lazy load' if args.lazy_load else 'eager load'}")
     tokenizer = processor.tokenizer
     lm_head = model.mllm.model.get_output_embeddings()
     IGNORE_INDEX = -100
@@ -517,15 +526,15 @@ def main():
             batch_size = input_dict["input_ids"].shape[0]
             for i in range(batch_size):
                 sample_idx = batch_idx * infer_cfg.batch_size + i
-                if sample_idx >= len(torch_dataset.samples):
+                if sample_idx >= len(torch_dataset):
                     break
-                sample = torch_dataset.samples[sample_idx]
-                src_ids = sample.data_source_id or {}
+                src_ids_batch = input_dict.get("data_source_id", [])
+                src_ids = src_ids_batch[i] if isinstance(src_ids_batch, (list, tuple)) and i < len(src_ids_batch) else {}
 
                 record: Dict = {
-                    "sample_id": sample.id,
-                    "obj_type": sample.obj_type,
-                    "aff_type": sample.aff_type,
+                    "sample_id": input_dict.get("sample_id")[i],
+                    "obj_type": input_dict.get("obj_type")[i],
+                    "aff_type": input_dict.get("aff_type")[i],
                     "text_id": src_ids.get("ins_id", ""),
                     "img_id": src_ids.get("img_id", ""),
                     "pc_id": src_ids.get("pc_id", ""),
