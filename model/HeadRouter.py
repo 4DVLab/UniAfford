@@ -348,15 +348,16 @@ class HeadRouter(nn.Module):
     def build_aff_token_pairs(
         self,
         hard_route: torch.Tensor,
-        img_token_emb: torch.Tensor,
-        pc_token_emb: torch.Tensor,
+        token_hidden_states: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
         route_mask: Optional[torch.Tensor] = None,
     ) -> List[List[Tuple[str, torch.Tensor]]]:
         """
-        构造每样本路由结果明细（token 名称 + token 向量）。
+        构造每样本路由结果明细（token 名称 + 原始 MLLM hidden state）。
 
         该结构用于 validate 阶段记录与后续可解释性分析，不参与主损失计算。
+        注意这里刻意保存 router/branch head 投影前的 hidden state，保证用 lm_head
+        反投影到词表时仍处在原始语言模型表征空间。
         """
         bsz, seq_len = hard_route.shape
         pairs: List[List[Tuple[str, torch.Tensor]]] = [[] for _ in range(bsz)]
@@ -367,9 +368,9 @@ class HeadRouter(nn.Module):
                     continue
                 rid = int(hard_route[i, pos].item())
                 if rid == self.route_img_idx:
-                    pairs[i].append((self.img_placeholder_token, img_token_emb[i, pos, :]))
+                    pairs[i].append((self.img_placeholder_token, token_hidden_states[i, pos, :]))
                 elif rid == self.route_pc_idx:
-                    pairs[i].append((self.pc_placeholder_token, pc_token_emb[i, pos, :]))
+                    pairs[i].append((self.pc_placeholder_token, token_hidden_states[i, pos, :]))
         return pairs
 
     @staticmethod
@@ -445,8 +446,7 @@ class HeadRouter(nn.Module):
         )
         aff_token_pairs = self.build_aff_token_pairs(
             hard_route=hard_route,
-            img_token_emb=img_token_emb,
-            pc_token_emb=pc_token_emb,
+            token_hidden_states=hidden_states,
             attention_mask=attention_mask,
             route_mask=route_mask,
         )
