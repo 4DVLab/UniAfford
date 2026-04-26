@@ -5,6 +5,12 @@
 
 # Train
 
+## 配置默认值约定
+
+所有继承自 `configs.base_config.Configs` 的配置类都以类变量 `defaults` 作为初始化默认值来源。若需要修改训练、模型或推理配置的默认初始化值，优先直接修改对应配置类的 `defaults`，例如 `TrainingConfig.defaults["lr"]`、`MLLMConfigs.defaults["compute_dtype"]` 或 `PointDecoderConfigs.defaults["decode_mode"]`。
+
+配置初始化顺序固定为：先深拷贝并合并 `defaults`，再叠加 `config_dict` 与显式关键字参数，最后执行 dtype 解析、字符串转列表、学习率派生、路径拼接等派生逻辑。因此派生字段也会读取修改后的 `defaults`：例如当 `TrainingConfig.defaults["llm_lr"]` 为非 `None` 时，会直接作为默认值使用；仅当其仍为 `None` 时，才会按 `TrainingConfig.defaults["lr"] * 0.01` 自动推导。
+
 # Dataset
 
 ## 数据集目录结构

@@ -12,11 +12,17 @@ class Configs:
 
     defaults: Dict = {}
 
-    def __init__(self, config_dict: Optional[Dict] = None, **overrides):
+    def _merge_defaults(self, config_dict: Optional[Dict] = None, overrides: Optional[Dict] = None):
+        """先合并类级 defaults，再叠加显式配置。"""
         merged = deepcopy(self.defaults)
         if config_dict is not None:
             merged.update(config_dict)
-        merged.update(overrides)
+        if overrides:
+            merged.update(overrides)
+        return merged
+
+    def __init__(self, config_dict: Optional[Dict] = None, **overrides):
+        merged = self._merge_defaults(config_dict, overrides)
         self.__dict__.update(merged)
 
     def update(self, config_dict: Optional[Dict] = None, **overrides):
@@ -131,9 +137,10 @@ class MLLMConfigs(Configs):
         if "point_prefix_backbone_kwargs" in raw and "point_encoder_backbone" not in raw:
             raw["point_encoder_backbone"] = raw.pop("point_prefix_backbone_kwargs")
 
+        raw = self._merge_defaults(raw)
+
         # 在 fp32 的时候禁用 flash_attention_2，因为 flash_attention_2 只支持 bf16。
-        compute_dtype = raw.get("compute_dtype", self.defaults["compute_dtype"])
-        resolved_dtype = resolve_dtype(compute_dtype)
+        resolved_dtype = resolve_dtype(raw["compute_dtype"])
         raw["compute_dtype"] = resolved_dtype
         if resolved_dtype != torch.bfloat16:
             raw["qwen_attn_implementation"] = None
@@ -168,11 +175,8 @@ class ImageDecoderConfigs(Configs):
     }
 
     def __init__(self, config_dict: Optional[Dict] = None, **overrides):
-        raw = {}
-        if config_dict is not None:
-            raw.update(config_dict)
-        raw.update(overrides)
-        raw["compute_dtype"] = resolve_dtype(raw.get("compute_dtype", self.defaults["compute_dtype"]))
+        raw = self._merge_defaults(config_dict, overrides)
+        raw["compute_dtype"] = resolve_dtype(raw["compute_dtype"])
         super().__init__(raw)
 
 
@@ -191,18 +195,15 @@ class PointDecoderConfigs(Configs):
     }
 
     def __init__(self, config_dict: Optional[Dict] = None, **overrides):
-        raw = {}
-        if config_dict is not None:
-            raw.update(config_dict)
-        raw.update(overrides)
-        raw["backbone_mode"] = str(raw.get("backbone_mode", self.defaults["backbone_mode"])).lower()
+        raw = self._merge_defaults(config_dict, overrides)
+        raw["backbone_mode"] = str(raw["backbone_mode"]).lower()
         assert raw["backbone_mode"] in {"shared", "independent"}, f"Unsupported point decoder backbone_mode: {raw['backbone_mode']}"
 
-        raw["decode_mode"] = str(raw.get("decode_mode", self.defaults["decode_mode"])).lower()
+        raw["decode_mode"] = str(raw["decode_mode"]).lower()
         assert raw["decode_mode"] in {"similarity", "prompt"}, f"Unsupported point decoder decode_mode: {raw['decode_mode']}"
 
-        raw["compute_dtype"] = resolve_dtype(raw.get("compute_dtype", self.defaults["compute_dtype"]))
-        backbone_kwargs = raw.get("backbone_kwargs", self.defaults["backbone_kwargs"])
+        raw["compute_dtype"] = resolve_dtype(raw["compute_dtype"])
+        backbone_kwargs = raw["backbone_kwargs"]
         if backbone_kwargs is None:
             backbone_kwargs = PointEncoderBackboneConfigs().to_dict()
         elif hasattr(backbone_kwargs, "to_dict"):

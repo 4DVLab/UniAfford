@@ -302,14 +302,24 @@ class GEAL_PC(PointCloud):
             text/
               ...
 
-    ``load_all`` 会依次扫描各子集 ``point/`` 下所有 ``.pkl``，将物体类别写为
-    ``{子集名}_{class}``（如 ``LASO-C_Bed``），避免两子集类别名冲突、并保留来源。
+    ``load_all`` 只扫描 ``corrupt_types`` 与 ``levels`` 指定的 pkl；同一个 pkl 内坐标完全相同
+    的点云会合并多个 affordance mask，保存为一个 CSV 的多列，避免重复写 xyz。
 
     每条 pickle 记录需包含：class, affordance, mask, point。
     点云坐标按 pickle 内存储的（已损坏）坐标原样写入，不做 ``normalize_point_cloud``。
     """
 
     _DEFAULT_SUBSETS = ("LASO-C", "PIAD-C")
+    corrupt_types = (
+        "scale",
+        "jitter",
+        "rotate",
+        "dropout_global",
+        "dropout_local",
+        "add_global",
+        "add_local",
+    )
+    levels = (0,2,4) # (0, 1, 2, 3, 4)
 
     @classmethod
     def load_all(
@@ -330,6 +340,20 @@ class GEAL_PC(PointCloud):
         if obj_type is not None:
             obj_set = {obj_type} if isinstance(obj_type, str) else set(obj_type)
 
+        def _iter_selected_pkl_files(point_dir: str):
+            for corrupt_type in cls.corrupt_types:
+                for level in cls.levels:
+                    fname = f"{corrupt_type}_{level}.pkl"
+                    pkl_path = os.path.join(point_dir, fname)
+                    if os.path.isfile(pkl_path):
+                        yield pkl_path
+                    else:
+                        warnings.warn(f"GEAL_PC: 指定 pkl 不存在，已跳过: {pkl_path}")
+
+        def _point_key(pts: np.ndarray):
+            pts = np.ascontiguousarray(pts, dtype=np.float32)
+            return pts.shape, pts.dtype.str, pts.tobytes()
+
         def _yield_from_pkl(pkl_path: str, subset_label: str):
             with open(pkl_path, "rb") as f:
                 annotations = pickle.load(f)
@@ -337,6 +361,7 @@ class GEAL_PC(PointCloud):
                 warnings.warn(f"GEAL_PC: 跳过非列表 pkl: {pkl_path}")
                 return
             base_msg = os.path.relpath(pkl_path, root)
+            grouped = {}
             for data in annotations:
                 obj_c = str(data.get("class", ""))
                 aff = str(data.get("affordance", ""))
@@ -350,9 +375,28 @@ class GEAL_PC(PointCloud):
                 mask = np.asarray(data.get("mask"), dtype=np.float32).reshape(-1)
                 if mask.shape[0] != pts.shape[0]:
                     continue
-                aff_mask_dict = {aff: mask}
-                print(f"loading GEAL_PC [{base_msg}] -> {obj_c} / {aff}")
-                yield cls(points=pts, obj_type=obj_c, aff_mask_dict=aff_mask_dict)
+                obj_label = f"{subset_label}_{obj_c}"
+                key = (obj_label, _point_key(pts))
+                if key not in grouped:
+                    grouped[key] = {
+                        "points": np.ascontiguousarray(pts, dtype=np.float32),
+                        "obj_type": obj_label,
+                        "aff_mask_dict": {},
+                    }
+                aff_masks = grouped[key]["aff_mask_dict"]
+                if aff in aff_masks:
+                    aff_masks[aff] = np.maximum(aff_masks[aff], mask)
+                else:
+                    aff_masks[aff] = mask
+
+            for item in grouped.values():
+                labels = ", ".join(sorted(item["aff_mask_dict"].keys()))
+                print(f"loading GEAL_PC [{base_msg}] -> {item['obj_type']} / [{labels}]")
+                yield cls(
+                    points=item["points"],
+                    obj_type=item["obj_type"],
+                    aff_mask_dict=item["aff_mask_dict"],
+                )
 
         def iterator():
             found_any_subset = False
@@ -366,16 +410,11 @@ class GEAL_PC(PointCloud):
                 if not os.path.isdir(point_dir):
                     warnings.warn(f"GEAL_PC: 无 point 目录，已跳过: {point_dir}")
                     continue
-                pkl_files = sorted(
-                    f for f in os.listdir(point_dir) if f.lower().endswith(".pkl")
-                )
+                pkl_files = list(_iter_selected_pkl_files(point_dir))
                 if not pkl_files:
-                    warnings.warn(f"GEAL_PC: point 目录内无 pkl: {point_dir}")
+                    warnings.warn(f"GEAL_PC: point 目录内无选中的 pkl: {point_dir}")
                     continue
-                for fname in pkl_files:
-                    pkl_path = os.path.join(point_dir, fname)
-                    if not os.path.isfile(pkl_path):
-                        continue
+                for pkl_path in pkl_files:
                     yield from _yield_from_pkl(pkl_path, subset)
             if not found_any_subset:
                 raise FileNotFoundError(

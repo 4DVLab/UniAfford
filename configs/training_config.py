@@ -47,11 +47,8 @@ class DeepSpeedConfigs(Configs):
     }
 
     def __init__(self, config_dict: Optional[dict] = None, **overrides):
-        raw = {}
-        if config_dict is not None:
-            raw.update(config_dict)
-        raw.update(overrides)
-        raw["precision"] = resolve_dtype(raw.get("precision", self.defaults["precision"]))
+        raw = self._merge_defaults(config_dict, overrides)
+        raw["precision"] = resolve_dtype(raw["precision"])
         super().__init__(raw)
 
     def to_dict(self) -> dict:
@@ -119,11 +116,8 @@ class LoRAConfigs(Configs):
     }
 
     def __init__(self, config_dict: Optional[dict] = None, **overrides):
-        raw = {}
-        if config_dict is not None:
-            raw.update(config_dict)
-        raw.update(overrides)
-        target_modules = raw.get("lora_target_modules", self.defaults["lora_target_modules"])
+        raw = self._merge_defaults(config_dict, overrides)
+        target_modules = raw["lora_target_modules"]
         raw["lora_target_modules"] = (
             target_modules
             if isinstance(target_modules, list)
@@ -230,10 +224,7 @@ class TrainingConfig(Configs):
         lora_config: Optional[LoRAConfigs | dict] = None,
         **kwargs,
     ):
-        raw = {}
-        if config_dict is not None:
-            raw.update(config_dict)
-        raw.update(kwargs)
+        raw = self._merge_defaults(config_dict, kwargs)
 
         if model_config is None and "model_config" in raw:
             model_config = raw.pop("model_config")
@@ -266,21 +257,21 @@ class TrainingConfig(Configs):
             else LoRAConfigs(lora_config)
         )
 
-        batch_size = raw.get("batch_size", self.defaults["batch_size"])
-        samples_per_epoch = raw.get("samples_per_epoch", self.defaults["samples_per_epoch"])
-        steps_per_epoch = raw.get("steps_per_epoch", self.defaults["steps_per_epoch"])
+        batch_size = raw["batch_size"]
+        samples_per_epoch = raw["samples_per_epoch"]
+        steps_per_epoch = raw["steps_per_epoch"]
         if samples_per_epoch is not None and steps_per_epoch is None:
             # 仅作为初始化兜底；train_fsdp.py 会在构建 DataLoader 后用真实值覆盖。
             raw["steps_per_epoch"] = max(1, (samples_per_epoch + batch_size - 1) // max(1, batch_size))
 
-        params_to_freeze = raw.get("name_of_params_to_freeze", self.defaults["name_of_params_to_freeze"])
+        params_to_freeze = raw["name_of_params_to_freeze"]
         raw["name_of_params_to_freeze"] = (
             params_to_freeze
             if isinstance(params_to_freeze, list)
             else [m.strip() for m in str(params_to_freeze).split(",") if m.strip()]
         )
 
-        lr = raw.get("lr", self.defaults["lr"])
+        lr = raw["lr"]
         if raw.get("llm_lr", None) is None:
             raw["llm_lr"] = lr * 0.01
         if raw.get("vision_2d_lr", None) is None:
@@ -288,8 +279,8 @@ class TrainingConfig(Configs):
         if raw.get("vision_3d_lr", None) is None:
             raw["vision_3d_lr"] = lr
 
-        log_base_dir = raw.get("log_base_dir", self.defaults["log_base_dir"])
-        exp_name = raw.get("exp_name", self.defaults["exp_name"])
+        log_base_dir = raw["log_base_dir"]
+        exp_name = raw["exp_name"]
         raw["log_dir"] = os.path.join(log_base_dir, exp_name)
 
         super().__init__(raw, model_config=model_config, deepspeed=deepspeed_config, lora=lora_config)
