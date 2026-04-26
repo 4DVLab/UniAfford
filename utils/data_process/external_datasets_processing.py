@@ -309,17 +309,17 @@ class GEAL_PC(PointCloud):
     点云坐标按 pickle 内存储的（已损坏）坐标原样写入，不做 ``normalize_point_cloud``。
     """
 
-    _DEFAULT_SUBSETS = ("LASO-C", "PIAD-C")
+    _DEFAULT_SUBSETS = ("LASO-C",)# "PIAD-C")
     corrupt_types = (
         "scale",
         "jitter",
         "rotate",
-        "dropout_global",
-        "dropout_local",
-        "add_global",
-        "add_local",
+        # "dropout_global",
+        # "dropout_local",
+        # "add_global",
+        # "add_local",
     )
-    levels = (0,2,4) # (0, 1, 2, 3, 4)
+    levels = (2,) # (0, 1, 2, 3, 4)
 
     @classmethod
     def load_all(
@@ -375,12 +375,12 @@ class GEAL_PC(PointCloud):
                 mask = np.asarray(data.get("mask"), dtype=np.float32).reshape(-1)
                 if mask.shape[0] != pts.shape[0]:
                     continue
-                obj_label = f"{subset_label}_{obj_c}"
-                key = (obj_label, _point_key(pts))
+
+                key = (obj_c, _point_key(pts))
                 if key not in grouped:
                     grouped[key] = {
                         "points": np.ascontiguousarray(pts, dtype=np.float32),
-                        "obj_type": obj_label,
+                        "obj_type": obj_c,
                         "aff_mask_dict": {},
                     }
                 aff_masks = grouped[key]["aff_mask_dict"]
