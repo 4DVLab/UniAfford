@@ -186,8 +186,8 @@ class TrainingConfig(Configs):
         # 分层学习率（可选）
         "use_layerwise_lr": True,
         "llm_lr": None,        # 默认为 lr * 0.01
-        "vision_2d_lr": None,  # 默认为 lr
-        "vision_3d_lr": None,  # 默认为 lr
+        "vision_2d_lr": 5e-5,  # 默认为 lr
+        "vision_3d_lr": 5e-4,  # 默认为 lr
         # 学习率调度器配置
         "warmup_num_steps": 100,
         "warmup_min_lr": 0,

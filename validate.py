@@ -246,7 +246,7 @@ def save_batch_predictions(
             os.makedirs(mask_dir, exist_ok=True)
             img_path = os.path.join(rgb_dir, f"{obj_type}_{sample_id}.png")
             if not os.path.exists(img_path):
-                cv2.imwrite(img_path, orig_img)
+                cv2.imwrite(img_path, cv2.cvtColor(orig_img, cv2.COLOR_RGB2BGR))
             mask_path = os.path.join(mask_dir, f"{obj_type}_{sample_id}_{aff_type}.png")
             cv2.imwrite(mask_path, mask_2d)
 

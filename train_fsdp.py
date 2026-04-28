@@ -619,6 +619,7 @@ def main():
     )
 
     # ---------- 提取损失配置 ----------
+    # TODO: rename route_* as router_*
     loss_kwargs = dict(
         device=device,
         focal_loss_weight=getattr(training_configs, "focal_loss_weight", 2.0),
