@@ -1,4 +1,4 @@
-# LISA 2D-3D Joint Affordance Demo 依赖
+# 2D-3D Joint Affordance Demo 依赖
 
 # 核心框架
 gradio>=4.0.0

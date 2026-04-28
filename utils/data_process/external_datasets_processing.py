@@ -787,6 +787,148 @@ class InsPart_IMG(Image):
         return iterator()
 
 
+class ReasonAff_IMG(Image):
+    """
+    ReasonAff（Affordance-R1）图片数据集：
+    官方代码使用 ``datasets.load_from_disk(path)[split]``，数据字段包含
+    ``image``、``mask``、``problem``、``solution``、``aff_name``、``part_name``。
+    这里将 ``part_name`` 作为 Image.obj_type，将 ``aff_name`` 作为 affordance
+    标签，并把 ``problem`` 保存为与图像绑定的 Instruction。
+    """
+
+    def __init__(self, img, obj_type, aff_mask_dict=None, obj_mask=None, visible_mask=None, **kwargs):
+        super().__init__(
+            img=img,
+            obj_type=obj_type,
+            aff_mask_dict=aff_mask_dict,
+            obj_mask=obj_mask,
+            visible_mask=visible_mask,
+            **kwargs,
+        )
+
+    @staticmethod
+    def _normalize_name(name, fallback='reasonaff'):
+        name = "" if name is None else str(name).strip()
+        return name if name else fallback
+
+    @staticmethod
+    def _to_bgr_image(image):
+        if image is None:
+            return None
+        arr = np.asarray(image.convert('RGB') if hasattr(image, 'convert') else image)
+        if arr.ndim == 2:
+            return cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        if arr.ndim == 3 and arr.shape[2] == 4:
+            arr = arr[:, :, :3]
+        return cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_RGB2BGR)
+
+    @staticmethod
+    def _to_gray_mask(mask, target_shape):
+        if mask is None:
+            return None
+        arr = np.asarray(mask)
+        if arr.dtype == bool:
+            arr = arr.astype(np.uint8) * 255
+        elif arr.ndim == 3:
+            arr = cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        else:
+            arr = arr.astype(np.uint8)
+        if arr.shape[:2] != target_shape:
+            arr = cv2.resize(arr, (target_shape[1], target_shape[0]), interpolation=cv2.INTER_NEAREST)
+        return arr
+
+    @classmethod
+    def _iter_hf_dataset(cls, dataset_root_path, splits):
+        from importlib import import_module
+
+        datasets = import_module('datasets')
+
+        if not (
+            os.path.isfile(os.path.join(dataset_root_path, 'dataset_dict.json')) or
+            os.path.isfile(os.path.join(dataset_root_path, 'state.json'))
+        ):
+            child_roots = []
+            for name in ('train_new', 'test_new'):
+                child = os.path.join(dataset_root_path, name)
+                if os.path.isfile(os.path.join(child, 'dataset_dict.json')):
+                    child_roots.append(child)
+            if not child_roots:
+                child_roots = [
+                    os.path.join(dataset_root_path, name)
+                    for name in sorted(os.listdir(dataset_root_path))
+                    if os.path.isfile(os.path.join(dataset_root_path, name, 'dataset_dict.json')) or
+                       os.path.isfile(os.path.join(dataset_root_path, name, 'state.json'))
+                ]
+            if child_roots:
+                for child in child_roots:
+                    yield from cls._iter_hf_dataset(child, splits)
+                return
+
+        data = datasets.load_from_disk(dataset_root_path)
+        if isinstance(data, datasets.DatasetDict):
+            split_names = tuple(splits) if splits is not None else tuple(
+                s for s in ('train', 'test', 'validation', 'val') if s in data
+            )
+            for split in split_names:
+                if split not in data:
+                    warnings.warn(f'ReasonAff_IMG: split 不存在，已跳过: {split}')
+                    continue
+                for row in data[split]:
+                    yield split, row
+        elif isinstance(data, datasets.Dataset):
+            for row in data:
+                yield 'dataset', row
+        else:
+            raise TypeError(f'ReasonAff_IMG: 不支持的 load_from_disk 返回类型: {type(data)}')
+
+    @classmethod
+    def load_all(cls, dataset_root_path, splits=None, obj_type=None, aff_type=None, **kwargs):
+        """
+        Args:
+            dataset_root_path: ReasonAff 的 HuggingFace ``save_to_disk`` 目录；
+                可传总目录（含 train_new/test_new），也可传单个 split 目录。
+            splits: 需要读取的 split，默认自动读取 train/test/validation/val 中存在者。
+            obj_type: 手动覆盖对象/部件类别；默认使用数据集 ``part_name`` 字段。
+            aff_type: 手动覆盖 affordance 标签；默认使用数据集 ``aff_name`` 字段。
+        """
+        kwargs.pop('keep_id', None)
+        root = resolve_path(dataset_root_path)
+
+        def iterator():
+            for split, row in rows:
+                img = cls._to_bgr_image(row.get('image'))
+                if img is None:
+                    continue
+
+                mask = cls._to_gray_mask(row.get('mask'), target_shape=img.shape[:2])
+                if mask is None:
+                    continue
+
+                obj_label = cls._normalize_name(obj_type or row.get('part_name'), fallback='reasonaff')
+                aff_label = cls._normalize_name(aff_type or row.get('aff_name'), fallback='affordance')
+
+                print(f'loading ReasonAff IMG [{split}]: {row.get("id", "N/A")} | obj={obj_label} | aff={aff_label}')
+                img_obj = cls(
+                    img=img,
+                    obj_type=obj_label,
+                    aff_mask_dict={aff_label: mask},
+                )
+
+                instruction = row.get('problem')
+                if instruction:
+                    Instruction(
+                        str(instruction),
+                        obj_type=obj_label,
+                        aff_type=aff_label,
+                        img_id=img_obj.id,
+                        pc_id=None,
+                    )
+                yield img_obj
+
+        rows = cls._iter_hf_dataset(root, splits)
+        return iterator()
+
+
 class RAGNet_IMG(Image):
     sub_dataset = [
         '3doi_easy_reasoning_val.pkl',
@@ -858,7 +1000,7 @@ if __name__ == "__main__":
     parser.add_argument("-m", "--modality", type=str, nargs="+", help="手动添加数据的模态，可选一个或多个",
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
     parser.add_argument("-d", "--dataset", type=str, help="按照预设定数据集整理",
-                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'InsPart', 'InstructPart', 'LASO', 'AffordanceNet3D', 'GEAL'])
+                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'InsPart', 'InstructPart', 'ReasonAff', 'LASO', 'AffordanceNet3D', 'GEAL'])
     parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
     parser.add_argument("-t", "--obj_type", type=str, help="物体类型", default=None)
     parser.add_argument('-s', '--show', type=str, nargs="+", help='直接渲染点云文件的路径，选择时只执行渲染操作', default=[])
@@ -932,6 +1074,8 @@ if __name__ == "__main__":
                         AffordanceNet3D_PC.load_and_save(input_dir, output_dir)
                     case 'GEAL':
                         GEAL_PC.load_and_save(input_dir, output_dir)
+                    case 'ReasonAff':
+                        warnings.warn('ReasonAff 是 2D 图像数据集，已跳过 PointCloud 分支。')
                     case e:
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
@@ -951,13 +1095,15 @@ if __name__ == "__main__":
                     case 'AGD20K' | 'AGD20k':
                         AGD20k_IMG.load_and_save(input_dir, output_dir)
                     case 'InsPart' | 'InstructPart':
-                        assert False, 'InstructPart is not available! Fuck the author!!'
+                        assert False, 'InstructPart is not tested!'
                         InsPart_IMG.load_and_save(input_dir, output_dir)
+                    case 'ReasonAff':
+                        ReasonAff_IMG.load_and_save(input_dir, output_dir)
                     case e:
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
             if 'ins' in selected_modalities:
-                if args.dataset in ('RAGNet', ):#'InsPart', 'InstructPart'):
+                if args.dataset in ('RAGNet', 'ReasonAff'):#'InsPart', 'InstructPart'):
                     Instruction.save_all(output_dir)  # 直接保存之前加载的数据
     except Exception as e:
         err = e
