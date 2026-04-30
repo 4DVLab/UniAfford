@@ -1,6 +1,7 @@
 from configs import ImageDecoderConfigs
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from collections import OrderedDict
 from typing import Optional
 from .build_sam import build_sam_vit_h
@@ -25,6 +26,8 @@ class ImageHiddenStateDecoder(nn.Module):
             # ("dropout", nn.Dropout(0.0)),
         ]))
         self.text_hidden_fcs = nn.ModuleList([text_fc])
+        self.image_feature_proj = nn.Conv2d(self.config.hidden_size, self.config.hidden_size, kernel_size=1)
+        self.logit_scale = nn.Parameter(torch.ones(1))
         for param in self.parameters():
             param.requires_grad = True
 
@@ -76,7 +79,7 @@ class ImageHiddenStateDecoder(nn.Module):
         query_mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
-        批量生成 2D 分割掩码。
+        使用 routed query token 生成空间相似度热图，再作为 mask prompt 交给 SAM decoder。
 
         Args:
             pred_embeddings: [B, K, C] 或 [B, C] — token 级 query 序列或已聚合 query
@@ -91,16 +94,26 @@ class ImageHiddenStateDecoder(nn.Module):
         pred_embeddings = self.project_hidden_states(pred_embeddings).to(self.config.compute_dtype)
         image_embeddings = image_embeddings.to(self.config.compute_dtype)
 
-        # [B, C] → [B, 1, C]，作为 prompt_encoder 的 text_embeds 输入
-        text_embeds = pred_embeddings.unsqueeze(1)
+        image_features = self.image_feature_proj(image_embeddings)
+        image_features = F.normalize(image_features, p=2, dim=1)
+        text_features = F.normalize(pred_embeddings, p=2, dim=-1)
+
+        low_res_logits = (image_features * text_features[:, :, None, None]).sum(dim=1, keepdim=True)
+        low_res_logits = low_res_logits * self.logit_scale.exp().clamp(min=1e-4, max=100.0)
+
+        mask_prompt = F.interpolate(
+            low_res_logits,
+            size=self.visual_model.prompt_encoder.mask_input_size,
+            mode="bilinear",
+            align_corners=False,
+        )
 
         sparse_embeddings, dense_embeddings = self.visual_model.prompt_encoder(
-            points=None, boxes=None, masks=None,
-            text_embeds=text_embeds,
+            points=None,
+            boxes=None,
+            masks=mask_prompt,
+            text_embeds=None,
         )
-        sparse_embeddings = sparse_embeddings.to(pred_embeddings.dtype)
-
-        # mask_decoder 已支持 batch：image_embeddings [B,...] 与 sparse [B,...] 一一对应
         low_res_masks, _ = self.visual_model.mask_decoder(
             image_embeddings=image_embeddings,
             image_pe=self.visual_model.prompt_encoder.get_dense_pe(),
@@ -108,13 +121,11 @@ class ImageHiddenStateDecoder(nn.Module):
             dense_prompt_embeddings=dense_embeddings,
             multimask_output=False,
         )
-        # low_res_masks: [B, 1, H_low, W_low]
 
         pred_masks = self.visual_model.postprocess_masks(
             low_res_masks,
             input_size=input_size,
             original_size=original_size,
         )
-        # [B, 1, H, W] → [B, H, W]
         return pred_masks[:, 0]
 
