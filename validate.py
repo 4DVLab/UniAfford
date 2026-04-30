@@ -303,13 +303,13 @@ def _aggregate_by_label(sample_records: List[Dict]) -> Dict:
 
     Returns:
         {
-            "by_obj_aff": { "obj_type": { "aff_type": {"iou_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int} } },
-            "by_obj": { "obj_type": {"iou_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int} },
-            "by_aff": { "aff_type": {"iou_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int} },
-            "overall": {"iou_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int},
+            "by_obj_aff": { "obj_type": { "aff_type": {"giou_2d": ..., "kld_2d": ..., "sim_2d": ..., "nss_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int} } },
+            "by_obj": { "obj_type": {"giou_2d": ..., "kld_2d": ..., "sim_2d": ..., "nss_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int} },
+            "by_aff": { "aff_type": {"giou_2d": ..., "kld_2d": ..., "sim_2d": ..., "nss_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int} },
+            "overall": {"giou_2d": ..., "kld_2d": ..., "sim_2d": ..., "nss_2d": ..., "iou_3d": ..., "mae_3d": ..., "sim_3d": ..., "n_2d": int, "n_3d": int},
         }
     """
-    metric_keys = ("giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d")
+    metric_keys = ("giou_2d", "ciou_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d")
 
     # 按 (obj, aff) 收集有效值
     obj_aff_vals: Dict[str, Dict[str, Dict[str, List[float]]]] = defaultdict(lambda: defaultdict(lambda: defaultdict(list)))
@@ -323,6 +323,9 @@ def _aggregate_by_label(sample_records: List[Dict]) -> Dict:
         giou_2d = _parse_metric_val(r.get("giou_2d"))
         inter_2d = _parse_metric_val(r.get("inter_2d"))
         union_2d = _parse_metric_val(r.get("union_2d"))
+        kld_2d = _parse_metric_val(r.get("kld_2d"))
+        sim_2d = _parse_metric_val(r.get("sim_2d"))
+        nss_2d = _parse_metric_val(r.get("nss_2d"))
         iou_3d = _parse_metric_val(r.get("iou_3d"))
         auc_3d = _parse_metric_val(r.get("auc_3d"))
         mae_3d = _parse_metric_val(r.get("mae_3d"))
@@ -333,6 +336,12 @@ def _aggregate_by_label(sample_records: List[Dict]) -> Dict:
         if inter_2d is not None and union_2d is not None:
             obj_aff_vals[obj][aff]["inter_2d"].append(inter_2d)
             obj_aff_vals[obj][aff]["union_2d"].append(union_2d)
+        if kld_2d is not None:
+            obj_aff_vals[obj][aff]["kld_2d"].append(kld_2d)
+        if sim_2d is not None:
+            obj_aff_vals[obj][aff]["sim_2d"].append(sim_2d)
+        if nss_2d is not None:
+            obj_aff_vals[obj][aff]["nss_2d"].append(nss_2d)
         if iou_3d is not None:
             obj_aff_vals[obj][aff]["iou_3d"].append(iou_3d)
             obj_aff_n3d[(obj, aff)] += 1
@@ -505,7 +514,7 @@ def main():
             input_dict = dict_to_cuda(input_dict, device=device)
             output_dict = model(**input_dict)
 
-            # 计算损失 + 更新指标（包括 IoU/MAE/AUROC/AUC/SIM）
+            # 计算损失 + 更新指标（包括 2D IoU/KLD/SIM/NSS 与 3D IoU/MAE/AUC/SIM）
             loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
             update_torchmetrics(
                 metrics, loss_dict, output_dict, input_dict, infer_cfg.batch_size,
@@ -587,12 +596,15 @@ def main():
                 else:
                     record["aff_token_names"] = ""
 
-                # ---- 逐样本 2D/3D 指标（与总体一致：giou_2d, ciou_2d, iou_3d=aiou20, auc_3d 等）----
+                # ---- 逐样本 2D/3D 指标（与总体一致：giou_2d, ciou_2d, kld/sim/nss_2d, iou_3d=aiou20 等）----
                 sample_metrics = compute_sample_metrics(
                     output_dict, input_dict, i,
                     threshold_2d=threshold_2d, threshold_3d=threshold_3d,
                 )
-                for mk in ("giou_2d", "inter_2d", "union_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d"):
+                for mk in (
+                    "giou_2d", "inter_2d", "union_2d", "kld_2d", "sim_2d", "nss_2d",
+                    "iou_3d", "auc_3d", "mae_3d", "sim_3d",
+                ):
                     record[mk] = sample_metrics[mk] if sample_metrics[mk] is not None else ""
                 # 逐样本 ciou_2d = inter/union（与总体 ciou 定义一致）
                 inter_2d, union_2d = sample_metrics.get("inter_2d"), sample_metrics.get("union_2d")
@@ -639,7 +651,8 @@ def main():
         "text_id", "img_id", "pc_id",
         "pred_token_ids", "pred_text", "gt_text",
         "aff_token_names",
-        "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d",
+        "giou_2d", "ciou_2d", "kld_2d", "sim_2d", "nss_2d",
+        "iou_3d", "auc_3d", "mae_3d", "sim_3d",
     ]
     csv_path = os.path.join(out_dir, "validation_samples.csv")
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -663,7 +676,7 @@ def main():
     obj_aff_csv = os.path.join(out_dir, "validation_by_obj_aff.csv")
     if obj_aff_rows:
         with open(obj_aff_csv, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["obj_type", "aff_type", "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+            writer = csv.DictWriter(f, fieldnames=["obj_type", "aff_type", "giou_2d", "ciou_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
             writer.writeheader()
             writer.writerows(obj_aff_rows)
         print(f"按 obj-aff 聚合结果已保存到: {obj_aff_csv}")
@@ -673,7 +686,7 @@ def main():
     obj_csv = os.path.join(out_dir, "validation_by_obj.csv")
     if obj_rows:
         with open(obj_csv, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["obj_type", "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+            writer = csv.DictWriter(f, fieldnames=["obj_type", "giou_2d", "ciou_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
             writer.writeheader()
             writer.writerows(obj_rows)
         print(f"按 obj 聚合结果已保存到: {obj_csv}")
@@ -683,7 +696,7 @@ def main():
     aff_csv = os.path.join(out_dir, "validation_by_aff.csv")
     if aff_rows:
         with open(aff_csv, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["aff_type", "giou_2d", "ciou_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+            writer = csv.DictWriter(f, fieldnames=["aff_type", "giou_2d", "ciou_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
             writer.writeheader()
             writer.writerows(aff_rows)
         print(f"按 aff 聚合结果已保存到: {aff_csv}")

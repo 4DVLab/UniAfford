@@ -25,7 +25,7 @@ LOSS_KEYS = [
     "route_loss", "route_exist_loss", "route_sparse_loss",
 ]
 
-SEG_2D_KEYS = ["giou_2d", "ciou_2d"]
+SEG_2D_KEYS = ["giou_2d", "ciou_2d", "kld_2d", "sim_2d", "nss_2d"]
 # giou_2d: 逐样本 IoU 的平均（generalized IoU）
 # ciou_2d: 累积 intersection / 累积 union（class IoU）
 _CIOU_ACCUM_KEYS = ["_ciou_2d_intersection", "_ciou_2d_union"]
@@ -104,6 +104,9 @@ def update_torchmetrics(
             inter_2d, union_2d = calc.img_I_and_U(preds_2d, target_2d, threshold=threshold_2d)
             metrics["_ciou_2d_intersection"].update(inter_2d.sum().item())
             metrics["_ciou_2d_union"].update(union_2d.sum().item())
+            metrics["kld_2d"].update(calc.img_KLD(preds_2d, target_2d).mean().item(), weight=bs_2d)
+            metrics["sim_2d"].update(calc.img_SIM(preds_2d, target_2d).mean().item(), weight=bs_2d)
+            metrics["nss_2d"].update(calc.img_NSS(preds_2d, target_2d).mean().item(), weight=bs_2d)
 
     # ---- 3D 分割指标 ----
     point_logits = output_dict.get("point_logits")
@@ -172,10 +175,16 @@ def compute_sample_metrics(
         inter_2d, union_2d = calc.img_I_and_U(pred_2d, gt_2d, threshold=threshold_2d)
         record["inter_2d"] = round(inter_2d[0].item(), 6)
         record["union_2d"] = round(union_2d[0].item(), 6)
+        record["kld_2d"] = round(calc.img_KLD(pred_2d, gt_2d)[0].item(), 6)
+        record["sim_2d"] = round(calc.img_SIM(pred_2d, gt_2d)[0].item(), 6)
+        record["nss_2d"] = round(calc.img_NSS(pred_2d, gt_2d)[0].item(), 6)
     else:
         record["giou_2d"] = None
         record["inter_2d"] = None
         record["union_2d"] = None
+        record["kld_2d"] = None
+        record["sim_2d"] = None
+        record["nss_2d"] = None
 
     # 3D
     pt_logits = output_dict.get("point_logits")
@@ -252,7 +261,13 @@ def log_epoch_summary(
         f"PC: {results.get('pc_loss', 0):.6f} "
         f"[bce={results.get('pc_bce_loss', 0):.6f}, dice={results.get('pc_dice_loss', 0):.6f}])"
     )
-    seg2d_str = f"gIoU2D: {results.get('giou_2d', 0):.4f}, cIoU2D: {results.get('ciou_2d', 0):.4f}"
+    seg2d_str = (
+        f"gIoU2D: {results.get('giou_2d', 0):.4f}, "
+        f"cIoU2D: {results.get('ciou_2d', 0):.4f}, "
+        f"KLD2D: {results.get('kld_2d', 0):.4f}, "
+        f"SIM2D: {results.get('sim_2d', 0):.4f}, "
+        f"NSS2D: {results.get('nss_2d', 0):.4f}"
+    )
     seg3d_str = (
         f"IoU3D: {results.get('iou_3d', 0):.4f}, "
         f"MAE3D: {results.get('mae_3d', 0):.4f}, "

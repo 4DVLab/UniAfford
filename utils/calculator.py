@@ -696,3 +696,73 @@ def img_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0
     """
     intersection, union = img_I_and_U(pred_mask, gt_mask, threshold)
     return intersection / (union + 1e-8)
+
+
+def img_KLD(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    批量计算 2D Kullback-Leibler Divergence（KLD）。
+
+    先将预测和 GT 按样本 L1 归一化为概率分布，再计算 KL(gt || pred)。
+
+    Args:
+        pred_mask: [Batch, H, W] 预测概率，值域 [0, 1]
+        gt_mask: [Batch, H, W] GT 概率/标签，值域 [0, 1]
+    Returns:
+        kld: [Batch] 每个样本的 KLD，越低越好
+    """
+    pred_flat = pred_mask.flatten(1).clamp(min=0)
+    gt_flat = gt_mask.flatten(1).clamp(min=0)
+
+    pred_norm = pred_flat / (pred_flat.sum(dim=1, keepdim=True) + eps)
+    gt_norm = gt_flat / (gt_flat.sum(dim=1, keepdim=True) + eps)
+
+    return (gt_norm * ((gt_norm + eps).log() - (pred_norm + eps).log())).sum(dim=1)
+
+
+def img_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+    """
+    批量计算 2D 相似度（SIM / Histogram Intersection Similarity）。
+
+    标准做法：pred 和 gt 分别 L1 归一化后取逐像素最小值求和。
+    若某样本 pred 或 gt 全零，SIM 定义为 0。
+    """
+    pred_flat = pred_mask.flatten(1).clamp(min=0)
+    gt_flat = gt_mask.flatten(1).clamp(min=0)
+
+    pred_sum = pred_flat.sum(dim=1, keepdim=True)
+    gt_sum = gt_flat.sum(dim=1, keepdim=True)
+    pred_norm = pred_flat / (pred_sum + eps)
+    gt_norm = gt_flat / (gt_sum + eps)
+
+    sim = torch.min(pred_norm, gt_norm).sum(dim=1)
+    both_nonzero = (pred_sum.squeeze(-1) > eps) & (gt_sum.squeeze(-1) > eps)
+    return sim * both_nonzero.float()
+
+
+def img_NSS(
+    pred_mask: torch.Tensor,
+    gt_mask: torch.Tensor,
+    fixation_threshold: float = 0.1,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """
+    批量计算 2D Normalized Scanpath Saliency（NSS）。
+
+    预测图按样本做 z-score；GT 先 min-max 归一化，再以 fixation_threshold
+    二值化作为 fixation map。
+    """
+    pred_flat = pred_mask.flatten(1).float()
+    gt_flat = gt_mask.flatten(1).float()
+
+    pred_mean = pred_flat.mean(dim=1, keepdim=True)
+    pred_std = pred_flat.std(dim=1, keepdim=True, unbiased=False)
+    pred_z = (pred_flat - pred_mean) / (pred_std + eps)
+
+    gt_min = gt_flat.min(dim=1, keepdim=True).values
+    gt_max = gt_flat.max(dim=1, keepdim=True).values
+    gt_norm = (gt_flat - gt_min) / (gt_max - gt_min + eps)
+    fixation = (gt_norm > fixation_threshold).to(pred_z.dtype)
+
+    fixation_count = fixation.sum(dim=1)
+    nss = (pred_z * fixation).sum(dim=1) / (fixation_count + eps)
+    return torch.where(fixation_count > 0, nss, torch.zeros_like(nss))

@@ -567,8 +567,8 @@ class AGD20k_IMG(Image):
     ``{root}/{Seen|Unseen}/testset/egocentric/{affordance_name}/{object_name}/{rgb}``，
     像素级 GT 为同结构的 ``.../testset/GT/.../*.png``（灰度图，与 rgb 同名改扩展名）。
 
-    导出时 ``obj_type`` 为 ``{affordance_name}_{object_name}``（文件夹名中的下划线已改为空格，二者之间仍用下划线连接），
-    避免不同动作下相同物体文件夹名冲突；``aff_mask_dict`` 的 key 为规范化后的动作名（下划线→空格）。
+    导出时沿用 Affordance-R1: zero_shot.py 中的目录名：``obj_type`` 为物体目录名，
+    ``aff_mask_dict`` 的 key 为 affordance 目录名。GT 中所有 ``>0`` 的像素保存为前景。
     """
 
     _VALID_RGB_EXT = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
@@ -582,6 +582,11 @@ class AGD20k_IMG(Image):
             visible_mask=visible_mask,
             **kwargs,
         )
+
+    @staticmethod
+    def _to_binary_u8_mask(mask: np.ndarray) -> np.ndarray:
+        """与评估脚本对齐：GT 中所有非零区域视为前景，保存为 0/255。"""
+        return (mask > 0).astype(np.uint8) * 255
 
     @classmethod
     def load_all(cls, dataset_root_path, splits=None, subset='testset', **kwargs):
@@ -636,28 +641,193 @@ class AGD20k_IMG(Image):
                             aff_mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
                             if aff_mask is None:
                                 continue
+                            aff_mask = cls._to_binary_u8_mask(aff_mask)
 
-                            aff_label = aff_name.replace('_', ' ')
-                            obj_label = obj_id.replace('_', ' ')
+                            aff_label = aff_name
+                            obj_label = obj_id
                             print(f'loading IMG: {img_path}')
-                            yield cls(
+                            img_obj = cls(
                                 img,
                                 obj_type=obj_label,
                                 aff_mask_dict={aff_label: aff_mask},
                             )
+                            Instruction(
+                                f"What part of the {obj_label} should we interact with in order to {aff_label} it?",
+                                obj_type=obj_label,
+                                aff_type=aff_label,
+                                img_id=img_obj.id,
+                                pc_id=None,
+                            )
+                            yield img_obj
 
         return iterator()
 
     @classmethod
     def load_and_save(cls, input_root, output_root, splits=None, subset='testset', **kwargs):
-        id_counter = {}
         for img in cls.load_all(input_root, splits=splits, subset=subset, **kwargs):
             dir_path = os.path.join(output_root, img.obj_type, 'Image')
-            if not os.path.exists(dir_path):
-                os.makedirs(dir_path, exist_ok=True)
-            else:
-                id_counter[img.obj_type] = id_counter.get(img.obj_type, 0) + 1
-                file_id = id_counter[img.obj_type]
+            img.save_to(dir_path)
+            img.free_memory()
+
+
+class UMD_IMG(Image):
+    """
+    UMD Part Affordance 图片数据集：
+    - RGB: ``.../{category}_*/{category}_.._{index}_rgb.jpg``
+    - GT:  同目录 ``*_label_rank.mat``，字段 ``gt_label``，通道顺序与官方 affordance id 对齐。
+
+    参考 Affordance-R1: zero_shot.py 的测试抽样：人工标注帧约 1/3，再取 1/10，
+    即 ``file_index % 30 == 1``。
+    """
+
+    _VALID_RGB_SUFFIX = '_rgb.jpg'
+    affordance_map = {
+        'knife': ['cut', 'grasp'],
+        'saw': ['cut', 'grasp'],
+        'scissors': ['cut', 'grasp'],
+        'shears': ['cut', 'grasp'],
+        'scoop': ['scoop', 'grasp'],
+        'spoon': ['scoop', 'grasp'],
+        'trowel': ['scoop', 'grasp'],
+        'bowl': ['contain', 'grasp'],
+        'cup': ['contain', 'grasp'],
+        'ladle': ['contain', 'grasp'],
+        'mug': ['contain', 'grasp'],
+        'pot': ['contain', 'grasp'],
+        'shovel': ['support', 'grasp'],
+        'turner': ['support', 'grasp'],
+        'hammer': ['pound', 'grasp'],
+        'mallet': ['pound', 'grasp'],
+        'tenderizer': ['pound', 'grasp'],
+    }
+    afford_dict_name_to_num = {
+        'grasp': 1,
+        'cut': 2,
+        'scoop': 3,
+        'contain': 4,
+        'pound': 5,
+        'support': 6,
+        'wrap-grasp': 7,
+    }
+
+    def __init__(self, img, obj_type, aff_mask_dict=None, obj_mask=None, visible_mask=None, **kwargs):
+        super().__init__(
+            img=img,
+            obj_type=obj_type,
+            aff_mask_dict=aff_mask_dict,
+            obj_mask=obj_mask,
+            visible_mask=visible_mask,
+            **kwargs,
+        )
+
+    @classmethod
+    def _category_from_dir(cls, dir_path: str) -> str:
+        return os.path.basename(os.path.normpath(dir_path)).split('_')[0].lower()
+
+    @classmethod
+    def _extract_file_index(cls, fname: str):
+        parts = fname.split('_')
+        if len(parts) < 2:
+            return None
+        try:
+            return int(parts[-2])
+        except ValueError:
+            return None
+
+    @classmethod
+    def _build_rank_mask(cls, gt_mat: np.ndarray, action: str, image_shape) -> np.ndarray:
+        """复刻 zero_shot.py 的 UMD rank 标注转换：0 保持背景，非 0 转为 1 - rank/max。"""
+        action_index = cls.afford_dict_name_to_num[action] - 1
+        if gt_mat.ndim != 3 or action_index >= gt_mat.shape[2]:
+            raise ValueError(f"UMD gt_label shape 不符合预期: {gt_mat.shape}, action={action}")
+
+        channel = gt_mat[:, :, action_index].astype(np.float32)
+        max_val = float(np.max(gt_mat))
+        if max_val <= 0:
+            mask = np.zeros(channel.shape, dtype=np.uint8)
+        else:
+            mask = np.where(channel == 0, 0.0, 1.0 - channel / max_val)
+            mask = np.clip(mask * 255.0, 0, 255).astype(np.uint8)
+
+        if mask.shape[:2] != image_shape[:2]:
+            mask = cv2.resize(mask, (image_shape[1], image_shape[0]), interpolation=cv2.INTER_NEAREST)
+        return mask
+
+    @classmethod
+    def load_all(cls, dataset_root_path, sample_mod=30, sample_remainder=1, obj_type=None, aff_type=None, **kwargs):
+        """
+        Args:
+            dataset_root_path: UMD part-affordance-dataset 根目录，或其任意上级/子目录。
+            sample_mod/sample_remainder: 参考 zero_shot.py 的抽样条件，默认 ``index % 30 == 1``。
+            obj_type/aff_type: 可选过滤或覆盖；通常无需指定。
+        """
+        kwargs.pop('keep_id', None)
+        aff_filter = cls.normalize_to_set(aff_type)
+
+        def iterator():
+            for root, dirs, files in os.walk(dataset_root_path):
+                if any(os.path.isdir(os.path.join(root, d)) for d in dirs):
+                    continue
+
+                category = cls._category_from_dir(root)
+                if category not in cls.affordance_map:
+                    continue
+                obj_label = obj_type or category
+                actions = cls.affordance_map[category]
+                if aff_filter is not None:
+                    actions = [a for a in actions if a in aff_filter]
+                if not actions:
+                    continue
+
+                for fname in sorted(files):
+                    if not fname.lower().endswith(cls._VALID_RGB_SUFFIX):
+                        continue
+                    file_index = cls._extract_file_index(fname)
+                    if file_index is None or file_index % sample_mod != sample_remainder:
+                        continue
+
+                    img_path = os.path.join(root, fname)
+                    mat_path = img_path.replace(cls._VALID_RGB_SUFFIX, '_label_rank.mat')
+                    if not os.path.isfile(mat_path):
+                        continue
+
+                    img = cv2.imread(img_path)
+                    if img is None:
+                        continue
+
+                    from scipy.io import loadmat
+                    mat_data = loadmat(mat_path)
+                    gt_mat = mat_data.get('gt_label')
+                    if gt_mat is None:
+                        warnings.warn(f'UMD_IMG: gt_label 字段不存在，已跳过: {mat_path}')
+                        continue
+
+                    aff_mask_dict = {}
+                    for action in actions:
+                        aff_mask_dict[action] = cls._build_rank_mask(gt_mat, action, img.shape)
+
+                    print(f'loading UMD IMG: {img_path}')
+                    img_obj = cls(
+                        img=img,
+                        obj_type=obj_label,
+                        aff_mask_dict=aff_mask_dict,
+                    )
+                    for action in aff_mask_dict:
+                        Instruction(
+                            f"What part of the {obj_label} should we interact with in order to {action} it?",
+                            obj_type=obj_label,
+                            aff_type=action,
+                            img_id=img_obj.id,
+                            pc_id=None,
+                        )
+                    yield img_obj
+
+        return iterator()
+
+    @classmethod
+    def load_and_save(cls, input_root, output_root, **kwargs):
+        for img in cls.load_all(input_root, **kwargs):
+            dir_path = os.path.join(output_root, img.obj_type, 'Image')
             img.save_to(dir_path)
             img.free_memory()
 
@@ -1000,7 +1170,7 @@ if __name__ == "__main__":
     parser.add_argument("-m", "--modality", type=str, nargs="+", help="手动添加数据的模态，可选一个或多个",
                          default=['all'], choices=['pc', 'img', 'img_mask', 'ins', 'all'])
     parser.add_argument("-d", "--dataset", type=str, help="按照预设定数据集整理",
-                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'InsPart', 'InstructPart', 'ReasonAff', 'LASO', 'AffordanceNet3D', 'GEAL'])
+                         default=None, choices=['AGPIL', 'PIADv2', 'PIAD', 'RAGNet', 'HANDAL', 'AGD20K', 'AGD20k', 'UMD', 'umd', 'InsPart', 'InstructPart', 'ReasonAff', 'LASO', 'AffordanceNet3D', 'GEAL'])
     parser.add_argument("-a", "--aff_type", type=str, help="affordance种类", default=None)
     parser.add_argument("-t", "--obj_type", type=str, help="物体类型", default=None)
     parser.add_argument('-s', '--show', type=str, nargs="+", help='直接渲染点云文件的路径，选择时只执行渲染操作', default=[])
@@ -1074,8 +1244,8 @@ if __name__ == "__main__":
                         AffordanceNet3D_PC.load_and_save(input_dir, output_dir)
                     case 'GEAL':
                         GEAL_PC.load_and_save(input_dir, output_dir)
-                    case 'ReasonAff':
-                        warnings.warn('ReasonAff 是 2D 图像数据集，已跳过 PointCloud 分支。')
+                    case 'ReasonAff' | 'AGD20K' | 'AGD20k' | 'UMD' | 'umd':
+                        warnings.warn(f'{args.dataset} 是 2D 图像数据集，已跳过 PointCloud 分支。')
                     case e:
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
@@ -1094,6 +1264,8 @@ if __name__ == "__main__":
                         RAGNet_IMG.load_and_save(input_dir, output_dir)
                     case 'AGD20K' | 'AGD20k':
                         AGD20k_IMG.load_and_save(input_dir, output_dir)
+                    case 'UMD' | 'umd':
+                        UMD_IMG.load_and_save(input_dir, output_dir, aff_type=args.aff_type, obj_type=args.obj_type)
                     case 'InsPart' | 'InstructPart':
                         assert False, 'InstructPart is not tested!'
                         InsPart_IMG.load_and_save(input_dir, output_dir)
@@ -1103,7 +1275,7 @@ if __name__ == "__main__":
                         raise TypeError(f'Selected dataset "{args.dataset}" is not supported!!')
 
             if 'ins' in selected_modalities:
-                if args.dataset in ('RAGNet', 'ReasonAff'):#'InsPart', 'InstructPart'):
+                if args.dataset in ('RAGNet', 'ReasonAff', 'AGD20K', 'AGD20k', 'UMD', 'umd'):#'InsPart', 'InstructPart'):
                     Instruction.save_all(output_dir)  # 直接保存之前加载的数据
     except Exception as e:
         err = e
