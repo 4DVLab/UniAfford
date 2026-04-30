@@ -209,6 +209,13 @@ def train_one_epoch(
             )
             if local_rank == 0 and writer is not None:
                 batch_log = {k: loss_dict[k].item() for k in loss_dict}
+                batch_log.update(
+                    calc.img_batch_metrics(
+                        output_dict,
+                        input_dict,
+                        threshold=max(config.mask_threshold_2d, 0.5),
+                    )
+                )
                 if lr is not None:
                     batch_log["lr"] = lr
                 log_scalar_dict(writer, "train_batch", batch_log, global_step)

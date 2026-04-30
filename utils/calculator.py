@@ -766,3 +766,41 @@ def img_NSS(
     fixation_count = fixation.sum(dim=1)
     nss = (pred_z * fixation).sum(dim=1) / (fixation_count + eps)
     return torch.where(fixation_count > 0, nss, torch.zeros_like(nss))
+
+
+def img_batch_metrics(
+    output_dict: Dict,
+    input_dict: Dict,
+    threshold: float = 0.5,
+) -> Dict[str, float]:
+    """
+    从模型输出和 batch 输入中计算 2D 指标标量，用于训练过程日志记录。
+
+    复用 img_IoU / img_I_and_U / img_KLD / img_SIM / img_NSS；若当前 batch
+    没有有效图像监督，则返回空字典。
+    """
+    image_logits = output_dict.get("image_logits")
+    img_gt = input_dict.get("img_gt_tensor")
+    if image_logits is None or img_gt is None:
+        return {}
+
+    preds_2d = image_logits.detach().sigmoid()
+    target_2d = img_gt.float()
+    img_valid = input_dict.get("img_valid_mask")
+    if img_valid is not None:
+        valid = img_valid.bool()
+        if not valid.any():
+            return {}
+        preds_2d = preds_2d[valid]
+        target_2d = target_2d[valid]
+
+    inter_2d, union_2d = img_I_and_U(preds_2d, target_2d, threshold=threshold)
+    total_union = union_2d.sum()
+    ciou_2d = (inter_2d.sum() / (total_union + 1e-8)).item() if total_union > 0 else 0.0
+    return {
+        "giou_2d": img_IoU(preds_2d, target_2d, threshold=threshold).mean().item(),
+        "ciou_2d": ciou_2d,
+        "kld_2d": img_KLD(preds_2d, target_2d).mean().item(),
+        "sim_2d": img_SIM(preds_2d, target_2d).mean().item(),
+        "nss_2d": img_NSS(preds_2d, target_2d).mean().item(),
+    }

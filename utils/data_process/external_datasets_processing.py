@@ -7,6 +7,7 @@ import sys
 import os
 import warnings
 import json
+import re
 import numpy as np
 import cv2
 from collections import defaultdict
@@ -18,6 +19,14 @@ from utils.common import resolve_path
 # 全局参数
 DEFAULT_OUTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 输出的数据集位置（用于数据转换，训练推理时可忽略）
 DEFAULT_INPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 加载的数据集位置（输入数据位置，或转换数据集的输入位置）
+
+
+def normalize_readme_label(label, fallback='unknown'):
+    """按 README 约定保存标签：小写，且仅保留字母、数字和下划线。"""
+    text = "" if label is None else str(label).strip().lower()
+    text = re.sub(r'[^a-z0-9_]+', '_', text)
+    text = re.sub(r'_+', '_', text).strip('_')
+    return text or fallback
 
 
 
@@ -567,8 +576,8 @@ class AGD20k_IMG(Image):
     ``{root}/{Seen|Unseen}/testset/egocentric/{affordance_name}/{object_name}/{rgb}``，
     像素级 GT 为同结构的 ``.../testset/GT/.../*.png``（灰度图，与 rgb 同名改扩展名）。
 
-    导出时沿用 Affordance-R1: zero_shot.py 中的目录名：``obj_type`` 为物体目录名，
-    ``aff_mask_dict`` 的 key 为 affordance 目录名。GT 中所有 ``>0`` 的像素保存为前景。
+    导出时语义来源沿用 Affordance-R1: zero_shot.py 中的目录名，并按 README
+    规范保存为小写下划线标签。GT 中所有 ``>0`` 的像素保存为前景。
     """
 
     _VALID_RGB_EXT = ('.jpg', '.jpeg', '.png', '.bmp', '.webp')
@@ -643,8 +652,8 @@ class AGD20k_IMG(Image):
                                 continue
                             aff_mask = cls._to_binary_u8_mask(aff_mask)
 
-                            aff_label = aff_name
-                            obj_label = obj_id
+                            aff_label = normalize_readme_label(aff_name, fallback='affordance')
+                            obj_label = normalize_readme_label(obj_id, fallback='object')
                             print(f'loading IMG: {img_path}')
                             img_obj = cls(
                                 img,
@@ -762,7 +771,10 @@ class UMD_IMG(Image):
             obj_type/aff_type: 可选过滤或覆盖；通常无需指定。
         """
         kwargs.pop('keep_id', None)
-        aff_filter = cls.normalize_to_set(aff_type)
+        aff_filter = None
+        if aff_type is not None:
+            raw_aff_filter = [aff_type] if isinstance(aff_type, str) else list(aff_type)
+            aff_filter = {normalize_readme_label(a, fallback='affordance') for a in raw_aff_filter if a is not None}
 
         def iterator():
             for root, dirs, files in os.walk(dataset_root_path):
@@ -772,10 +784,10 @@ class UMD_IMG(Image):
                 category = cls._category_from_dir(root)
                 if category not in cls.affordance_map:
                     continue
-                obj_label = obj_type or category
+                obj_label = normalize_readme_label(obj_type or category, fallback='object')
                 actions = cls.affordance_map[category]
                 if aff_filter is not None:
-                    actions = [a for a in actions if a in aff_filter]
+                    actions = [a for a in actions if normalize_readme_label(a, fallback='affordance') in aff_filter]
                 if not actions:
                     continue
 
@@ -804,7 +816,8 @@ class UMD_IMG(Image):
 
                     aff_mask_dict = {}
                     for action in actions:
-                        aff_mask_dict[action] = cls._build_rank_mask(gt_mat, action, img.shape)
+                        aff_label = normalize_readme_label(action, fallback='affordance')
+                        aff_mask_dict[aff_label] = cls._build_rank_mask(gt_mat, action, img.shape)
 
                     print(f'loading UMD IMG: {img_path}')
                     img_obj = cls(

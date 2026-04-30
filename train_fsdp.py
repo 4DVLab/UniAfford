@@ -283,6 +283,13 @@ def train_one_epoch(
             #         )
             if local_rank == 0 and writer is not None:
                 batch_log = {k: loss_dict[k].item() for k in loss_dict}
+                batch_log.update(
+                    calc.img_batch_metrics(
+                        output_dict,
+                        input_dict,
+                        threshold=max(config.mask_threshold_2d, 0.5),
+                    )
+                )
                 batch_log["ce_ignored_token_count"] = float(ignored_cnt)
                 for k, v in lr_dict.items():
                     batch_log[f"lr/{k}"] = v
