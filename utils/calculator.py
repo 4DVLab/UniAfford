@@ -698,7 +698,20 @@ def img_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0
     return intersection / (union + 1e-8)
 
 
-def img_KLD(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def img_P_at_IoU_thresholds(iou_scores: torch.Tensor, thresholds: torch.Tensor) -> torch.Tensor:
+    """
+    根据逐样本 IoU 计算 P@thresholds。
+
+    与 Affordance-R1 的 calculate_iou.py 对齐：使用 ``iou > threshold`` 作为命中条件。
+    """
+    if iou_scores.numel() == 0:
+        return torch.zeros_like(thresholds, dtype=torch.float32)
+    iou_scores = iou_scores.float().view(-1, 1)
+    thresholds = thresholds.to(device=iou_scores.device, dtype=iou_scores.dtype).view(1, -1)
+    return (iou_scores > thresholds).float().mean(dim=0)
+
+
+def img_KLD(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     """
     批量计算 2D Kullback-Leibler Divergence（KLD）。
 
@@ -719,7 +732,7 @@ def img_KLD(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-8) -
     return (gt_norm * ((gt_norm + eps).log() - (pred_norm + eps).log())).sum(dim=1)
 
 
-def img_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def img_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     """
     批量计算 2D 相似度（SIM / Histogram Intersection Similarity）。
 
@@ -796,10 +809,17 @@ def img_batch_metrics(
 
     inter_2d, union_2d = img_I_and_U(preds_2d, target_2d, threshold=threshold)
     total_union = union_2d.sum()
+    iou_2d = img_IoU(preds_2d, target_2d, threshold=threshold)
+    p_thresholds = img_P_at_IoU_thresholds(
+        iou_2d,
+        torch.arange(0.5, 0.96, 0.05, device=iou_2d.device),
+    )
     ciou_2d = (inter_2d.sum() / (total_union + 1e-8)).item() if total_union > 0 else 0.0
     return {
-        "giou_2d": img_IoU(preds_2d, target_2d, threshold=threshold).mean().item(),
+        "giou_2d": iou_2d.mean().item(),
         "ciou_2d": ciou_2d,
+        "p50_2d": p_thresholds[0].item(),
+        "p50_95_2d": p_thresholds.mean().item(),
         "kld_2d": img_KLD(preds_2d, target_2d).mean().item(),
         "sim_2d": img_SIM(preds_2d, target_2d).mean().item(),
         "nss_2d": img_NSS(preds_2d, target_2d).mean().item(),

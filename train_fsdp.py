@@ -65,14 +65,14 @@ def parse_args():
     parser.add_argument(
         "--point_decoder_backbone_mode",
         type=str,
-        default=None,
+        default='independent',
         choices=["shared", "independent"],
         help="3D decoder backbone 模式：shared 为与 encoder 共用基座，independent 为独立随机初始化 backbone",
     )
     parser.add_argument(
         "--point_decoder_decode_mode",
         type=str,
-        default=None,
+        default='similarity',
         choices=["prompt", "similarity"],
         help="3D decoder 后端对齐方式：prompt 为 prompt-based 解码，similarity 为逐点相似度对齐",
     )

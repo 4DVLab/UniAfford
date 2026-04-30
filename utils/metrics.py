@@ -25,7 +25,7 @@ LOSS_KEYS = [
     "route_loss", "route_exist_loss", "route_sparse_loss",
 ]
 
-SEG_2D_KEYS = ["giou_2d", "ciou_2d", "kld_2d", "sim_2d", "nss_2d"]
+SEG_2D_KEYS = ["giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d"]
 # giou_2d: 逐样本 IoU 的平均（generalized IoU）
 # ciou_2d: 累积 intersection / 累积 union（class IoU）
 _CIOU_ACCUM_KEYS = ["_ciou_2d_intersection", "_ciou_2d_union"]
@@ -104,6 +104,12 @@ def update_torchmetrics(
             inter_2d, union_2d = calc.img_I_and_U(preds_2d, target_2d, threshold=threshold_2d)
             metrics["_ciou_2d_intersection"].update(inter_2d.sum().item())
             metrics["_ciou_2d_union"].update(union_2d.sum().item())
+            p_thresholds = calc.img_P_at_IoU_thresholds(
+                iou_2d,
+                torch.arange(0.5, 0.96, 0.05, device=iou_2d.device),
+            )
+            metrics["p50_2d"].update(p_thresholds[0].item(), weight=bs_2d)
+            metrics["p50_95_2d"].update(p_thresholds.mean().item(), weight=bs_2d)
             metrics["kld_2d"].update(calc.img_KLD(preds_2d, target_2d).mean().item(), weight=bs_2d)
             metrics["sim_2d"].update(calc.img_SIM(preds_2d, target_2d).mean().item(), weight=bs_2d)
             metrics["nss_2d"].update(calc.img_NSS(preds_2d, target_2d).mean().item(), weight=bs_2d)
@@ -171,10 +177,15 @@ def compute_sample_metrics(
             and (img_valid is None or img_valid[i].bool())):
         pred_2d = img_logits[i].detach().sigmoid().unsqueeze(0)
         gt_2d = img_gt[i].float().unsqueeze(0)
-        record["giou_2d"] = round(calc.img_IoU(pred_2d, gt_2d, threshold=threshold_2d)[0].item(), 6)
+        iou_2d = calc.img_IoU(pred_2d, gt_2d, threshold=threshold_2d)
+        record["giou_2d"] = round(iou_2d[0].item(), 6)
         inter_2d, union_2d = calc.img_I_and_U(pred_2d, gt_2d, threshold=threshold_2d)
         record["inter_2d"] = round(inter_2d[0].item(), 6)
         record["union_2d"] = round(union_2d[0].item(), 6)
+        p_thresholds = torch.arange(0.5, 0.96, 0.05, device=pred_2d.device)
+        p_values = calc.img_P_at_IoU_thresholds(iou_2d, p_thresholds)
+        record["p50_2d"] = round(p_values[0].item(), 6)
+        record["p50_95_2d"] = round(p_values.mean().item(), 6)
         record["kld_2d"] = round(calc.img_KLD(pred_2d, gt_2d)[0].item(), 6)
         record["sim_2d"] = round(calc.img_SIM(pred_2d, gt_2d)[0].item(), 6)
         record["nss_2d"] = round(calc.img_NSS(pred_2d, gt_2d)[0].item(), 6)
@@ -182,6 +193,8 @@ def compute_sample_metrics(
         record["giou_2d"] = None
         record["inter_2d"] = None
         record["union_2d"] = None
+        record["p50_2d"] = None
+        record["p50_95_2d"] = None
         record["kld_2d"] = None
         record["sim_2d"] = None
         record["nss_2d"] = None
@@ -264,6 +277,8 @@ def log_epoch_summary(
     seg2d_str = (
         f"gIoU2D: {results.get('giou_2d', 0):.4f}, "
         f"cIoU2D: {results.get('ciou_2d', 0):.4f}, "
+        f"P@50 2D: {results.get('p50_2d', 0):.4f}, "
+        f"P@50:95 2D: {results.get('p50_95_2d', 0):.4f}, "
         f"KLD2D: {results.get('kld_2d', 0):.4f}, "
         f"SIM2D: {results.get('sim_2d', 0):.4f}, "
         f"NSS2D: {results.get('nss_2d', 0):.4f}"
