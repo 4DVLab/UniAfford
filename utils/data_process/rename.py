@@ -20,12 +20,13 @@ from tqdm import tqdm
 
 # 需要人工合并同义名时，直接在这里填，例如 {"wrapgrasp": "wrap-grasp"}。
 OBJ_RENAME_MAP = {
-    "Top door of refrigertor": "refrigerator",
-    "Bottom door of refrigertor": "refrigerator",
-    "Right door of refrigertor": "refrigerator",
-    "Left door of refrigertor": "refrigerator",
+    "Top door of refrigerator": "refrigerator",
+    "Bottom door of refrigerator": "refrigerator",
+    "Right door of refrigerator": "refrigerator",
+    "Left door of refrigerator": "refrigerator",
     "Power-drill": "power drill",
 
+    # "scroll wheel": "computer mouse",
 }
 AFF_RENAME_MAP = {
     "wrap-grasp": "wrapgrasp",
@@ -194,15 +195,18 @@ def write_instruction(src_path, dst_path, obj_name, obj_map, aff_map):
 
 def write_pointcloud(src_path, dst_path, aff_map):
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
-    with open(src_path, "r", encoding="utf-8") as input_f, open(dst_path, "w", encoding="utf-8") as output_f:
+    # 只重写首行 header 中的 aff 列名；首行之后的点云数值数据用二进制原样透传。
+    with open(src_path, "rb") as input_f, open(dst_path, "wb") as output_f:
         first = input_f.readline()
         if first:
-            prefix = "# " if first.startswith("# ") else ""
-            clean_header = first[2:] if first.startswith("# ") else first
-            cols = [col.strip() for col in clean_header.strip().split(",")]
+            newline = b"\r\n" if first.endswith(b"\r\n") else b"\n"
+            line = first.rstrip(b"\r\n").decode("utf-8")
+            prefix = "# " if line.startswith("# ") else ""
+            clean_header = line[2:] if line.startswith("# ") else line
+            cols = [col.strip() for col in clean_header.split(",")]
             if len(cols) > 3:
                 cols = cols[:3] + [mapped_name(col, aff_map) for col in cols[3:]]
-            output_f.write(prefix + ",".join(cols) + "\n")
+            output_f.write((prefix + ",".join(cols)).encode("utf-8") + newline)
         shutil.copyfileobj(input_f, output_f)
 
 
