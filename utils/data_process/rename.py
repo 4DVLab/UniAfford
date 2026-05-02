@@ -15,14 +15,15 @@ import os
 import re
 import shutil
 from collections import defaultdict
+from tqdm import tqdm
 
 
 # 需要人工合并同义名时，直接在这里填，例如 {"wrapgrasp": "wrap-grasp"}。
 OBJ_RENAME_MAP = {
-    "Top door of referigertor": "refrigerator",
-    "Bottom door of referigertor": "refrigerator",
-    "Right door of referigertor": "refrigerator",
-    "Left door of referigertor": "refrigerator",
+    "Top door of refrigertor": "refrigerator",
+    "Bottom door of refrigertor": "refrigerator",
+    "Right door of refrigertor": "refrigerator",
+    "Left door of refrigertor": "refrigerator",
     "Power-drill": "power drill",
 
 }
@@ -64,6 +65,7 @@ def standardize_name(name):
 
 
 def normalize_mapping(mapping):
+    """将重命名字典的 key/value 都先标准化，保证不同大小写/下划线写法可匹配。"""
     return {
         standardize_name(old): standardize_name(new)
         for old, new in (mapping or {}).items()
@@ -82,49 +84,47 @@ def load_rename_map(path):
 
 
 def mapped_name(name, rename_map):
+    """先标准化待匹配名称，再查标准化后的重命名字典；未命中时返回标准化名称。"""
     std = standardize_name(name)
     return rename_map.get(std, std)
 
 
-def read_csv_rows(path):
-    with open(path, "r", newline="", encoding="utf-8-sig") as f:
-        return list(csv.DictReader(f))
+def collect_names_from_json_value(value, objects, affordances):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "obj_type" and isinstance(item, str):
+                objects.add(item)
+            elif key == "aff_type" and isinstance(item, str):
+                affordances.add(item)
+            collect_names_from_json_value(item, objects, affordances)
+    elif isinstance(value, list):
+        for item in value:
+            collect_names_from_json_value(item, objects, affordances)
 
 
-def collect_names(dataset_root):
+def collect_names_from_metadata(dataset_root):
+    """只从轻量 JSON 元数据收集名称，避免逐个扫描图片/点云文件。"""
     objects = set()
     affordances = set()
-    for entry in os.listdir(dataset_root):
-        obj_dir = os.path.join(dataset_root, entry)
-        if not os.path.isdir(obj_dir):
+    for filename in ("metadata.json", "info.json", "train.json", "val.json", "test.json"):
+        path = os.path.join(dataset_root, filename)
+        if not os.path.exists(path):
             continue
-        objects.add(entry)
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
 
-        ins_file = os.path.join(obj_dir, "Instruction.csv")
-        if os.path.exists(ins_file):
-            for row in read_csv_rows(ins_file):
-                if row.get("obj_type"):
-                    objects.add(row["obj_type"])
-                if row.get("aff_type"):
-                    affordances.add(row["aff_type"])
-
-        mask_dir = os.path.join(obj_dir, "Image", "mask")
-        if os.path.isdir(mask_dir):
-            for aff in os.listdir(mask_dir):
-                if os.path.isdir(os.path.join(mask_dir, aff)):
-                    affordances.add(aff)
-
-        pc_dir = os.path.join(obj_dir, "PointCloud")
-        if os.path.isdir(pc_dir):
-            for filename in os.listdir(pc_dir):
-                if not filename.endswith(".csv"):
+        if filename == "info.json" and isinstance(data, dict):
+            for obj_dict in data.values():
+                if not isinstance(obj_dict, dict):
                     continue
-                with open(os.path.join(pc_dir, filename), "r", encoding="utf-8") as f:
-                    first = f.readline().strip()
-                if first.startswith("# "):
-                    first = first[2:]
-                cols = [c.strip() for c in first.split(",")]
-                affordances.update(c for c in cols[3:] if c)
+                for obj, aff_dict in obj_dict.items():
+                    objects.add(obj)
+                    if isinstance(aff_dict, dict):
+                        affordances.update(k for k in aff_dict.keys() if k != "ID")
+        collect_names_from_json_value(data, objects, affordances)
     return objects, affordances
 
 
@@ -140,7 +140,7 @@ def build_full_maps(dataset_root, obj_rename=None, aff_rename=None, map_file=Non
         old, new = aff_rename
         aff_map[standardize_name(old)] = standardize_name(new)
 
-    objects, affordances = collect_names(dataset_root)
+    objects, affordances = collect_names_from_metadata(dataset_root)
     for obj in objects:
         std = standardize_name(obj)
         obj_map.setdefault(std, std)
@@ -207,19 +207,20 @@ def write_pointcloud(src_path, dst_path, aff_map):
 
 
 def copy_image_dir(src_dir, dst_dir, old_obj_name, new_obj_name, aff_map):
-    for subdir in os.listdir(src_dir):
+    subdirs = os.listdir(src_dir)
+    for subdir in tqdm(subdirs, desc=f"Image-{old_obj_name}", leave=False):
         src_subdir = os.path.join(src_dir, subdir)
         if not os.path.isdir(src_subdir):
             continue
         if subdir == "mask":
-            for aff_dir in os.listdir(src_subdir):
+            for aff_dir in tqdm(os.listdir(src_subdir), desc=f"Mask-{old_obj_name}", leave=False):
                 src_aff_dir = os.path.join(src_subdir, aff_dir)
                 if not os.path.isdir(src_aff_dir):
                     continue
                 new_aff = mapped_name(aff_dir, aff_map)
                 dst_aff_dir = os.path.join(dst_dir, "mask", new_aff)
                 os.makedirs(dst_aff_dir, exist_ok=True)
-                for filename in os.listdir(src_aff_dir):
+                for filename in tqdm(os.listdir(src_aff_dir), desc=f"{new_aff}", leave=False):
                     src_file = os.path.join(src_aff_dir, filename)
                     if os.path.isfile(src_file):
                         dst_name = rewrite_dataset_filename(filename, old_obj_name, new_obj_name, new_aff)
@@ -227,7 +228,7 @@ def copy_image_dir(src_dir, dst_dir, old_obj_name, new_obj_name, aff_map):
         else:
             dst_subdir = os.path.join(dst_dir, subdir)
             os.makedirs(dst_subdir, exist_ok=True)
-            for filename in os.listdir(src_subdir):
+            for filename in tqdm(os.listdir(src_subdir), desc=f"{old_obj_name}/{subdir}", leave=False):
                 src_file = os.path.join(src_subdir, filename)
                 if os.path.isfile(src_file):
                     dst_name = rewrite_dataset_filename(filename, old_obj_name, new_obj_name)
@@ -280,14 +281,14 @@ def rewrite_split_value(value, obj_map, aff_map, parent_key=None):
 
 def copy_object_dir(src_dir, dst_dir, old_obj_name, new_obj_name, obj_map, aff_map):
     os.makedirs(dst_dir, exist_ok=True)
-    for entry in os.listdir(src_dir):
+    for entry in tqdm(os.listdir(src_dir), desc=f"Object-{old_obj_name}", leave=False):
         src_path = os.path.join(src_dir, entry)
         if entry == "Instruction.csv" and os.path.isfile(src_path):
             write_instruction(src_path, os.path.join(dst_dir, entry), new_obj_name, obj_map, aff_map)
         elif entry == "PointCloud" and os.path.isdir(src_path):
             pc_dst = os.path.join(dst_dir, entry)
             os.makedirs(pc_dst, exist_ok=True)
-            for filename in os.listdir(src_path):
+            for filename in tqdm(os.listdir(src_path), desc=f"PointCloud-{old_obj_name}", leave=False):
                 pc_src = os.path.join(src_path, filename)
                 if os.path.isfile(pc_src) and filename.endswith(".csv"):
                     pc_name = rewrite_dataset_filename(filename, old_obj_name, new_obj_name)
@@ -306,7 +307,8 @@ def rewrite_dataset(dataset_root, obj_map, aff_map):
         shutil.rmtree(tmp_root)
     os.makedirs(tmp_root, exist_ok=True)
 
-    for entry in os.listdir(dataset_root):
+    entries = os.listdir(dataset_root)
+    for entry in tqdm(entries, desc="重写数据集"):
         src_path = os.path.join(dataset_root, entry)
         dst_path = os.path.join(tmp_root, entry)
         if os.path.isdir(src_path):
@@ -322,13 +324,13 @@ def rewrite_dataset(dataset_root, obj_map, aff_map):
         else:
             shutil.copy2(src_path, dst_path)
 
-    for entry in os.listdir(dataset_root):
+    for entry in tqdm(os.listdir(dataset_root), desc="清理旧数据", leave=False):
         path = os.path.join(dataset_root, entry)
         if os.path.isdir(path):
             shutil.rmtree(path)
         else:
             os.remove(path)
-    for entry in os.listdir(tmp_root):
+    for entry in tqdm(os.listdir(tmp_root), desc="写回新数据", leave=False):
         shutil.move(os.path.join(tmp_root, entry), os.path.join(dataset_root, entry))
     shutil.rmtree(tmp_root)
 
