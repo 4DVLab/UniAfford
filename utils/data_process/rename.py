@@ -24,6 +24,15 @@ OBJ_RENAME_MAP = {
     "Bottom door of refrigerator": "refrigerator",
     "Right door of refrigerator": "refrigerator",
     "Left door of refrigerator": "refrigerator",
+    "Top door of refrigertor": "refrigerator",
+    "Bottom door of refrigertor": "refrigerator",
+    "Right door of refrigertor": "refrigerator",
+    "Left door of refrigertor": "refrigerator",
+    "Top door of referigertor": "refrigerator",
+    "Bottom door of referigertor": "refrigerator",
+    "Right door of referigertor": "refrigerator",
+    "Left door of referigertor": "refrigerator",
+    "Left door of wardrobe": "wardrobe",
     "Power-drill": "power drill",
 
     # "scroll wheel": "computer mouse",
@@ -162,34 +171,69 @@ def extract_sample_id(filename, old_obj_name):
     return None
 
 
-def rewrite_dataset_filename(filename, old_obj_name, new_obj_name, aff_name=None):
-    _, ext = os.path.splitext(filename)
-    sample_id = extract_sample_id(filename, old_obj_name)
-    if sample_id:
-        if aff_name:
-            return f"{new_obj_name}_{sample_id}_{aff_name}{ext.lower()}"
-        return f"{new_obj_name}_{sample_id}{ext.lower()}"
-    stem, ext = os.path.splitext(filename)
-    return f"{standardize_name(stem)}{ext.lower()}"
+def extract_sample_suffix(filename, old_obj_name):
+    stem, _ = os.path.splitext(filename)
+    if stem.startswith(old_obj_name + "_"):
+        rest = stem[len(old_obj_name) + 1:]
+        parts = rest.split("_", 1)
+        return parts[1] if len(parts) > 1 else ""
+    match = re.search(r"_(\d+)(?:_(.*))?$", stem)
+    return match.group(2) or "" if match else ""
 
 
-def write_instruction(src_path, dst_path, obj_name, obj_map, aff_map):
+def format_dataset_filename(new_obj_name, new_id, ext, aff_name=None, suffix=None):
+    ext = ext.lower()
+    if aff_name:
+        return f"{new_obj_name}_{new_id}_{aff_name}{ext}"
+    if suffix:
+        return f"{new_obj_name}_{new_id}_{suffix}{ext}"
+    return f"{new_obj_name}_{new_id}{ext}"
+
+
+def _modality_state(rename_state, obj_name, modality):
+    obj_state = rename_state[obj_name]
+    if modality not in obj_state:
+        obj_state[modality] = {"next_id": 1, "id_map": {}}
+    return obj_state[modality]
+
+
+def allocate_modality_id(rename_state, obj_name, modality, old_obj_name, old_id):
+    state = _modality_state(rename_state, obj_name, modality)
+    key = (old_obj_name, str(old_id))
+    if key not in state["id_map"]:
+        state["id_map"][key] = state["next_id"]
+        state["next_id"] += 1
+    return state["id_map"][key]
+
+
+def lookup_modality_id(rename_state, obj_name, modality, old_obj_name, old_id):
+    if not old_id:
+        return ""
+    state = _modality_state(rename_state, obj_name, modality)
+    return state["id_map"].get((old_obj_name, str(old_id)), old_id)
+
+
+def write_instruction(src_path, dst_path, old_obj_name, obj_name, obj_map, aff_map, rename_state):
     fieldnames = ["ins", "obj_type", "aff_type", "id", "img_id", "pc_id"]
     os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    write_header = not os.path.exists(dst_path)
     with open(src_path, "r", newline="", encoding="utf-8-sig") as input_f, open(
-        dst_path, "w", newline="", encoding="utf-8"
+        dst_path, "a", newline="", encoding="utf-8"
     ) as output_f:
         reader = csv.DictReader(input_f)
         writer = csv.DictWriter(output_f, fieldnames=fieldnames)
-        writer.writeheader()
+        if write_header:
+            writer.writeheader()
         for row in reader:
+            old_id = row.get("id", "") or f"row-{reader.line_num}"
+            new_id = allocate_modality_id(rename_state, obj_name, "Instruction", old_obj_name, old_id)
             writer.writerow({
                 "ins": row.get("ins", ""),
                 "obj_type": mapped_name(row.get("obj_type") or obj_name, obj_map),
                 "aff_type": mapped_name(row.get("aff_type", ""), aff_map),
-                "id": row.get("id", ""),
-                "img_id": row.get("img_id", ""),
-                "pc_id": row.get("pc_id", ""),
+                "id": new_id,
+                "img_id": lookup_modality_id(rename_state, obj_name, "Image", old_obj_name, row.get("img_id", "")),
+                "pc_id": lookup_modality_id(rename_state, obj_name, "PointCloud", old_obj_name, row.get("pc_id", "")),
             })
 
 
@@ -210,33 +254,58 @@ def write_pointcloud(src_path, dst_path, aff_map):
         shutil.copyfileobj(input_f, output_f)
 
 
-def copy_image_dir(src_dir, dst_dir, old_obj_name, new_obj_name, aff_map):
-    subdirs = os.listdir(src_dir)
-    for subdir in tqdm(subdirs, desc=f"Image-{old_obj_name}", leave=False):
+def copy_image_dir(src_dir, dst_dir, old_obj_name, new_obj_name, aff_map, rename_state):
+    rgb_dir = os.path.join(src_dir, "rgb")
+    if os.path.isdir(rgb_dir):
+        dst_rgb_dir = os.path.join(dst_dir, "rgb")
+        os.makedirs(dst_rgb_dir, exist_ok=True)
+        for filename in tqdm(os.listdir(rgb_dir), desc=f"Image-rgb-{old_obj_name}", leave=False):
+            src_file = os.path.join(rgb_dir, filename)
+            if not os.path.isfile(src_file):
+                continue
+            old_id = extract_sample_id(filename, old_obj_name) or filename
+            new_id = allocate_modality_id(rename_state, new_obj_name, "Image", old_obj_name, old_id)
+            _, ext = os.path.splitext(filename)
+            dst_name = format_dataset_filename(new_obj_name, new_id, ext)
+            shutil.copy2(src_file, os.path.join(dst_rgb_dir, dst_name))
+
+    mask_dir = os.path.join(src_dir, "mask")
+    if os.path.isdir(mask_dir):
+        for aff_dir in tqdm(os.listdir(mask_dir), desc=f"Mask-{old_obj_name}", leave=False):
+            src_aff_dir = os.path.join(mask_dir, aff_dir)
+            if not os.path.isdir(src_aff_dir):
+                continue
+            new_aff = mapped_name(aff_dir, aff_map)
+            dst_aff_dir = os.path.join(dst_dir, "mask", new_aff)
+            os.makedirs(dst_aff_dir, exist_ok=True)
+            for filename in tqdm(os.listdir(src_aff_dir), desc=f"{new_aff}", leave=False):
+                src_file = os.path.join(src_aff_dir, filename)
+                if not os.path.isfile(src_file):
+                    continue
+                old_id = extract_sample_id(filename, old_obj_name) or filename
+                new_id = allocate_modality_id(rename_state, new_obj_name, "Image", old_obj_name, old_id)
+                _, ext = os.path.splitext(filename)
+                dst_name = format_dataset_filename(new_obj_name, new_id, ext, aff_name=new_aff)
+                shutil.copy2(src_file, os.path.join(dst_aff_dir, dst_name))
+
+    for subdir in tqdm(os.listdir(src_dir), desc=f"Image-extra-{old_obj_name}", leave=False):
+        if subdir in {"rgb", "mask"}:
+            continue
         src_subdir = os.path.join(src_dir, subdir)
         if not os.path.isdir(src_subdir):
             continue
-        if subdir == "mask":
-            for aff_dir in tqdm(os.listdir(src_subdir), desc=f"Mask-{old_obj_name}", leave=False):
-                src_aff_dir = os.path.join(src_subdir, aff_dir)
-                if not os.path.isdir(src_aff_dir):
-                    continue
-                new_aff = mapped_name(aff_dir, aff_map)
-                dst_aff_dir = os.path.join(dst_dir, "mask", new_aff)
-                os.makedirs(dst_aff_dir, exist_ok=True)
-                for filename in tqdm(os.listdir(src_aff_dir), desc=f"{new_aff}", leave=False):
-                    src_file = os.path.join(src_aff_dir, filename)
-                    if os.path.isfile(src_file):
-                        dst_name = rewrite_dataset_filename(filename, old_obj_name, new_obj_name, new_aff)
-                        shutil.copy2(src_file, os.path.join(dst_aff_dir, dst_name))
-        else:
-            dst_subdir = os.path.join(dst_dir, subdir)
-            os.makedirs(dst_subdir, exist_ok=True)
-            for filename in tqdm(os.listdir(src_subdir), desc=f"{old_obj_name}/{subdir}", leave=False):
-                src_file = os.path.join(src_subdir, filename)
-                if os.path.isfile(src_file):
-                    dst_name = rewrite_dataset_filename(filename, old_obj_name, new_obj_name)
-                    shutil.copy2(src_file, os.path.join(dst_subdir, dst_name))
+        dst_subdir = os.path.join(dst_dir, subdir)
+        os.makedirs(dst_subdir, exist_ok=True)
+        for filename in tqdm(os.listdir(src_subdir), desc=f"{old_obj_name}/{subdir}", leave=False):
+            src_file = os.path.join(src_subdir, filename)
+            if not os.path.isfile(src_file):
+                continue
+            old_id = extract_sample_id(filename, old_obj_name) or filename
+            new_id = allocate_modality_id(rename_state, new_obj_name, "Image", old_obj_name, old_id)
+            suffix = extract_sample_suffix(filename, old_obj_name)
+            _, ext = os.path.splitext(filename)
+            dst_name = format_dataset_filename(new_obj_name, new_id, ext, suffix=suffix)
+            shutil.copy2(src_file, os.path.join(dst_subdir, dst_name))
 
 
 def merge_json_dict(dst, src):
@@ -257,9 +326,51 @@ def rewrite_info(src_path, dst_path, obj_map, aff_map):
             new_obj = mapped_name(obj, obj_map)
             for aff, value in (aff_dict or {}).items():
                 new_aff = "ID" if aff == "ID" else mapped_name(aff, aff_map)
-                output[modality].setdefault(new_obj, {})[new_aff] = value
+                cur = output[modality].setdefault(new_obj, {}).get(new_aff, 0)
+                output[modality][new_obj][new_aff] = cur + value
     with open(dst_path, "w", encoding="utf-8") as f:
         json.dump(output, f, ensure_ascii=False, indent=2)
+
+
+def remap_split_entry(entry, modality, old_obj, new_obj, rename_state):
+    if isinstance(entry, dict):
+        remapped = dict(entry)
+        if entry.get("id") not in (None, "", "None", "none"):
+            remapped["id"] = lookup_modality_id(rename_state, new_obj, "Instruction", old_obj, entry.get("id"))
+        if entry.get("img_id") not in (None, "", "None", "none"):
+            remapped["img_id"] = lookup_modality_id(rename_state, new_obj, "Image", old_obj, entry.get("img_id"))
+        if entry.get("pc_id") not in (None, "", "None", "none"):
+            remapped["pc_id"] = lookup_modality_id(rename_state, new_obj, "PointCloud", old_obj, entry.get("pc_id"))
+        return remapped
+    return lookup_modality_id(rename_state, new_obj, modality, old_obj, entry)
+
+
+def rewrite_split_ids(data, obj_map, aff_map, rename_state):
+    """同步重写 split 文件中的 obj/aff key 和因合并产生的新 ID。"""
+    if not isinstance(data, dict):
+        return rewrite_split_value(data, obj_map, aff_map)
+
+    out = {}
+    for modality, obj_data in data.items():
+        if modality not in {"Instruction", "Image", "PointCloud"} or not isinstance(obj_data, dict):
+            out[modality] = rewrite_split_value(obj_data, obj_map, aff_map)
+            continue
+        out.setdefault(modality, {})
+        for old_obj, aff_data in obj_data.items():
+            if not isinstance(aff_data, dict):
+                continue
+            new_obj = mapped_name(old_obj, obj_map)
+            out[modality].setdefault(new_obj, {})
+            for old_aff, entries in aff_data.items():
+                new_aff = mapped_name(old_aff, aff_map)
+                if not isinstance(entries, list):
+                    entries = [entries]
+                remapped_entries = [
+                    remap_split_entry(entry, modality, old_obj, new_obj, rename_state)
+                    for entry in entries
+                ]
+                out[modality][new_obj].setdefault(new_aff, []).extend(remapped_entries)
+    return out
 
 
 def rewrite_split_value(value, obj_map, aff_map, parent_key=None):
@@ -283,23 +394,114 @@ def rewrite_split_value(value, obj_map, aff_map, parent_key=None):
     return value
 
 
-def copy_object_dir(src_dir, dst_dir, old_obj_name, new_obj_name, obj_map, aff_map):
+def rewrite_metadata_counts(counts, obj_map, aff_map):
+    """重写 metadata.obj_aff_count_by_split 中的 obj/aff 统计 key。"""
+    if not isinstance(counts, dict):
+        return counts
+    out = {}
+    for split_name, split_data in counts.items():
+        if not isinstance(split_data, dict):
+            out[split_name] = split_data
+            continue
+        out[split_name] = {}
+        for modality, modality_data in split_data.items():
+            if not isinstance(modality_data, dict):
+                out[split_name][modality] = modality_data
+                continue
+            out[split_name][modality] = {}
+            for obj_name, obj_counts in modality_data.items():
+                if obj_name == "total":
+                    out[split_name][modality][obj_name] = obj_counts
+                    continue
+                new_obj = mapped_name(obj_name, obj_map)
+                dst_obj_counts = out[split_name][modality].setdefault(new_obj, {})
+                if not isinstance(obj_counts, dict):
+                    out[split_name][modality][new_obj] = obj_counts
+                    continue
+                for aff_name, count in obj_counts.items():
+                    if aff_name == "total":
+                        dst_obj_counts[aff_name] = dst_obj_counts.get(aff_name, 0) + count
+                    else:
+                        new_aff = mapped_name(aff_name, aff_map)
+                        dst_obj_counts[new_aff] = dst_obj_counts.get(new_aff, 0) + count
+    return out
+
+
+def rewrite_metadata_value(value, obj_map, aff_map, parent_key=None):
+    """彻底重写 metadata 中可能出现的 obj/aff 名称，同时保留系统字段名。"""
+    protected_keys = {
+        "ratios", "train", "val", "test", "random_seed", "total_samples",
+        "paired_samples", "id_source", "balance_modalities", "sample_rate",
+        "max_sample_per_group", "min_sample_per_group", "obj_aff_count_by_split",
+        "Instruction", "Image", "PointCloud", "total",
+    }
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            if key == "obj_aff_count_by_split":
+                out[key] = rewrite_metadata_counts(item, obj_map, aff_map)
+                continue
+            if key in protected_keys:
+                new_key = key
+            elif parent_key in {"Instruction", "Image", "PointCloud"}:
+                new_key = mapped_name(key, obj_map)
+            elif isinstance(item, (int, float)) and key not in protected_keys:
+                new_key = mapped_name(key, aff_map)
+            else:
+                key_as_obj = mapped_name(key, obj_map)
+                key_as_aff = mapped_name(key, aff_map)
+                new_key = key_as_obj if key_as_obj != standardize_name(key) else key_as_aff
+            out[new_key] = rewrite_metadata_value(item, obj_map, aff_map, parent_key=new_key)
+        return out
+    if isinstance(value, list):
+        return [rewrite_metadata_value(item, obj_map, aff_map, parent_key=parent_key) for item in value]
+    if isinstance(value, str):
+        if parent_key in {"obj", "obj_type"}:
+            return mapped_name(value, obj_map)
+        if parent_key in {"aff", "aff_type"}:
+            return mapped_name(value, aff_map)
+    return value
+
+
+def copy_object_dir(src_dir, dst_dir, old_obj_name, new_obj_name, obj_map, aff_map, rename_state):
     os.makedirs(dst_dir, exist_ok=True)
-    for entry in tqdm(os.listdir(src_dir), desc=f"Object-{old_obj_name}", leave=False):
+    entries = os.listdir(src_dir)
+
+    pc_src_dir = os.path.join(src_dir, "PointCloud")
+    if os.path.isdir(pc_src_dir):
+        pc_dst = os.path.join(dst_dir, "PointCloud")
+        os.makedirs(pc_dst, exist_ok=True)
+        for filename in tqdm(os.listdir(pc_src_dir), desc=f"PointCloud-{old_obj_name}", leave=False):
+            pc_src = os.path.join(pc_src_dir, filename)
+            if os.path.isfile(pc_src) and filename.endswith(".csv"):
+                old_id = extract_sample_id(filename, old_obj_name) or filename
+                new_id = allocate_modality_id(rename_state, new_obj_name, "PointCloud", old_obj_name, old_id)
+                _, ext = os.path.splitext(filename)
+                pc_name = format_dataset_filename(new_obj_name, new_id, ext)
+                write_pointcloud(pc_src, os.path.join(pc_dst, pc_name), aff_map)
+
+    image_src_dir = os.path.join(src_dir, "Image")
+    if os.path.isdir(image_src_dir):
+        copy_image_dir(image_src_dir, os.path.join(dst_dir, "Image"), old_obj_name, new_obj_name, aff_map, rename_state)
+
+    ins_src = os.path.join(src_dir, "Instruction.csv")
+    if os.path.isfile(ins_src):
+        write_instruction(
+            ins_src,
+            os.path.join(dst_dir, "Instruction.csv"),
+            old_obj_name,
+            new_obj_name,
+            obj_map,
+            aff_map,
+            rename_state,
+        )
+
+    handled = {"PointCloud", "Image", "Instruction.csv"}
+    for entry in tqdm(entries, desc=f"Object-extra-{old_obj_name}", leave=False):
+        if entry in handled:
+            continue
         src_path = os.path.join(src_dir, entry)
-        if entry == "Instruction.csv" and os.path.isfile(src_path):
-            write_instruction(src_path, os.path.join(dst_dir, entry), new_obj_name, obj_map, aff_map)
-        elif entry == "PointCloud" and os.path.isdir(src_path):
-            pc_dst = os.path.join(dst_dir, entry)
-            os.makedirs(pc_dst, exist_ok=True)
-            for filename in tqdm(os.listdir(src_path), desc=f"PointCloud-{old_obj_name}", leave=False):
-                pc_src = os.path.join(src_path, filename)
-                if os.path.isfile(pc_src) and filename.endswith(".csv"):
-                    pc_name = rewrite_dataset_filename(filename, old_obj_name, new_obj_name)
-                    write_pointcloud(pc_src, os.path.join(pc_dst, pc_name), aff_map)
-        elif entry == "Image" and os.path.isdir(src_path):
-            copy_image_dir(src_path, os.path.join(dst_dir, entry), old_obj_name, new_obj_name, aff_map)
-        elif os.path.isdir(src_path):
+        if os.path.isdir(src_path):
             shutil.copytree(src_path, os.path.join(dst_dir, entry), dirs_exist_ok=True)
         else:
             shutil.copy2(src_path, os.path.join(dst_dir, entry))
@@ -310,21 +512,32 @@ def rewrite_dataset(dataset_root, obj_map, aff_map):
     if os.path.exists(tmp_root):
         shutil.rmtree(tmp_root)
     os.makedirs(tmp_root, exist_ok=True)
+    rename_state = defaultdict(dict)
 
     entries = os.listdir(dataset_root)
-    for entry in tqdm(entries, desc="重写数据集"):
+    dir_entries = [entry for entry in entries if os.path.isdir(os.path.join(dataset_root, entry))]
+    file_entries = [entry for entry in entries if not os.path.isdir(os.path.join(dataset_root, entry))]
+
+    for entry in tqdm(dir_entries, desc="重写物体目录"):
+        src_path = os.path.join(dataset_root, entry)
+        new_obj = mapped_name(entry, obj_map)
+        copy_object_dir(src_path, os.path.join(tmp_root, new_obj), entry, new_obj, obj_map, aff_map, rename_state)
+
+    for entry in tqdm(file_entries, desc="重写元数据"):
         src_path = os.path.join(dataset_root, entry)
         dst_path = os.path.join(tmp_root, entry)
-        if os.path.isdir(src_path):
-            new_obj = mapped_name(entry, obj_map)
-            copy_object_dir(src_path, os.path.join(tmp_root, new_obj), entry, new_obj, obj_map, aff_map)
-        elif entry == "info.json":
+        if entry == "info.json":
             rewrite_info(src_path, dst_path, obj_map, aff_map)
-        elif entry in {"train.json", "val.json", "test.json", "metadata.json"}:
+        elif entry in {"train.json", "val.json", "test.json"}:
             with open(src_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             with open(dst_path, "w", encoding="utf-8") as f:
-                json.dump(rewrite_split_value(data, obj_map, aff_map), f, ensure_ascii=False, indent=2)
+                json.dump(rewrite_split_ids(data, obj_map, aff_map, rename_state), f, ensure_ascii=False, indent=2)
+        elif entry == "metadata.json":
+            with open(src_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            with open(dst_path, "w", encoding="utf-8") as f:
+                json.dump(rewrite_metadata_value(data, obj_map, aff_map), f, ensure_ascii=False, indent=2)
         else:
             shutil.copy2(src_path, dst_path)
 

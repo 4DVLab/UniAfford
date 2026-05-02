@@ -102,7 +102,142 @@ class JointAffordanceTorchDataset(Dataset):
         不再在训练文本中使用 <img_obj_aff>/<pc_obj_aff> 这类按类别展开 token。"""
         img_token = "<img_aff>"
         pc_token = "<pc_aff>"
-        question = instruction or f"Please identify the {aff_type} affordance region of the {obj_type}."
+        if instruction:
+            question = instruction
+        else:
+            if has_image and has_pc:
+                question_templates = [
+                    f"Using the provided 2D image and 3D point cloud, identify the {aff_type} affordance region of the {obj_type} in both modalities.",
+                    f"Given both the image and point cloud of the {obj_type}, locate the {aff_type} affordance area in 2D and 3D.",
+                    f"Please analyze the 2D image together with the 3D point cloud and mark the {aff_type} affordance region of the {obj_type}.",
+                    f"From the available image and point cloud inputs, determine where the {obj_type} supports the {aff_type} affordance.",
+                    f"Inspect both visual modalities for the {obj_type} and find the {aff_type} affordance region in the image and point cloud.",
+                    f"Locate the {aff_type} affordance of the {obj_type} by using the supplied 2D image and 3D point cloud.",
+                    f"With access to an image and a point cloud, identify the {aff_type} region on the {obj_type}.",
+                    f"Show the {aff_type} affordance area of the {obj_type} for the 2D view and the 3D point cloud.",
+                    f"Analyze the {obj_type} across its image and point cloud inputs, then indicate the {aff_type} affordance region.",
+                    f"Use the paired 2D and 3D observations to find the {aff_type} affordance region of the {obj_type}.",
+                    f"Based on the image plus the point cloud, where is the {aff_type} affordance area on the {obj_type}?",
+                    f"For this {obj_type}, identify the {aff_type} affordance region using both the 2D visual input and the 3D point cloud.",
+                    f"Determine the {aff_type} affordance location of the {obj_type} in the provided image and point cloud.",
+                    f"Refer to the 2D image and the 3D point cloud to segment the {aff_type} affordance region of the {obj_type}.",
+                    f"Using all provided modalities, mark the {aff_type} affordance region associated with the {obj_type}.",
+                    f"Find the {aff_type} interaction area of the {obj_type} in both the image plane and the point cloud.",
+                    f"Examine the image and 3D points for the {obj_type}, then identify its {aff_type} affordance region.",
+                    f"Combine the 2D image evidence with the 3D point cloud evidence to locate the {aff_type} affordance of the {obj_type}.",
+                    f"Please return the {aff_type} affordance region for the {obj_type} using the available image and point cloud.",
+                    f"Across the 2D and 3D inputs, indicate the area of the {obj_type} that affords {aff_type}.",
+                    f"Identify where the {obj_type} can be used for {aff_type}, considering both the image and the point cloud.",
+                    f"From the paired visual inputs, segment the {aff_type} affordance region of the {obj_type}.",
+                    f"Using the 2D view and 3D geometry, point out the {aff_type} affordance region on the {obj_type}.",
+                    f"Evaluate the {obj_type} in the image and point cloud, and locate the region relevant to {aff_type}.",
+                    f"Mark the {aff_type} affordance area for the {obj_type} with guidance from both available modalities.",
+                    f"Please find the {obj_type}'s {aff_type} affordance region in the provided image and 3D point cloud.",
+                    f"Rely on the image appearance and the point cloud structure to identify the {aff_type} region of the {obj_type}.",
+                    f"Using multimodal input, locate the {aff_type} affordance area on the {obj_type}.",
+                    f"Tell me which part of the {obj_type} corresponds to the {aff_type} affordance in 2D and 3D.",
+                    f"Detect the {aff_type} affordance region of the {obj_type} from the supplied image-point-cloud pair.",
+                ]
+            elif has_image:
+                question_templates = [
+                    f"Using the provided 2D image, identify the {aff_type} affordance region of the {obj_type}.",
+                    f"Given the image of the {obj_type}, locate the {aff_type} affordance area in the 2D view.",
+                    f"Please analyze the image and mark the {aff_type} affordance region of the {obj_type}.",
+                    f"From the available 2D visual input, determine where the {obj_type} supports the {aff_type} affordance.",
+                    f"Inspect the image for the {obj_type} and find the visible {aff_type} affordance region.",
+                    f"Locate the {aff_type} affordance of the {obj_type} using only the supplied image.",
+                    f"With access to the 2D image, identify the {aff_type} area on the {obj_type}.",
+                    f"Show the {aff_type} affordance region of the {obj_type} in the image.",
+                    f"Analyze the {obj_type} in the provided picture, then indicate the {aff_type} affordance region.",
+                    f"Use the 2D observation to find the {aff_type} affordance region of the {obj_type}.",
+                    f"Based on this image, where is the {aff_type} affordance area on the {obj_type}?",
+                    f"For this {obj_type}, identify the {aff_type} affordance region from the 2D visual input.",
+                    f"Determine the image-space location of the {aff_type} affordance on the {obj_type}.",
+                    f"Refer to the 2D image to segment the {aff_type} affordance region of the {obj_type}.",
+                    f"Using the provided image modality, mark the {aff_type} affordance region associated with the {obj_type}.",
+                    f"Find the {aff_type} interaction area of the {obj_type} in the image plane.",
+                    f"Examine the picture of the {obj_type}, then identify its {aff_type} affordance region.",
+                    f"Use the image evidence to locate the {aff_type} affordance of the {obj_type}.",
+                    f"Please return the 2D {aff_type} affordance region for the {obj_type}.",
+                    f"In the image, indicate the area of the {obj_type} that affords {aff_type}.",
+                    f"Identify where the {obj_type} can be used for {aff_type}, considering the 2D image.",
+                    f"From the visual input, segment the {aff_type} affordance region of the {obj_type}.",
+                    f"Using the 2D view, point out the {aff_type} affordance region on the {obj_type}.",
+                    f"Evaluate the image of the {obj_type} and locate the region relevant to {aff_type}.",
+                    f"Mark the {aff_type} affordance area for the {obj_type} with guidance from the image.",
+                    f"Please find the {obj_type}'s {aff_type} affordance region in the provided image.",
+                    f"Rely on the image appearance to identify the {aff_type} region of the {obj_type}.",
+                    f"Using the 2D input, locate the {aff_type} affordance area on the {obj_type}.",
+                    f"Tell me which visible part of the {obj_type} corresponds to the {aff_type} affordance.",
+                    f"Detect the {aff_type} affordance region of the {obj_type} from the supplied image.",
+                ]
+            elif has_pc:
+                question_templates = [
+                    f"Using the provided 3D point cloud, identify the {aff_type} affordance region of the {obj_type}.",
+                    f"Given the point cloud of the {obj_type}, locate the {aff_type} affordance area in 3D.",
+                    f"Please analyze the point cloud and mark the {aff_type} affordance region of the {obj_type}.",
+                    f"From the available 3D input, determine where the {obj_type} supports the {aff_type} affordance.",
+                    f"Inspect the point cloud for the {obj_type} and find the {aff_type} affordance region.",
+                    f"Locate the {aff_type} affordance of the {obj_type} using only the supplied 3D point cloud.",
+                    f"With access to the point cloud, identify the {aff_type} area on the {obj_type}.",
+                    f"Show the {aff_type} affordance region of the {obj_type} in the 3D point cloud.",
+                    f"Analyze the {obj_type} in the provided point cloud, then indicate the {aff_type} affordance region.",
+                    f"Use the 3D observation to find the {aff_type} affordance region of the {obj_type}.",
+                    f"Based on this point cloud, where is the {aff_type} affordance area on the {obj_type}?",
+                    f"For this {obj_type}, identify the {aff_type} affordance region from the 3D point cloud input.",
+                    f"Determine the point-cloud location of the {aff_type} affordance on the {obj_type}.",
+                    f"Refer to the 3D point cloud to segment the {aff_type} affordance region of the {obj_type}.",
+                    f"Using the provided point-cloud modality, mark the {aff_type} affordance region associated with the {obj_type}.",
+                    f"Find the {aff_type} interaction area of the {obj_type} in 3D space.",
+                    f"Examine the point cloud of the {obj_type}, then identify its {aff_type} affordance region.",
+                    f"Use the 3D geometric evidence to locate the {aff_type} affordance of the {obj_type}.",
+                    f"Please return the 3D {aff_type} affordance region for the {obj_type}.",
+                    f"In the point cloud, indicate the area of the {obj_type} that affords {aff_type}.",
+                    f"Identify where the {obj_type} can be used for {aff_type}, considering the point cloud.",
+                    f"From the 3D input, segment the {aff_type} affordance region of the {obj_type}.",
+                    f"Using the point cloud, point out the {aff_type} affordance region on the {obj_type}.",
+                    f"Evaluate the 3D structure of the {obj_type} and locate the region relevant to {aff_type}.",
+                    f"Mark the {aff_type} affordance area for the {obj_type} with guidance from the point cloud.",
+                    f"Please find the {obj_type}'s {aff_type} affordance region in the provided 3D point cloud.",
+                    f"Rely on the point cloud geometry to identify the {aff_type} region of the {obj_type}.",
+                    f"Using the 3D input, locate the {aff_type} affordance area on the {obj_type}.",
+                    f"Tell me which 3D part of the {obj_type} corresponds to the {aff_type} affordance.",
+                    f"Detect the {aff_type} affordance region of the {obj_type} from the supplied point cloud.",
+                ]
+            else:
+                question_templates = [
+                    f"Identify the {aff_type} affordance region of the {obj_type}, but note that no image or point cloud input is provided.",
+                    f"Please locate the {aff_type} affordance area of the {obj_type}; no 2D or 3D modality is available.",
+                    f"Determine where the {obj_type} supports {aff_type} without any provided visual input.",
+                    f"Analyze the {obj_type} for its {aff_type} affordance region, although neither image nor point cloud data is present.",
+                    f"Find the {aff_type} affordance of the {obj_type} with no supplied image or 3D point cloud.",
+                    f"Report the {aff_type} affordance region for the {obj_type}; the sample contains no visual modality.",
+                    f"Indicate the {aff_type} area on the {obj_type}, despite the absence of 2D and 3D inputs.",
+                    f"Try to identify the {aff_type} affordance region of the {obj_type} when no visual data is available.",
+                    f"Provide the {aff_type} affordance region of the {obj_type}, noting that both image and point cloud are missing.",
+                    f"Locate the {aff_type} interaction area of the {obj_type} without access to image or point cloud evidence.",
+                    f"Can you find the {aff_type} affordance area of the {obj_type} without visual input?",
+                    f"For this {obj_type}, identify the {aff_type} region even though no 2D image or 3D point cloud is provided.",
+                    f"Assess the {aff_type} affordance of the {obj_type} in a sample with no available modality data.",
+                    f"Please mark the {aff_type} affordance of the {obj_type}; no image or point cloud accompanies the request.",
+                    f"Use the request alone to address the {aff_type} affordance region of the {obj_type}.",
+                    f"Specify the {aff_type} affordance area for the {obj_type} without any visual modality.",
+                    f"Attempt to segment the {aff_type} affordance region of the {obj_type} while no input data is supplied.",
+                    f"Describe where the {obj_type} affords {aff_type}, given that the visual inputs are unavailable.",
+                    f"Return the {aff_type} affordance region for the {obj_type}; there is no 2D or 3D observation.",
+                    f"Identify the part of the {obj_type} related to {aff_type}, but the image and point cloud are absent.",
+                    f"Without image or point cloud information, determine the {aff_type} affordance region of the {obj_type}.",
+                    f"Given no visual modality, locate the {aff_type} affordance region of the {obj_type}.",
+                    f"Please infer the {aff_type} affordance area for the {obj_type} from the text request only.",
+                    f"Find the region of the {obj_type} used for {aff_type}, noting that no 2D or 3D input exists.",
+                    f"State the {aff_type} affordance region of the {obj_type} with no supporting visual evidence.",
+                    f"Look for the {aff_type} affordance of the {obj_type}, although the sample lacks image and point cloud data.",
+                    f"Tell me the {aff_type} affordance region of the {obj_type}; no modality input is attached.",
+                    f"Resolve the {aff_type} affordance localization request for the {obj_type} without visual observations.",
+                    f"Consider the {obj_type} and its {aff_type} affordance, but recognize that no image or point cloud is available.",
+                    f"Handle this {aff_type} affordance query for the {obj_type} in the absence of visual data.",
+                ]
+            question = random.choice(question_templates)
         # 点云输入占位：使用单锚点 <pointcloud>，在 MLLM 前向时动态展开为 K_i 个点云 token。
         if has_pc:
             question = (
@@ -110,8 +245,71 @@ class JointAffordanceTorchDataset(Dataset):
                 f"Point cloud input: {DEFAULT_PC_TOKEN}"
             )
 
+        answer_prefixes = [
+            "",
+            "",
+            "Sure, ",
+            "Certainly, ",
+            "Yes, ",
+            "Okay, ",
+            "Alright, ",
+            "Got it, ",
+            "En, ",
+            "In response, ",
+            "Based on the input, ",
+        ]
+
+        def _with_answer_prefix(text: str) -> str:            
+            def _lower_answer_start_after_prefix(text: str) -> str:
+                if not text:
+                    return text
+                first_word = text.split(maxsplit=1)[0]
+                # Keep first-person starts grammatical after prefixes, e.g. "Sure, I ..."
+                if first_word in {"I", "I've", "I'd", "I'll", "I'm"}:
+                    return text
+                return text[0].lower() + text[1:]
+            
+            prefix = random.choice(answer_prefixes)
+            if not prefix:
+                return text
+            return f"{prefix}{_lower_answer_start_after_prefix(text)}"
+
         answer_parts = []
-        if has_image:
+        if has_image and has_pc:
+            joint_templates = [
+                f"In the 2D image, the {aff_type} affordance region of the {obj_type} is {img_token}; in the 3D point cloud, it is {pc_token}.",
+                f"The {obj_type}'s {aff_type} affordance is marked as {img_token} for the image and {pc_token} for the point cloud.",
+                f"For the {obj_type}, {img_token} denotes the 2D {aff_type} region, while {pc_token} denotes the matching 3D region.",
+                f"Image modality: {img_token} identifies the {aff_type} area of the {obj_type}. Point-cloud modality: {pc_token} identifies it in 3D.",
+                f"I located the {aff_type} affordance of the {obj_type} in both modalities: {img_token} in 2D and {pc_token} in 3D.",
+                f"The image-space {aff_type} region for the {obj_type} is {img_token}, and the point-cloud region is {pc_token}.",
+                f"Use {img_token} for the 2D {aff_type} affordance of the {obj_type} and {pc_token} for its 3D counterpart.",
+                f"Across the paired inputs, the {aff_type} affordance of the {obj_type} appears as {img_token} in the image and {pc_token} in the point cloud.",
+                f"For this {obj_type}, the visible 2D {aff_type} area is {img_token}, and the 3D {aff_type} area is {pc_token}.",
+                f"The {aff_type} interaction region is separated by modality: image result {img_token}, point-cloud result {pc_token}.",
+                f"Here are the {obj_type}'s {aff_type} affordance regions: {img_token} for the image and {pc_token} for the 3D points.",
+                f"On the 2D input, {img_token} marks the {aff_type} region of the {obj_type}; on the 3D input, {pc_token} marks it.",
+                f"The image token {img_token} highlights the {obj_type}'s {aff_type} affordance, and the point-cloud token {pc_token} highlights the 3D affordance.",
+                f"In 2D, the {obj_type} region for {aff_type} is {img_token}; in 3D, the corresponding point-cloud region is {pc_token}.",
+                f"Both modalities have been localized: {img_token} gives the image {aff_type} region, and {pc_token} gives the point-cloud region for the {obj_type}.",
+                f"The {aff_type} affordance area of the {obj_type} is represented by {img_token} in the image and by {pc_token} in the point cloud.",
+                f"Visual appearance points to {img_token} for the 2D {aff_type} region, while 3D geometry points to {pc_token} for the {obj_type}.",
+                f"Result for the {obj_type}: 2D {aff_type} affordance = {img_token}; 3D {aff_type} affordance = {pc_token}.",
+                f"The image prediction for the {aff_type} affordance is {img_token}, and the point-cloud prediction for the {obj_type} is {pc_token}.",
+                f"Considering both inputs, I mark the {obj_type}'s {aff_type} region as {img_token} in 2D and {pc_token} in 3D.",
+                f"The {aff_type} region can be found at {img_token} in the image modality and at {pc_token} in the point-cloud modality.",
+                f"For the image, the {obj_type}'s {aff_type} affordance is {img_token}; for the 3D point cloud, it is {pc_token}.",
+                f"Two modality-specific regions are returned for the {obj_type}: {img_token} for 2D {aff_type} and {pc_token} for 3D {aff_type}.",
+                f"The 2D token {img_token} and the 3D token {pc_token} respectively indicate the {aff_type} affordance of the {obj_type}.",
+                f"On the provided inputs, {img_token} marks the image area and {pc_token} marks the point-cloud area for the {obj_type}'s {aff_type} affordance.",
+                f"Image evidence localizes the {aff_type} affordance of the {obj_type} to {img_token}; point-cloud evidence localizes it to {pc_token}.",
+                f"The {obj_type} affords {aff_type} at {img_token} in the 2D view and at {pc_token} in the 3D point cloud.",
+                f"Modality-specific answer: {img_token} is the 2D {aff_type} region, and {pc_token} is the 3D {aff_type} region for the {obj_type}.",
+                f"I return {img_token} as the image affordance mask and {pc_token} as the point-cloud affordance mask for the {obj_type}'s {aff_type} function.",
+                f"Detected regions for {aff_type} on the {obj_type}: {img_token} in image coordinates and {pc_token} in point-cloud coordinates.",
+            ]
+            answer_parts.append(_with_answer_prefix(random.choice(joint_templates)))
+        elif has_image:
             image_templates = [
                 f"The {aff_type} affordance region of the {obj_type} is {img_token}.",
                 f"Here is the {aff_type} region of the {obj_type}: {img_token}.",
@@ -119,9 +317,33 @@ class JointAffordanceTorchDataset(Dataset):
                 f"I've identified the {aff_type} affordance of the {obj_type}: {img_token}.",
                 f"On the {obj_type}, the region for {aff_type} interaction is {img_token}.",
                 f"This token {img_token} marks the {aff_type} affordance of the {obj_type}.",
+                f"In the 2D image, {img_token} marks the {aff_type} affordance region of the {obj_type}.",
+                f"The image-based {aff_type} area for the {obj_type} is {img_token}.",
+                f"Using the image modality, I locate the {obj_type}'s {aff_type} affordance at {img_token}.",
+                f"The visible {aff_type} interaction region on the {obj_type} is {img_token}.",
+                f"For the provided image, {img_token} indicates where the {obj_type} affords {aff_type}.",
+                f"Image result: the {aff_type} affordance region of the {obj_type} is {img_token}.",
+                f"The 2D affordance mask for {aff_type} on the {obj_type} is represented by {img_token}.",
+                f"Within the image plane, the {obj_type}'s {aff_type} region corresponds to {img_token}.",
+                f"I mark the image-space {aff_type} affordance of the {obj_type} as {img_token}.",
+                f"The token {img_token} highlights the 2D {aff_type} affordance area of the {obj_type}.",
+                f"On the visual input, the {aff_type} region for the {obj_type} is {img_token}.",
+                f"The {obj_type} has its {aff_type} affordance localized in the image as {img_token}.",
+                f"From the 2D view, the {aff_type} area of the {obj_type} is {img_token}.",
+                f"This image-only answer uses {img_token} for the {obj_type}'s {aff_type} affordance.",
+                f"Based on the image, {img_token} is the {aff_type} affordance region of the {obj_type}.",
+                f"The requested 2D {aff_type} affordance region on the {obj_type} is {img_token}.",
+                f"For image segmentation, {img_token} denotes the {aff_type} affordance of the {obj_type}.",
+                f"The {aff_type} region visible on the {obj_type} is encoded as {img_token}.",
+                f"Here, {img_token} is the image token for the {obj_type}'s {aff_type} affordance.",
+                f"The {obj_type}'s image-level {aff_type} affordance is identified by {img_token}.",
+                f"In the supplied 2D modality, the {aff_type} affordance is {img_token}.",
+                f"The 2D region of the {obj_type} relevant to {aff_type} is {img_token}.",
+                f"Visual appearance localizes the {aff_type} affordance of the {obj_type} to {img_token}.",
+                f"Detected in the image, the {aff_type} affordance area of the {obj_type} is {img_token}.",
             ]
-            answer_parts.append(random.choice(image_templates))
-        if has_pc:
+            answer_parts.append(_with_answer_prefix(random.choice(image_templates)))
+        elif has_pc:
             pc_templates = [
                 f"The 3D {aff_type} affordance region of the {obj_type} is {pc_token}.",
                 f"In 3D space, the {aff_type} region of the {obj_type} is {pc_token}.",
@@ -129,16 +351,66 @@ class JointAffordanceTorchDataset(Dataset):
                 f"This token {pc_token} represents the 3D {aff_type} affordance of the {obj_type}.",
                 f"For the {obj_type}, the {aff_type} region in the point cloud is {pc_token}.",
                 f"For 3D interaction with the {obj_type}, the {aff_type} area is {pc_token}.",
+                f"Using the point-cloud modality, I locate the {obj_type}'s {aff_type} affordance at {pc_token}.",
+                f"The point-cloud-based {aff_type} area for the {obj_type} is {pc_token}.",
+                f"In the 3D input, {pc_token} marks the {aff_type} affordance region of the {obj_type}.",
+                f"The geometric {aff_type} interaction region on the {obj_type} is {pc_token}.",
+                f"For the provided point cloud, {pc_token} indicates where the {obj_type} affords {aff_type}.",
+                f"Point-cloud result: the {aff_type} affordance region of the {obj_type} is {pc_token}.",
+                f"The 3D affordance mask for {aff_type} on the {obj_type} is represented by {pc_token}.",
+                f"Within the point-cloud coordinates, the {obj_type}'s {aff_type} region corresponds to {pc_token}.",
+                f"I mark the 3D {aff_type} affordance of the {obj_type} as {pc_token}.",
+                f"The token {pc_token} highlights the point-cloud {aff_type} affordance area of the {obj_type}.",
+                f"On the 3D visual input, the {aff_type} region for the {obj_type} is {pc_token}.",
+                f"The {obj_type} has its {aff_type} affordance localized in the point cloud as {pc_token}.",
+                f"From the 3D view, the {aff_type} area of the {obj_type} is {pc_token}.",
+                f"This point-cloud-only answer uses {pc_token} for the {obj_type}'s {aff_type} affordance.",
+                f"Based on the point cloud, {pc_token} is the {aff_type} affordance region of the {obj_type}.",
+                f"The requested 3D {aff_type} affordance region on the {obj_type} is {pc_token}.",
+                f"For point-cloud segmentation, {pc_token} denotes the {aff_type} affordance of the {obj_type}.",
+                f"The {aff_type} region in the 3D structure of the {obj_type} is encoded as {pc_token}.",
+                f"Here, {pc_token} is the point-cloud token for the {obj_type}'s {aff_type} affordance.",
+                f"The {obj_type}'s point-level {aff_type} affordance is identified by {pc_token}.",
+                f"In the supplied 3D modality, the {aff_type} affordance is {pc_token}.",
+                f"The 3D region of the {obj_type} relevant to {aff_type} is {pc_token}.",
+                f"Geometric evidence localizes the {aff_type} affordance of the {obj_type} to {pc_token}.",
+                f"Detected in the point cloud, the {aff_type} affordance area of the {obj_type} is {pc_token}.",
             ]
-            answer_parts.append(random.choice(pc_templates))
-        if not answer_parts:
+            answer_parts.append(_with_answer_prefix(random.choice(pc_templates)))
+        else:
             no_input_templates = [
                 f"I cannot identify the {aff_type} affordance region of the {obj_type} without visual input.",
                 f"I need visual information to identify the {aff_type} affordance region of the {obj_type}.",
                 f"Please provide an image or point cloud to analyze the {aff_type} affordance of the {obj_type}.",
                 f"For the {obj_type}, visual input is required to determine the {aff_type} affordance region.",
+                f"No 2D image or 3D point cloud is available, so the {aff_type} affordance region of the {obj_type} cannot be localized.",
+                f"Without either modality, I cannot mark the {obj_type}'s {aff_type} affordance region.",
+                f"The {aff_type} affordance of the {obj_type} requires image or point-cloud evidence, which is missing here.",
+                f"There is no visual data to support locating the {aff_type} region of the {obj_type}.",
+                f"I cannot produce an affordance token for the {obj_type}'s {aff_type} region because no modality input was provided.",
+                f"Since both the image and point cloud are absent, the {aff_type} affordance area of the {obj_type} is unavailable.",
+                f"The request cannot be grounded: no 2D or 3D input is present for the {obj_type}'s {aff_type} affordance.",
+                f"Image and point-cloud inputs are both missing, so I cannot identify where the {obj_type} affords {aff_type}.",
+                f"A valid {aff_type} affordance region for the {obj_type} cannot be determined without visual observations.",
+                f"Because no image or point cloud accompanies the {obj_type}, I cannot localize its {aff_type} affordance.",
+                f"The {aff_type} region of the {obj_type} is not identifiable from text alone in this sample.",
+                f"With no modality data, there is no reliable region to assign for the {obj_type}'s {aff_type} affordance.",
+                f"I would need a 2D image or 3D point cloud before marking the {aff_type} area of the {obj_type}.",
+                f"The supplied sample lacks visual input, so the {aff_type} affordance of the {obj_type} cannot be segmented.",
+                f"Cannot locate the {aff_type} affordance region of the {obj_type}: both image and point cloud are unavailable.",
+                f"No image token or point-cloud token can be assigned for the {obj_type}'s {aff_type} affordance without input data.",
+                f"The {obj_type}'s {aff_type} affordance region remains unknown because no 2D or 3D evidence is provided.",
+                f"Please include an image or point cloud to localize the {aff_type} affordance region on the {obj_type}.",
+                f"Absent visual modalities prevent identifying the {aff_type} interaction area of the {obj_type}.",
+                f"The model has no visual basis for deciding the {aff_type} affordance region of the {obj_type}.",
+                f"Neither the image modality nor the point-cloud modality is present, so the {aff_type} region cannot be marked.",
+                f"I cannot return {img_token} or {pc_token} for the {obj_type}'s {aff_type} affordance because no visual input exists.",
+                f"Localization of the {aff_type} affordance on the {obj_type} requires at least one provided modality.",
+                f"The {aff_type} affordance query for the {obj_type} cannot be answered with a region when visual data is missing.",
+                f"Since the sample has no image and no point cloud, the {obj_type}'s {aff_type} affordance area cannot be identified.",
+                f"No modality-specific evidence is available to determine the {aff_type} affordance of the {obj_type}.",
             ]
-            answer_parts.append(random.choice(no_input_templates))
+            answer_parts.append(_with_answer_prefix(random.choice(no_input_templates)))
         answer = " ".join(answer_parts)
 
         return question, answer
