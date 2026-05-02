@@ -53,8 +53,8 @@ dataset_root/
 
 - 默认规范化为小写：读取外部数据集并保存为统一格式时，`obj_type` 与 `aff_type` 会默认转为小写。
 - 规范化生效范围：目录名、文件名、`Instruction.csv` 中的 `obj_type/aff_type` 字段、`train|val|test.json` 中的 key，均使用小写。
-- `obj_type` 规范：使用语义类别名，推荐仅包含小写字母、数字和下划线；统一保存后目录名即为 `obj_type`。
-- `aff_type` 规范：使用 affordance 语义名，推荐仅包含小写字母、数字和下划线；`Image` 模态下同时作为 `mask/<aff_type>/` 子目录名。
+- `obj_type` 规范：使用语义类别名，推荐仅包含小写字母和空格（下划线转换为空格）；统一保存后目录名即为 `obj_type`。
+- `aff_type` 规范：使用 affordance 语义名，推荐仅包含小写字母和空格（下划线转换为空格）；`Image` 模态下同时作为 `mask/<aff_type>/` 子目录名。
 - `Instruction.csv` 格式固定为 `ins,obj_type,aff_type,id,img_id,pc_id` 六列。
 - 其中 `id` 是 instruction 自身的唯一 id，不再默认与 `Image` 或 `PointCloud` 的 id 绑定。
 - `img_id` / `pc_id` 为可选绑定列：可以只绑定图片、只绑定点云、同时绑定两者，或都留空。

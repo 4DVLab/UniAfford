@@ -1,197 +1,372 @@
 """
-重命名某一个物体的名称或aff的名称（未测试）
+按 README 规范重命名数据集目录、文件名和元数据。
+
+命名规范：
+- obj_type / aff_type 使用小写字母和空格
+- 下划线自动转换为空格
+
+可直接在下面两个字典里预定义重命名规则，一键转换；若字典为空且命令行未指定
+--obj/--aff/--rename-map，则自动遍历输入目录下的所有物体和 affordance 并转换为标准形式。
 """
-import os
-import shutil
 import argparse
-from ..base_dataset import Instruction, Image, PointCloud
+import csv
+import json
+import os
+import re
+import shutil
+from collections import defaultdict
 
 
-def rename_obj_type(dataset_root, obj_rename, aff_rename=None):
-    """
-    重命名物体类型，可选同时重命名 affordance，复用 datasets.py 中的加载方法
-    
-    Args:
-        dataset_root: 数据集根目录
-        obj_rename: 物体重命名元组 (old_obj_type, new_obj_type)
-        aff_rename: affordance重命名元组 (old_aff_type, new_aff_type)，可选
-            - 当 old_obj_type == new_obj_type 且仅提供 aff_rename 时，相当于只改同一物体下的 aff 名称
-    """
-    old_obj_type, new_obj_type = obj_rename
-    old_obj_dir = os.path.join(dataset_root, old_obj_type)
-    if not os.path.exists(old_obj_dir):
-        print(f"警告: 物体目录不存在: {old_obj_dir}")
-        return
-    
-    same_name = (old_obj_type == new_obj_type)
+# 需要人工合并同义名时，直接在这里填，例如 {"wrapgrasp": "wrap-grasp"}。
+OBJ_RENAME_MAP = {
+    "Top door of referigertor": "refrigerator",
+    "Bottom door of referigertor": "refrigerator",
+    "Right door of referigertor": "refrigerator",
+    "Left door of referigertor": "refrigerator",
+    "Power-drill": "power drill",
 
-    # 1. 先加载新名称的物体（如果存在），以继承计数（仅在改名时需要）
-    new_obj_dir = os.path.join(dataset_root, new_obj_type)
-    if not same_name and os.path.exists(new_obj_dir):
-        print(f"加载已存在的新名称物体: {new_obj_type}")
-        # 加载 PointCloud
-        for pc in PointCloud.load_all(dataset_root, obj_type=new_obj_type, keep_id=True):
-            pc.free_memory()
-        # 加载 Image
-        for img in Image.load_all(dataset_root, obj_type=new_obj_type, keep_id=True):
-            img.free_memory()
-        # 加载 Instruction（只加载新名称的）
-        Instruction.load_all(dataset_root, keep_id=True)
-        # 过滤出新名称的 Instruction 以继承计数
-        if new_obj_type in Instruction.all:
-            for inst in Instruction.all[new_obj_type]:
-                pass  # 只是加载以继承计数
-        print(f"已加载新名称物体的计数信息")
+}
+AFF_RENAME_MAP = {
+    "wrap-grasp": "wrapgrasp",
+    "secure grip": "grip",
+    "secure-grip": "grip",
+    "pinch grip": "pinch",
+    "pick-up": "pick up",
+    # n. -> v.
+    "grasping": "grasp",
+    "stiring": "stir",
+    "turning": "turn",
+    "cutting": "cut",
+    "peeling": "peel",
+    "punching": "punch",
+    "screwing": "screw",
+    "hammering": "hammer",
+    "drilling": "drill",
+    "sawing": "saw",
+    "chopping": "chop",
+    "opening": "open",
+    "closing": "close",
+    "lifting": "lift",
+    "placing": "place",
+    "putting": "put",
+    "taking": "take",
+    "putting": "put",
+    "unclasping": "unclasp",
     
-    # 确保新物体目录下的 PointCloud / Image 目录存在
-    new_pc_dir = os.path.join(new_obj_dir, 'PointCloud')
-    new_img_dir = os.path.join(new_obj_dir, 'Image')
-    os.makedirs(new_pc_dir, exist_ok=True)
-    os.makedirs(new_img_dir, exist_ok=True)
+}
 
-    # 2. 加载旧名称的物体，强制指定 obj_type 为新名称（并可选重命名 aff）
-    print(f"加载旧名称物体并重命名为: {new_obj_type}")
-    
-    # 加载 PointCloud
-    old_pc_dir = os.path.join(old_obj_dir, 'PointCloud')
-    if os.path.exists(old_pc_dir):
-        for filename in os.listdir(old_pc_dir):
-            if filename.endswith('.csv'):
-                file_path = os.path.join(old_pc_dir, filename)
-                print(f'loading PC: {file_path}')
-                pc = PointCloud.load_file(
-                    file_path,
-                    obj_type=new_obj_type,  # 强制指定为新名称
-                    keep_id=True
-                )
-                # 如果需要同时重命名 affordance，则替换 aff_mask_dict 中的键
-                if aff_rename is not None and pc.aff_mask_dict is not None:
-                    old_aff, new_aff = aff_rename
-                    renamed = {}
-                    for label, mask in pc.aff_mask_dict.items():
-                        renamed[new_aff if label == old_aff else label] = mask
-                    pc.aff_mask_dict = renamed
-                # 只保留有 affordance 标注的对象
-                if pc.aff_mask_dict:
-                    pc.save_to(os.path.join(new_pc_dir, f'{pc.obj_type}_{pc.id}.csv'))
-                pc.free_memory()
-    
-    # 加载 Image
-    old_img_dir = os.path.join(old_obj_dir, 'Image')
-    if os.path.exists(old_img_dir):
-        rgb_dir = os.path.join(old_img_dir, 'rgb')
-        if os.path.exists(rgb_dir):
-            for rgb_file in os.listdir(rgb_dir):
-                if rgb_file.lower().endswith(('.png', '.jpg')):
-                    rgb_path = os.path.join(rgb_dir, rgb_file)
-                    try:
-                        print(f'loading IMG: {rgb_path}')
-                        img = Image.load_file(
-                            rgb_path,
-                            obj_type=new_obj_type,  # 强制指定为新名称
-                            keep_id=True
-                        )
-                        # 如果需要同时重命名 affordance，则替换 aff_mask_dict 中的键
-                        if aff_rename is not None and img.aff_mask_dict is not None:
-                            old_aff, new_aff = aff_rename
-                            renamed = {}
-                            for label, mask in img.aff_mask_dict.items():
-                                renamed[new_aff if label == old_aff else label] = mask
-                            img.aff_mask_dict = renamed
-                        # 只保留有 affordance 标注的对象
-                        if img.aff_mask_dict:
-                            img.save_to(new_img_dir)
-                        img.free_memory()
-                    except Exception as e:
-                        print(f"Failed to load {rgb_path}: {e}")
-                        continue
-    
-    # 加载 Instruction
-    old_ins_file = os.path.join(old_obj_dir, 'Instruction.csv')
-    if os.path.exists(old_ins_file):
-        instructions = Instruction.load_file(old_ins_file, keep_id=True)
-        # 更新 obj_type 为新名称，创建新的 Instruction 对象
-        for inst in instructions:
-            if inst.obj_type == old_obj_type:
-                # 可选地同时重命名 aff_type
-                new_aff_type = inst.aff_type
-                if aff_rename is not None and inst.aff_type is not None:
-                    old_aff, new_aff = aff_rename
-                    if inst.aff_type == old_aff:
-                        new_aff_type = new_aff
 
-                # 创建新的 Instruction 对象，指定 obj_type 为新名称
-                # 这样会在新名称的计数上继续增加
-                Instruction(
-                    inst.ins,
-                    obj_type=new_obj_type,
-                    aff_type=new_aff_type,
-                    img_id=inst.img_id,
-                    pc_id=inst.pc_id,
-                    given_id=inst.id
-                )
-    
-    # 3. 保存所有数据（只保存有 label/mask 的对象）
-    print(f"保存重命名后的数据到: {new_obj_type}")
-    
-    # 保存 Instruction
-    Instruction.save_all(dataset_root, obj_type=[new_obj_type], keep_id=True)
-    
-    # 4. 删除旧目录（仅当物体名发生变化时）
-    if not same_name and os.path.exists(old_obj_dir):
-        shutil.rmtree(old_obj_dir)
-        print(f"已删除旧目录: {old_obj_dir}")
+def standardize_name(name):
+    if name is None:
+        return ""
+    name = str(name).strip().replace("_", " ").lower()
+    return re.sub(r"\s+", " ", name)
 
+
+def normalize_mapping(mapping):
+    return {
+        standardize_name(old): standardize_name(new)
+        for old, new in (mapping or {}).items()
+        if standardize_name(old) and standardize_name(new)
+    }
+
+
+def load_rename_map(path):
+    if not path:
+        return {}, {}
+    with open(path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if "objects" in data or "affordances" in data:
+        return data.get("objects", {}), data.get("affordances", {})
+    return data.get("obj", {}), data.get("aff", {})
+
+
+def mapped_name(name, rename_map):
+    std = standardize_name(name)
+    return rename_map.get(std, std)
+
+
+def read_csv_rows(path):
+    with open(path, "r", newline="", encoding="utf-8-sig") as f:
+        return list(csv.DictReader(f))
+
+
+def collect_names(dataset_root):
+    objects = set()
+    affordances = set()
+    for entry in os.listdir(dataset_root):
+        obj_dir = os.path.join(dataset_root, entry)
+        if not os.path.isdir(obj_dir):
+            continue
+        objects.add(entry)
+
+        ins_file = os.path.join(obj_dir, "Instruction.csv")
+        if os.path.exists(ins_file):
+            for row in read_csv_rows(ins_file):
+                if row.get("obj_type"):
+                    objects.add(row["obj_type"])
+                if row.get("aff_type"):
+                    affordances.add(row["aff_type"])
+
+        mask_dir = os.path.join(obj_dir, "Image", "mask")
+        if os.path.isdir(mask_dir):
+            for aff in os.listdir(mask_dir):
+                if os.path.isdir(os.path.join(mask_dir, aff)):
+                    affordances.add(aff)
+
+        pc_dir = os.path.join(obj_dir, "PointCloud")
+        if os.path.isdir(pc_dir):
+            for filename in os.listdir(pc_dir):
+                if not filename.endswith(".csv"):
+                    continue
+                with open(os.path.join(pc_dir, filename), "r", encoding="utf-8") as f:
+                    first = f.readline().strip()
+                if first.startswith("# "):
+                    first = first[2:]
+                cols = [c.strip() for c in first.split(",")]
+                affordances.update(c for c in cols[3:] if c)
+    return objects, affordances
+
+
+def build_full_maps(dataset_root, obj_rename=None, aff_rename=None, map_file=None):
+    file_obj_map, file_aff_map = load_rename_map(map_file)
+    obj_map = normalize_mapping({**OBJ_RENAME_MAP, **file_obj_map})
+    aff_map = normalize_mapping({**AFF_RENAME_MAP, **file_aff_map})
+
+    if obj_rename:
+        old, new = obj_rename
+        obj_map[standardize_name(old)] = standardize_name(new)
+    if aff_rename:
+        old, new = aff_rename
+        aff_map[standardize_name(old)] = standardize_name(new)
+
+    objects, affordances = collect_names(dataset_root)
+    for obj in objects:
+        std = standardize_name(obj)
+        obj_map.setdefault(std, std)
+    for aff in affordances:
+        std = standardize_name(aff)
+        aff_map.setdefault(std, std)
+    return obj_map, aff_map
+
+
+def extract_sample_id(filename, old_obj_name):
+    stem, _ = os.path.splitext(filename)
+    if stem.startswith(old_obj_name + "_"):
+        rest = stem[len(old_obj_name) + 1:]
+        return rest.split("_", 1)[0]
+    match = re.search(r"_(\d+)(?:_|$)", stem)
+    if match:
+        return match.group(1)
+    return None
+
+
+def rewrite_dataset_filename(filename, old_obj_name, new_obj_name, aff_name=None):
+    _, ext = os.path.splitext(filename)
+    sample_id = extract_sample_id(filename, old_obj_name)
+    if sample_id:
+        if aff_name:
+            return f"{new_obj_name}_{sample_id}_{aff_name}{ext.lower()}"
+        return f"{new_obj_name}_{sample_id}{ext.lower()}"
+    stem, ext = os.path.splitext(filename)
+    return f"{standardize_name(stem)}{ext.lower()}"
+
+
+def write_instruction(src_path, dst_path, obj_name, obj_map, aff_map):
+    fieldnames = ["ins", "obj_type", "aff_type", "id", "img_id", "pc_id"]
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    with open(src_path, "r", newline="", encoding="utf-8-sig") as input_f, open(
+        dst_path, "w", newline="", encoding="utf-8"
+    ) as output_f:
+        reader = csv.DictReader(input_f)
+        writer = csv.DictWriter(output_f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in reader:
+            writer.writerow({
+                "ins": row.get("ins", ""),
+                "obj_type": mapped_name(row.get("obj_type") or obj_name, obj_map),
+                "aff_type": mapped_name(row.get("aff_type", ""), aff_map),
+                "id": row.get("id", ""),
+                "img_id": row.get("img_id", ""),
+                "pc_id": row.get("pc_id", ""),
+            })
+
+
+def write_pointcloud(src_path, dst_path, aff_map):
+    os.makedirs(os.path.dirname(dst_path), exist_ok=True)
+    with open(src_path, "r", encoding="utf-8") as input_f, open(dst_path, "w", encoding="utf-8") as output_f:
+        first = input_f.readline()
+        if first:
+            prefix = "# " if first.startswith("# ") else ""
+            clean_header = first[2:] if first.startswith("# ") else first
+            cols = [col.strip() for col in clean_header.strip().split(",")]
+            if len(cols) > 3:
+                cols = cols[:3] + [mapped_name(col, aff_map) for col in cols[3:]]
+            output_f.write(prefix + ",".join(cols) + "\n")
+        shutil.copyfileobj(input_f, output_f)
+
+
+def copy_image_dir(src_dir, dst_dir, old_obj_name, new_obj_name, aff_map):
+    for subdir in os.listdir(src_dir):
+        src_subdir = os.path.join(src_dir, subdir)
+        if not os.path.isdir(src_subdir):
+            continue
+        if subdir == "mask":
+            for aff_dir in os.listdir(src_subdir):
+                src_aff_dir = os.path.join(src_subdir, aff_dir)
+                if not os.path.isdir(src_aff_dir):
+                    continue
+                new_aff = mapped_name(aff_dir, aff_map)
+                dst_aff_dir = os.path.join(dst_dir, "mask", new_aff)
+                os.makedirs(dst_aff_dir, exist_ok=True)
+                for filename in os.listdir(src_aff_dir):
+                    src_file = os.path.join(src_aff_dir, filename)
+                    if os.path.isfile(src_file):
+                        dst_name = rewrite_dataset_filename(filename, old_obj_name, new_obj_name, new_aff)
+                        shutil.copy2(src_file, os.path.join(dst_aff_dir, dst_name))
+        else:
+            dst_subdir = os.path.join(dst_dir, subdir)
+            os.makedirs(dst_subdir, exist_ok=True)
+            for filename in os.listdir(src_subdir):
+                src_file = os.path.join(src_subdir, filename)
+                if os.path.isfile(src_file):
+                    dst_name = rewrite_dataset_filename(filename, old_obj_name, new_obj_name)
+                    shutil.copy2(src_file, os.path.join(dst_subdir, dst_name))
+
+
+def merge_json_dict(dst, src):
+    for key, value in src.items():
+        if isinstance(value, dict) and isinstance(dst.get(key), dict):
+            merge_json_dict(dst[key], value)
+        else:
+            dst[key] = value
+
+
+def rewrite_info(src_path, dst_path, obj_map, aff_map):
+    with open(src_path, "r", encoding="utf-8") as f:
+        info = json.load(f)
+    output = {}
+    for modality, obj_dict in info.items():
+        output[modality] = defaultdict(dict)
+        for obj, aff_dict in (obj_dict or {}).items():
+            new_obj = mapped_name(obj, obj_map)
+            for aff, value in (aff_dict or {}).items():
+                new_aff = "ID" if aff == "ID" else mapped_name(aff, aff_map)
+                output[modality].setdefault(new_obj, {})[new_aff] = value
+    with open(dst_path, "w", encoding="utf-8") as f:
+        json.dump(output, f, ensure_ascii=False, indent=2)
+
+
+def rewrite_split_value(value, obj_map, aff_map, parent_key=None):
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            new_key = key
+            if standardize_name(key) in obj_map:
+                new_key = mapped_name(key, obj_map)
+            elif standardize_name(key) in aff_map:
+                new_key = mapped_name(key, aff_map)
+            out[new_key] = rewrite_split_value(item, obj_map, aff_map, parent_key=key)
+        return out
+    if isinstance(value, list):
+        return [rewrite_split_value(item, obj_map, aff_map, parent_key=parent_key) for item in value]
+    if isinstance(value, str):
+        if parent_key == "obj_type":
+            return mapped_name(value, obj_map)
+        if parent_key == "aff_type":
+            return mapped_name(value, aff_map)
+    return value
+
+
+def copy_object_dir(src_dir, dst_dir, old_obj_name, new_obj_name, obj_map, aff_map):
+    os.makedirs(dst_dir, exist_ok=True)
+    for entry in os.listdir(src_dir):
+        src_path = os.path.join(src_dir, entry)
+        if entry == "Instruction.csv" and os.path.isfile(src_path):
+            write_instruction(src_path, os.path.join(dst_dir, entry), new_obj_name, obj_map, aff_map)
+        elif entry == "PointCloud" and os.path.isdir(src_path):
+            pc_dst = os.path.join(dst_dir, entry)
+            os.makedirs(pc_dst, exist_ok=True)
+            for filename in os.listdir(src_path):
+                pc_src = os.path.join(src_path, filename)
+                if os.path.isfile(pc_src) and filename.endswith(".csv"):
+                    pc_name = rewrite_dataset_filename(filename, old_obj_name, new_obj_name)
+                    write_pointcloud(pc_src, os.path.join(pc_dst, pc_name), aff_map)
+        elif entry == "Image" and os.path.isdir(src_path):
+            copy_image_dir(src_path, os.path.join(dst_dir, entry), old_obj_name, new_obj_name, aff_map)
+        elif os.path.isdir(src_path):
+            shutil.copytree(src_path, os.path.join(dst_dir, entry), dirs_exist_ok=True)
+        else:
+            shutil.copy2(src_path, os.path.join(dst_dir, entry))
+
+
+def rewrite_dataset(dataset_root, obj_map, aff_map):
+    tmp_root = dataset_root.rstrip(os.sep) + ".rename_tmp"
+    if os.path.exists(tmp_root):
+        shutil.rmtree(tmp_root)
+    os.makedirs(tmp_root, exist_ok=True)
+
+    for entry in os.listdir(dataset_root):
+        src_path = os.path.join(dataset_root, entry)
+        dst_path = os.path.join(tmp_root, entry)
+        if os.path.isdir(src_path):
+            new_obj = mapped_name(entry, obj_map)
+            copy_object_dir(src_path, os.path.join(tmp_root, new_obj), entry, new_obj, obj_map, aff_map)
+        elif entry == "info.json":
+            rewrite_info(src_path, dst_path, obj_map, aff_map)
+        elif entry in {"train.json", "val.json", "test.json", "metadata.json"}:
+            with open(src_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            with open(dst_path, "w", encoding="utf-8") as f:
+                json.dump(rewrite_split_value(data, obj_map, aff_map), f, ensure_ascii=False, indent=2)
+        else:
+            shutil.copy2(src_path, dst_path)
+
+    for entry in os.listdir(dataset_root):
+        path = os.path.join(dataset_root, entry)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        else:
+            os.remove(path)
+    for entry in os.listdir(tmp_root):
+        shutil.move(os.path.join(tmp_root, entry), os.path.join(dataset_root, entry))
+    shutil.rmtree(tmp_root)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="重命名数据集中的物体名称或affordance名称")
-    parser.add_argument('-d', '--dataset-root', type=str, required=True,
-                       help='数据集根目录')
-    parser.add_argument(
-        '-o', '--obj',
-        type=str,
-        nargs='+',
-        metavar=('OLD', 'NEW'),
-        help='重命名物体类型: --obj <旧名称> <新名称>；'
-             '若只提供一个名称，则表示在该物体上仅重命名aff（需要配合 --aff）'
-    )
-    parser.add_argument('-a', '--aff', type=str, nargs=2, metavar=('OLD', 'NEW'),
-                       help='重命名affordance类型: --aff <旧名称> <新名称> (默认处理所有物体)')
-    
+    parser = argparse.ArgumentParser(description="按 README 规范重命名数据集中的物体和 affordance 名称")
+    parser.add_argument("-d", "--dataset-root", type=str, required=True, help="数据集根目录")
+    parser.add_argument("-o", "--obj", type=str, nargs="+", metavar=("OLD", "NEW"), help="重命名物体类型")
+    parser.add_argument("-a", "--aff", type=str, nargs=2, metavar=("OLD", "NEW"), help="重命名 affordance 类型")
+    parser.add_argument("--rename-map", type=str, default=None, help="JSON 重命名字典，格式 {'objects':{}, 'affordances':{}}")
     args = parser.parse_args()
-    
+
     dataset_root = os.path.abspath(args.dataset_root)
-    
     if not os.path.isdir(dataset_root):
         raise ValueError(f"数据集根目录不存在: {dataset_root}")
-    
-    # 重命名物体类型（可选同时重命名 affordance）
+
+    obj_rename = None
     if args.obj:
         if len(args.obj) == 1:
-            # 只提供一个物体名：表示在该物体上仅重命名 aff
-            old_obj_type = new_obj_type = args.obj[0]
+            obj_rename = (args.obj[0], args.obj[0])
         elif len(args.obj) == 2:
-            old_obj_type, new_obj_type = args.obj
+            obj_rename = tuple(args.obj)
         else:
             raise ValueError("参数 --obj 只允许 1 个或 2 个值")
+    aff_rename = tuple(args.aff) if args.aff else None
 
-        obj_rename = (old_obj_type, new_obj_type)
-        aff_rename = tuple(args.aff) if args.aff else None
+    obj_map, aff_map = build_full_maps(dataset_root, obj_rename=obj_rename, aff_rename=aff_rename, map_file=args.rename_map)
+    print("物体重命名映射:")
+    for old, new in sorted(obj_map.items()):
+        if old != new:
+            print(f"  {old} -> {new}")
+    print("Affordance 重命名映射:")
+    for old, new in sorted(aff_map.items()):
+        if old != new:
+            print(f"  {old} -> {new}")
 
-        # 无实际修改的情况：旧名=新名，且没有提供 aff 重命名
-        if old_obj_type == new_obj_type and aff_rename is None:
-            print(f"物体名称未变化，且未指定aff重命名，跳过：{old_obj_type}")
-        else:
-            print(f"\n开始重命名物体类型: {old_obj_type} -> {new_obj_type}")
-            if aff_rename:
-                old_aff, new_aff = aff_rename
-                print(f"同时重命名 affordance: {old_aff} -> {new_aff}")
-            rename_obj_type(dataset_root, obj_rename=obj_rename, aff_rename=aff_rename)
-            print(f"完成重命名物体类型: {old_obj_type} -> {new_obj_type}\n")
-    
-    if not args.obj and not args.aff:
-        parser.print_help()
+    rewrite_dataset(dataset_root, obj_map, aff_map)
+    print(f"完成重命名并规范化数据集: {dataset_root}")
 
 
 if __name__ == "__main__":
