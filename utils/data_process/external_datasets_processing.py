@@ -175,6 +175,16 @@ class PIAD_PC(PointCloud):
     """
     适配 IAGNet 使用的 PIAD 点云文本格式。
 
+    约定输入目录为 PIAD 根目录，结构为：
+        PIAD/
+            Seen/
+                Point/
+                Image/
+                Bounding box/
+                Point_Train.txt / Point_Test.txt
+            Unseen/
+                ...
+
     原始点云文件每行形如：
         <sample_id> <obj_type> x y z m_grasp m_contain ...
 
@@ -192,50 +202,6 @@ class PIAD_PC(PointCloud):
         super().__init__(points, obj_type=obj_type, aff_mask_dict=aff_mask_dict)
         PIAD_PC.all[obj_type].append(self)
         PIAD_PC.count[obj_type]['ID'] += 1
-
-    @staticmethod
-    def _is_float_sequence(values):
-        try:
-            [float(v) for v in values]
-            return True
-        except (TypeError, ValueError):
-            return False
-
-    @classmethod
-    def _is_point_file(cls, filepath):
-        try:
-            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
-                for line in f:
-                    parts = line.strip().split()
-                    if not parts:
-                        continue
-                    return len(parts) >= 3 + len(cls.aff_type) and cls._is_float_sequence(parts[2:])
-        except OSError:
-            return False
-        return False
-
-    @staticmethod
-    def _resolve_list_entry(entry, list_file, dataset_root_path):
-        candidates = [
-            entry,
-            os.path.join(os.path.dirname(list_file), entry),
-            os.path.join(dataset_root_path, entry),
-        ]
-        for candidate in candidates:
-            if os.path.isfile(candidate):
-                return candidate
-        return None
-
-    @classmethod
-    def _iter_point_files_from_list(cls, list_file, dataset_root_path):
-        with open(list_file, 'r', encoding='utf-8', errors='ignore') as f:
-            for line in f:
-                entry = line.strip()
-                if not entry:
-                    continue
-                resolved = cls._resolve_list_entry(entry, list_file, dataset_root_path)
-                if resolved is not None and cls._is_point_file(resolved):
-                    yield resolved
 
     @classmethod
     def load_file(cls, filepath, obj_type=None, aff_type=None) -> 'PointCloud':
@@ -273,40 +239,33 @@ class PIAD_PC(PointCloud):
     @classmethod
     def load_all(cls, dataset_root_path, **kwargs):
         """
-        支持两种 PIAD 输入组织：
-        1) IAGNet 风格的列表文件，例如 Point_Train.txt / Point_Val.txt，文件内容为点云文件路径；
-        2) 直接递归扫描目录中的原始点云文本文件。
+        只支持 PIAD 根目录输入。需要切换 Seen/Unseen 或 train/test 时，直接改下面两个列表。
         """
         aff_type = kwargs.get("aff_type", None)
+        settings = ['Seen']  # 可改为 ['Seen', 'Unseen']
+        splits = ['train']   # 可改为 ['train', 'test']
 
         def iterator():
             seen_files = set()
-            list_files = []
-            point_files = []
-            for root, _, files in os.walk(dataset_root_path):
-                for file in files:
-                    if file.startswith('.'):
-                        continue
-                    file_path = os.path.join(root, file)
-                    if cls._is_point_file(file_path):
-                        point_files.append(file_path)
-                    elif file.lower().endswith(('.txt', '.lst')):
-                        list_files.append(file_path)
-
-            for list_file in sorted(list_files):
-                for point_file in cls._iter_point_files_from_list(list_file, dataset_root_path):
-                    if point_file in seen_files:
-                        continue
-                    seen_files.add(point_file)
-                    print(f'loading PC{point_file}')
-                    yield cls.load_file(point_file, aff_type=aff_type)
-
-            for point_file in sorted(point_files):
-                if point_file in seen_files:
-                    continue
-                seen_files.add(point_file)
-                print(f'loading PC{point_file}')
-                yield cls.load_file(point_file, aff_type=aff_type)
+            for setting in settings:
+                setting_dir = os.path.join(dataset_root_path, setting)
+                if not os.path.isdir(setting_dir):
+                    raise FileNotFoundError(f"PIAD setting directory not found: {setting_dir}")
+                for split in splits:
+                    list_file = os.path.join(setting_dir, f'Point_{split.capitalize()}.txt')
+                    if not os.path.isfile(list_file):
+                        raise FileNotFoundError(f"PIAD point list file not found: {list_file}")
+                    with open(list_file, 'r', encoding='utf-8', errors='ignore') as f:
+                        entries = [line.strip() for line in f if line.strip()]
+                    for entry in entries:
+                        point_file = os.path.join(setting_dir, 'Point', entry)
+                        if not os.path.isfile(point_file):
+                            raise FileNotFoundError(f"PIAD point file listed but not found: {point_file}")
+                        if point_file in seen_files:
+                            continue
+                        seen_files.add(point_file)
+                        print(f'loading PIAD PC [{setting}/{split}] {point_file}')
+                        yield cls.load_file(point_file, aff_type=aff_type)
 
         return iterator()
 
