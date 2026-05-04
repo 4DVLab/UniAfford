@@ -171,6 +171,145 @@ class PIADv2_PC(PointCloud):
                                         yield cls.load_file(file_path, obj_type=obj_type, aff_type=aff)
         return iterator()
 
+class PIAD_PC(PointCloud):
+    """
+    适配 IAGNet 使用的 PIAD 点云文本格式。
+
+    原始点云文件每行形如：
+        <sample_id> <obj_type> x y z m_grasp m_contain ...
+
+    其中 mask 列顺序与 IAGNet 的 affordance_label_list 保持一致。
+    """
+    aff_type = [
+        'grasp', 'contain', 'lift', 'open',
+        'lay', 'sit', 'support', 'wrapgrasp', 'pour', 'move', 'display',
+        'push', 'listen', 'wear', 'press', 'cut', 'stab'
+    ]  # 17
+    all = defaultdict(list)
+    count = defaultdict(lambda: defaultdict(int))
+
+    def __init__(self, points, obj_type, aff_mask_dict: dict = None):
+        super().__init__(points, obj_type=obj_type, aff_mask_dict=aff_mask_dict)
+        PIAD_PC.all[obj_type].append(self)
+        PIAD_PC.count[obj_type]['ID'] += 1
+
+    @staticmethod
+    def _is_float_sequence(values):
+        try:
+            [float(v) for v in values]
+            return True
+        except (TypeError, ValueError):
+            return False
+
+    @classmethod
+    def _is_point_file(cls, filepath):
+        try:
+            with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+                for line in f:
+                    parts = line.strip().split()
+                    if not parts:
+                        continue
+                    return len(parts) >= 3 + len(cls.aff_type) and cls._is_float_sequence(parts[2:])
+        except OSError:
+            return False
+        return False
+
+    @staticmethod
+    def _resolve_list_entry(entry, list_file, dataset_root_path):
+        candidates = [
+            entry,
+            os.path.join(os.path.dirname(list_file), entry),
+            os.path.join(dataset_root_path, entry),
+        ]
+        for candidate in candidates:
+            if os.path.isfile(candidate):
+                return candidate
+        return None
+
+    @classmethod
+    def _iter_point_files_from_list(cls, list_file, dataset_root_path):
+        with open(list_file, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                entry = line.strip()
+                if not entry:
+                    continue
+                resolved = cls._resolve_list_entry(entry, list_file, dataset_root_path)
+                if resolved is not None and cls._is_point_file(resolved):
+                    yield resolved
+
+    @classmethod
+    def load_file(cls, filepath, obj_type=None, aff_type=None) -> 'PointCloud':
+        rows = []
+        inferred_obj_type = obj_type
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 3 + len(cls.aff_type):
+                    continue
+                if inferred_obj_type is None:
+                    inferred_obj_type = parts[1]
+                rows.append([float(x) for x in parts[2:]])
+
+        if not rows:
+            raise ValueError(f"PIAD point file is empty or invalid: {filepath}")
+
+        data = np.asarray(rows, dtype=np.float32)
+        if inferred_obj_type is None:
+            inferred_obj_type = os.path.basename(os.path.dirname(filepath))
+
+        labels = list(cls.aff_type[: max(0, data.shape[1] - 3)])
+        mask = data[:, 3 : 3 + len(labels)]
+        aff_set = {aff_type} if isinstance(aff_type, str) else (set(aff_type) if aff_type is not None else None)
+        aff_mask_dict = {}
+        for idx, label in enumerate(labels):
+            if aff_set is not None and label not in aff_set:
+                continue
+            mask_col = mask[:, idx]
+            if np.any(mask_col != 0):
+                aff_mask_dict[label] = mask_col
+
+        return cls(points=data[:, :3], obj_type=inferred_obj_type, aff_mask_dict=aff_mask_dict)
+
+    @classmethod
+    def load_all(cls, dataset_root_path, **kwargs):
+        """
+        支持两种 PIAD 输入组织：
+        1) IAGNet 风格的列表文件，例如 Point_Train.txt / Point_Val.txt，文件内容为点云文件路径；
+        2) 直接递归扫描目录中的原始点云文本文件。
+        """
+        aff_type = kwargs.get("aff_type", None)
+
+        def iterator():
+            seen_files = set()
+            list_files = []
+            point_files = []
+            for root, _, files in os.walk(dataset_root_path):
+                for file in files:
+                    if file.startswith('.'):
+                        continue
+                    file_path = os.path.join(root, file)
+                    if cls._is_point_file(file_path):
+                        point_files.append(file_path)
+                    elif file.lower().endswith(('.txt', '.lst')):
+                        list_files.append(file_path)
+
+            for list_file in sorted(list_files):
+                for point_file in cls._iter_point_files_from_list(list_file, dataset_root_path):
+                    if point_file in seen_files:
+                        continue
+                    seen_files.add(point_file)
+                    print(f'loading PC{point_file}')
+                    yield cls.load_file(point_file, aff_type=aff_type)
+
+            for point_file in sorted(point_files):
+                if point_file in seen_files:
+                    continue
+                seen_files.add(point_file)
+                print(f'loading PC{point_file}')
+                yield cls.load_file(point_file, aff_type=aff_type)
+
+        return iterator()
+
 # discard
 class LASO_PC(PointCloud):
     aff_type = [
@@ -679,6 +818,7 @@ class AGD20k_IMG(Image):
             img.free_memory()
 
 
+# 转化出来的数据对aff标注貌似并不准确，具体在tenderizer类的grasp上，会把锤头也标记进去
 class UMD_IMG(Image):
     """
     UMD Part Affordance 图片数据集：
@@ -1229,6 +1369,8 @@ if __name__ == "__main__":
                         pc = AGPIL_PC.load_file(file_path)
                     case 'PIADv2':
                         pc = PIADv2_PC.load_file(file_path)
+                    case 'PIAD':
+                        pc = PIAD_PC.load_file(file_path, aff_type=args.aff_type)
                     case 'GEAL':
                         raise TypeError(
                             'GEAL（-d GEAL）为 pickle 批量导出，不支持 -s/--show；'
@@ -1250,7 +1392,9 @@ if __name__ == "__main__":
                         PointCloud.deduplicate()
                         PointCloud.save_all(output_dir)
                     case 'PIAD':
-                        ...
+                        tmp = list(PIAD_PC.load_all(input_dir, aff_type=args.aff_type))
+                        PointCloud.deduplicate()
+                        PointCloud.save_all(output_dir)
                     case 'LASO':
                         LASO_PC.load_and_save(input_dir, output_dir)
                     case 'AffordanceNet3D':
