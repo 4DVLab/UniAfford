@@ -202,9 +202,7 @@ class TrainingConfig(Configs):
         "gt_threshold_3d": 0.5,
         # 验证集搜索预测阈值的候选范围
         "auto_select_mask_threshold": True,
-        "threshold_search_min": 0.05,
-        "threshold_search_max": 0.95,
-        "threshold_search_step": 0.05,
+        "write_selected_mask_threshold_to_config": True,
         "gradient_checkpointing": True,
         # 损失配置
         "focal_loss_weight": 2.0,

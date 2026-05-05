@@ -42,6 +42,12 @@ from utils.metrics import (
     log_scalar_dict,
     log_epoch_summary,
 )
+from utils.threshold_search import (
+    build_threshold_candidates,
+    init_threshold_search_stats,
+    update_threshold_search_stats,
+    finalize_threshold_search,
+)
 from utils.debug import log_param_dtype_stats, count_model_params
 from utils.model_io import build_portable_assets, build_portable_checkpoint_payload
 from utils.trainability_summary import log_trainability_summary
@@ -244,97 +250,6 @@ def train_one_epoch(
     return global_step, train_results
 
 
-def _build_threshold_candidates(config, device: torch.device) -> torch.Tensor:
-    """构建验证集预测阈值搜索候选；GT 阈值不参与自动搜索。"""
-    start = float(getattr(config, "threshold_search_min", 0.05))
-    end = float(getattr(config, "threshold_search_max", 0.95))
-    step = float(getattr(config, "threshold_search_step", 0.05))
-    if step <= 0:
-        step = 0.05
-    if end < start:
-        start, end = end, start
-    count = int(round((end - start) / step)) + 1
-    values = start + torch.arange(count, device=device, dtype=torch.float32) * step
-    return values.clamp(0.0, 1.0).unique(sorted=True)
-
-
-def _init_threshold_search_stats(thresholds: torch.Tensor) -> Dict[str, torch.Tensor]:
-    zeros = torch.zeros_like(thresholds, dtype=torch.float32)
-    return {
-        "thresholds": thresholds,
-        "sum_iou_2d": zeros.clone(),
-        "count_2d": torch.zeros((), device=thresholds.device, dtype=torch.float32),
-        "sum_iou_3d": zeros.clone(),
-        "count_3d": torch.zeros((), device=thresholds.device, dtype=torch.float32),
-    }
-
-
-@torch.no_grad()
-def _update_threshold_search_stats(stats: Dict[str, torch.Tensor], output_dict: Dict, input_dict: Dict, config) -> None:
-    thresholds = stats["thresholds"]
-
-    image_logits = output_dict.get("image_logits")
-    img_gt = input_dict.get("img_gt_tensor")
-    if image_logits is not None and img_gt is not None:
-        aligned_logits, aligned_gt = calc._align_ordered_query_masks(
-            image_logits.detach(),
-            img_gt,
-            sample_valid_mask=input_dict.get("img_valid_mask"),
-            gt_valid_mask=input_dict.get("img_gt_valid_mask"),
-        )
-        if aligned_logits is not None:
-            preds = aligned_logits.sigmoid()
-            target = aligned_gt.float()
-            bs = preds.shape[0]
-            for idx, threshold in enumerate(thresholds):
-                iou = calc.img_IoU(
-                    preds, target,
-                    threshold=float(threshold.item()),
-                    gt_threshold=getattr(config, "gt_threshold_2d", 0.5),
-                )
-                stats["sum_iou_2d"][idx] += iou.sum()
-            stats["count_2d"] += bs
-
-    point_logits = output_dict.get("point_logits")
-    pc_gt = input_dict.get("pc_gt_tensor")
-    if point_logits is not None and pc_gt is not None:
-        valid_lengths = input_dict.get("pc_valid_lengths")
-        aligned_logits, aligned_gt = calc._align_ordered_query_masks(
-            point_logits.detach(),
-            pc_gt,
-            sample_valid_mask=None if valid_lengths is None else valid_lengths > 0,
-            gt_valid_mask=input_dict.get("pc_gt_valid_mask"),
-        )
-        if aligned_logits is not None:
-            preds = aligned_logits.sigmoid()
-            target = aligned_gt.float()
-            bs = preds.shape[0]
-            for idx, threshold in enumerate(thresholds):
-                iou = calc.pc_IoU(
-                    preds, target,
-                    threshold=float(threshold.item()),
-                    gt_threshold=getattr(config, "gt_threshold_3d", 0.5),
-                )
-                stats["sum_iou_3d"][idx] += iou.sum()
-            stats["count_3d"] += bs
-
-
-def _finalize_threshold_search(stats: Dict[str, torch.Tensor]) -> Dict[str, float]:
-    results = {}
-    thresholds = stats["thresholds"]
-    if stats["count_2d"].item() > 0:
-        mean_iou = stats["sum_iou_2d"] / stats["count_2d"].clamp_min(1.0)
-        best_idx = int(torch.argmax(mean_iou).item())
-        results["best_mask_threshold_2d"] = float(thresholds[best_idx].item())
-        results["best_giou_2d"] = float(mean_iou[best_idx].item())
-    if stats["count_3d"].item() > 0:
-        mean_iou = stats["sum_iou_3d"] / stats["count_3d"].clamp_min(1.0)
-        best_idx = int(torch.argmax(mean_iou).item())
-        results["best_mask_threshold_3d"] = float(thresholds[best_idx].item())
-        results["best_iou_3d"] = float(mean_iou[best_idx].item())
-    return results
-
-
 @torch.no_grad()
 def validate_one_epoch(
     val_loader, model_engine, config,
@@ -357,8 +272,8 @@ def validate_one_epoch(
     )
     threshold_stats = None
     if getattr(config, "auto_select_mask_threshold", True):
-        threshold_stats = _init_threshold_search_stats(
-            _build_threshold_candidates(config, model_engine.device)
+        threshold_stats = init_threshold_search_stats(
+            build_threshold_candidates(model_engine.device)
         )
 
     for val_dict in val_loader:
@@ -373,11 +288,11 @@ def validate_one_epoch(
             gt_threshold_3d=getattr(config, "gt_threshold_3d", 0.5),
         )
         if threshold_stats is not None:
-            _update_threshold_search_stats(threshold_stats, val_output, val_dict, config)
+            update_threshold_search_stats(threshold_stats, val_output, val_dict, config)
 
     val_results = compute_and_reset_torchmetrics(metrics)
     if threshold_stats is not None:
-        val_results.update(_finalize_threshold_search(threshold_stats))
+        val_results.update(finalize_threshold_search(threshold_stats))
     if local_rank == 0:
         log_epoch_summary(logger, epoch + 1, config.epochs, "val", val_results)
         if "best_mask_threshold_2d" in val_results or "best_mask_threshold_3d" in val_results:
@@ -669,7 +584,10 @@ def main():
             loss_kwargs=loss_kwargs,
         )
         # 将验证集搜索得到的预测二值化阈值写回配置；GT 阈值保持用户/benchmark 指定值不变。
-        if getattr(training_configs, "auto_select_mask_threshold", True):
+        if (
+            getattr(training_configs, "auto_select_mask_threshold", True)
+            and getattr(training_configs, "write_selected_mask_threshold_to_config", True)
+        ):
             updated_threshold = False
             if "best_mask_threshold_2d" in val_results:
                 training_configs.mask_threshold_2d = float(val_results["best_mask_threshold_2d"])

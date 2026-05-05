@@ -396,6 +396,6 @@ dataset_root/
 - 若需要使用 `logit > 0` 的语义，应在概率图上使用 `threshold=0.5`。
 - 若 benchmark 明确规定阈值，应按 benchmark 执行。
 - 若 benchmark 未规定阈值，可以在验证集上选择阈值，并固定用于测试集；不应根据测试集结果调阈值。
-- 训练时若 `auto_select_mask_threshold=True`，验证集会在 `threshold_search_min/max/step` 定义的候选集合上分别搜索 2D/3D 最优预测阈值，并写回 `checkpoints/training_config.json` 的 `mask_threshold_2d/3d`；`gt_threshold_2d/3d` 不会被自动改写。
+- 训练时若 `auto_select_mask_threshold=True`，验证集会在 `utils/threshold_search.py` 定义的默认候选集合（默认 `0.05~0.95`，步长 `0.05`）上分别搜索 2D/3D 最优预测阈值；仅当 `write_selected_mask_threshold_to_config=True` 时才会写回 `checkpoints/training_config.json` 的 `mask_threshold_2d/3d`；`gt_threshold_2d/3d` 不会被自动改写。
 
 # Cite

@@ -37,6 +37,12 @@ from utils.metrics import (
     compute_sample_metrics,
     log_epoch_summary,
 )
+from utils.threshold_search import (
+    build_threshold_candidates,
+    init_threshold_search_stats,
+    update_threshold_search_stats,
+    finalize_threshold_search,
+)
 from collections import defaultdict
 
 
@@ -544,6 +550,11 @@ def main():
         print(f"预测结果将保存到: {infer_cfg.output_dir}")
 
     sample_records: List[Dict] = []
+    threshold_stats = None
+    if getattr(training_cfg, "auto_select_mask_threshold", True):
+        threshold_stats = init_threshold_search_stats(
+            build_threshold_candidates(device)
+        )
 
     print("开始验证...")
     with torch.no_grad():
@@ -558,6 +569,8 @@ def main():
                 threshold_2d=threshold_2d, threshold_3d=threshold_3d,
                 gt_threshold_2d=gt_threshold_2d, gt_threshold_3d=gt_threshold_3d,
             )
+            if threshold_stats is not None:
+                update_threshold_search_stats(threshold_stats, output_dict, input_dict, training_cfg)
 
             pred_token_ids_batch = output_dict.get("token_ids")
             if pred_token_ids_batch is not None:
@@ -668,6 +681,9 @@ def main():
                 torch.cuda.empty_cache()
 
     results = compute_and_reset_torchmetrics(metrics)
+    threshold_search_results = {}
+    if threshold_stats is not None:
+        threshold_search_results = finalize_threshold_search(threshold_stats)
 
     # 打印摘要（重用 log_epoch_summary 的输出格式）
     log_epoch_summary(
@@ -678,6 +694,14 @@ def main():
         results=results,
         lr_dict=None,
     )
+    if threshold_search_results:
+        print(
+            "验证集参考最优预测阈值（不写回配置）: "
+            f"2D={threshold_search_results.get('best_mask_threshold_2d', threshold_2d):.4f} "
+            f"(gIoU={threshold_search_results.get('best_giou_2d', 0.0):.4f}), "
+            f"3D={threshold_search_results.get('best_mask_threshold_3d', threshold_3d):.4f} "
+            f"(IoU={threshold_search_results.get('best_iou_3d', 0.0):.4f})"
+        )
 
     # ---- 保存评估结果（人类可读格式）----
     out_dir = infer_cfg.output_dir if infer_cfg.save_predictions else "."
