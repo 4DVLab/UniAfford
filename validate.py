@@ -703,13 +703,23 @@ def main():
         lr_dict=None,
     )
     if threshold_search_results:
-        print(
-            "验证集参考最优预测阈值（不写回配置）: "
-            f"2D={threshold_search_results.get('best_mask_threshold_2d', threshold_2d):.4f} "
-            f"(gIoU={threshold_search_results.get('best_giou_2d', 0.0):.4f}), "
-            f"3D={threshold_search_results.get('best_mask_threshold_3d', threshold_3d):.4f} "
-            f"(IoU={threshold_search_results.get('best_iou_3d', 0.0):.4f})"
-        )
+        parts = []
+        if "best_mask_threshold_2d" in threshold_search_results:
+            parts.append(
+                f"2D={threshold_search_results['best_mask_threshold_2d']:.4f} "
+                f"(gIoU={threshold_search_results.get('best_giou_2d', 0.0):.4f}, "
+                f"cIoU={threshold_search_results.get('best_ciou_2d', 0.0):.4f})"
+            )
+        if "best_mask_threshold_3d" in threshold_search_results:
+            parts.append(
+                f"3D={threshold_search_results['best_mask_threshold_3d']:.4f} "
+                    f"(mIoU={threshold_search_results.get('best_miou_3d', 0.0):.4f}, "
+                    f"cumIoU={threshold_search_results.get('best_cumulative_iou_3d', 0.0):.4f})"
+            )
+        if parts:
+            print("验证集参考最优预测阈值（不写回配置）: " + ", ".join(parts))
+        if threshold_search_results.get("threshold_search_2d_tie", 0.0) or threshold_search_results.get("threshold_search_3d_tie", 0.0):
+            print("阈值搜索出现并列或无区分结果；对应分支没有可靠的参考最佳阈值。")
 
     # ---- 保存评估结果（人类可读格式）----
     out_dir = infer_cfg.output_dir if infer_cfg.save_predictions else "."

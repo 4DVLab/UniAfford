@@ -296,13 +296,22 @@ def validate_one_epoch(
     if local_rank == 0:
         log_epoch_summary(logger, epoch + 1, config.epochs, "val", val_results)
         if "best_mask_threshold_2d" in val_results or "best_mask_threshold_3d" in val_results:
-            logger.info(
-                "验证集最优预测阈值: "
-                f"2D={val_results.get('best_mask_threshold_2d', config.mask_threshold_2d):.4f} "
-                f"(gIoU={val_results.get('best_giou_2d', 0.0):.4f}), "
-                f"3D={val_results.get('best_mask_threshold_3d', config.mask_threshold_3d):.4f} "
-                f"(IoU={val_results.get('best_iou_3d', 0.0):.4f})"
-            )
+            parts = []
+            if "best_mask_threshold_2d" in val_results:
+                parts.append(
+                    f"2D={val_results['best_mask_threshold_2d']:.4f} "
+                    f"(gIoU={val_results.get('best_giou_2d', 0.0):.4f}, "
+                    f"cIoU={val_results.get('best_ciou_2d', 0.0):.4f})"
+                )
+            if "best_mask_threshold_3d" in val_results:
+                parts.append(
+                    f"3D={val_results['best_mask_threshold_3d']:.4f} "
+                    f"(mIoU={val_results.get('best_miou_3d', 0.0):.4f}, "
+                    f"cumIoU={val_results.get('best_cumulative_iou_3d', 0.0):.4f})"
+                )
+            logger.info("验证集最优预测阈值: " + ", ".join(parts))
+        if val_results.get("threshold_search_2d_tie", 0.0) or val_results.get("threshold_search_3d_tie", 0.0):
+            logger.info("阈值搜索出现并列或无区分结果；对应分支不会给出可写回的最佳阈值。")
         if writer is not None:
             log_scalar_dict(writer, "val_epoch", val_results, epoch + 1)
 

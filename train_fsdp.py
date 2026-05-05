@@ -49,6 +49,12 @@ from utils.metrics import (
     log_scalar_dict,
     log_epoch_summary,
 )
+from utils.threshold_search import (
+    build_threshold_candidates,
+    init_threshold_search_stats,
+    update_threshold_search_stats,
+    finalize_threshold_search,
+)
 from utils.debug import log_param_dtype_stats, count_model_params, _collect_batch_runtime_stats
 from utils.model_io import build_portable_assets, build_portable_checkpoint_payload
 from utils.trainability_summary import log_trainability_summary
@@ -330,6 +336,11 @@ def validate_one_epoch(
     device = torch.device("cuda", local_rank)
     model_fsdp.eval()
     metrics = build_torchmetrics_bundle(device=device)
+    threshold_stats = None
+    if getattr(config, "auto_select_mask_threshold", True):
+        threshold_stats = init_threshold_search_stats(
+            build_threshold_candidates(device)
+        )
 
     val_iter = (
         tqdm(val_loader, total=len(val_loader), dynamic_ncols=True,
@@ -347,10 +358,31 @@ def validate_one_epoch(
             gt_threshold_2d=getattr(config, "gt_threshold_2d", 0.5),
             gt_threshold_3d=getattr(config, "gt_threshold_3d", 0.5),
         )
+        if threshold_stats is not None:
+            update_threshold_search_stats(threshold_stats, val_output, val_dict, config)
 
     val_results = compute_and_reset_torchmetrics(metrics)
+    if threshold_stats is not None:
+        val_results.update(finalize_threshold_search(threshold_stats))
     if local_rank == 0:
         log_epoch_summary(logger, epoch + 1, config.epochs, "val", val_results)
+        if "best_mask_threshold_2d" in val_results or "best_mask_threshold_3d" in val_results:
+            parts = []
+            if "best_mask_threshold_2d" in val_results:
+                parts.append(
+                    f"2D={val_results['best_mask_threshold_2d']:.4f} "
+                    f"(gIoU={val_results.get('best_giou_2d', 0.0):.4f}, "
+                    f"cIoU={val_results.get('best_ciou_2d', 0.0):.4f})"
+                )
+            if "best_mask_threshold_3d" in val_results:
+                parts.append(
+                    f"3D={val_results['best_mask_threshold_3d']:.4f} "
+                    f"(mIoU={val_results.get('best_miou_3d', 0.0):.4f}, "
+                    f"cumIoU={val_results.get('best_cumulative_iou_3d', 0.0):.4f})"
+                )
+            logger.info("验证集最优预测阈值: " + ", ".join(parts))
+        if val_results.get("threshold_search_2d_tie", 0.0) or val_results.get("threshold_search_3d_tie", 0.0):
+            logger.info("阈值搜索出现并列或无区分结果；对应分支不会给出可写回的最佳阈值。")
         if writer is not None:
             log_scalar_dict(writer, "val_epoch", val_results, epoch + 1)
 
@@ -735,6 +767,25 @@ def main():
             val_loader, model_fsdp, training_configs, epoch, writer, logger, local_rank,
             loss_kwargs=loss_kwargs,
         )
+        if (
+            getattr(training_configs, "auto_select_mask_threshold", True)
+            and getattr(training_configs, "write_selected_mask_threshold_to_config", True)
+        ):
+            updated_threshold = False
+            if "best_mask_threshold_2d" in val_results:
+                training_configs.mask_threshold_2d = float(val_results["best_mask_threshold_2d"])
+                updated_threshold = True
+            if "best_mask_threshold_3d" in val_results:
+                training_configs.mask_threshold_3d = float(val_results["best_mask_threshold_3d"])
+                updated_threshold = True
+            if updated_threshold and local_rank == 0:
+                training_configs.save_json(config_json_path, include_deepspeed=False)
+                logger.info(
+                    "已将验证集最优预测阈值写回配置: "
+                    f"mask_threshold_2d={training_configs.mask_threshold_2d:.4f}, "
+                    f"mask_threshold_3d={training_configs.mask_threshold_3d:.4f}, "
+                    f"path={config_json_path}"
+                )
         last_val_metrics = _to_serializable_metrics(val_results)
 
         monitor = float(val_results.get("loss", train_results.get("loss", float("inf"))))
