@@ -27,7 +27,7 @@ from utils.dataset import (
     JointAffordanceTorchDataset,
     joint_affordance_collate_fn,
 )
-from utils.common import dict_to_cuda
+from utils.common import dict_to_cuda, resolve_dtype
 from utils.model_io import load_portable_model
 from utils import calculator as calc
 from utils.metrics import (
@@ -48,18 +48,24 @@ def parse_args():
                         help="训练配置 JSON 路径（默认自动在 checkpoint 同目录查找 training_config.json）")
     parser.add_argument("--dataset_dir", type=str, default=None,
                         help="数据集目录（默认使用 TrainingConfig 中的设置）")
-    parser.add_argument("--batch_size", type=int, default=1,
-                        help="验证 batch 大小")
-    parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"],
+    parser.add_argument("--batch_size", type=int, default=None,
+                        help="验证 batch 大小（默认使用 TrainingConfig.val_batch_size）")
+    parser.add_argument("--split", type=str, default=None, choices=["train", "val", "test"],
                         help="要评估的数据集分割（默认：test）")
-    parser.add_argument("--device", type=str, default="cuda",
-                        help="使用的设备（默认：cuda）")
-    parser.add_argument("--num_workers", type=int, default=4,
-                        help="DataLoader worker 数量（默认：4）")
+    parser.add_argument("--device", type=str, default=None,
+                        help="使用的设备（默认：cuda，若不可用则 CPU）")
+    parser.add_argument("--num_workers", type=int, default=None,
+                        help="DataLoader worker 数量（默认使用 TrainingConfig.workers）")
     parser.add_argument("--save_predictions", action="store_true",
                         help="是否保存预测结果（2D mask PNG + 3D CSV）")
-    parser.add_argument("--output_dir", type=str, default="./validation_output",
+    parser.add_argument("--output_dir", type=str, default=None,
                         help="预测结果保存目录（默认：./validation_output）")
+    parser.add_argument("--precision", type=str, default=None, choices=["fp32", "bf16", "fp16"],
+                        help="推理精度覆盖项（默认不覆盖 TrainingConfig）")
+    parser.add_argument("--mask_threshold_2d", type=float, default=None,
+                        help="2D 预测概率二值化阈值覆盖项（默认使用 TrainingConfig）")
+    parser.add_argument("--mask_threshold_3d", type=float, default=None,
+                        help="3D 预测概率二值化阈值覆盖项（默认使用 TrainingConfig）")
     parser.add_argument("--qwen_model", type=str, default=None,
                         help="Qwen 模型路径或名称（覆盖 TrainingConfig.model_config.mllm）")
     parser.add_argument("--vision_pretrained", type=str, default=None,
@@ -448,19 +454,35 @@ def main():
     else:
         training_cfg = TrainingConfig()
         print("未找到训练配置 JSON，使用 TrainingConfig 默认值。")
+    # 覆盖优先级：命令行参数（非 None） > InferenceConfig.defaults > training_config.json。
     infer_cfg = InferenceConfig(
-        device=args.device,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        split=args.split,
-        save_predictions=args.save_predictions,
-        output_dir=args.output_dir,
+        precision=args.precision,
+        mask_threshold_2d=args.mask_threshold_2d,
+        mask_threshold_3d=args.mask_threshold_3d,
     )
+
+    # InferenceConfig 只表达覆盖项；运行所需默认值从 TrainingConfig 回退。
+    infer_cfg.batch_size = args.batch_size if args.batch_size is not None else training_cfg.val_batch_size
+    infer_cfg.num_workers = args.num_workers if args.num_workers is not None else training_cfg.workers
+    infer_cfg.split = args.split or "test"
+    infer_cfg.device = args.device or "cuda"
+    infer_cfg.save_predictions = args.save_predictions
+    infer_cfg.output_dir = args.output_dir or "./validation_output"
 
     if args.dataset_dir:
         training_cfg.dataset_dir = args.dataset_dir
     training_cfg.val_batch_size = infer_cfg.batch_size
     training_cfg.workers = infer_cfg.num_workers
+
+    if infer_cfg.precision is not None:
+        infer_dtype = resolve_dtype(infer_cfg.precision)
+        training_cfg.model_config.mllm.compute_dtype = infer_dtype
+        training_cfg.model_config.image_decoder.compute_dtype = infer_dtype
+        training_cfg.model_config.point_decoder.compute_dtype = infer_dtype
+    if infer_cfg.mask_threshold_2d is not None:
+        training_cfg.mask_threshold_2d = float(infer_cfg.mask_threshold_2d)
+    if infer_cfg.mask_threshold_3d is not None:
+        training_cfg.mask_threshold_3d = float(infer_cfg.mask_threshold_3d)
 
     device = torch.device(infer_cfg.device if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}\n")

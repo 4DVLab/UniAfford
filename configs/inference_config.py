@@ -8,17 +8,11 @@ from configs import base_config
 
 class InferenceConfig(base_config.Configs):
     defaults = {
-        "device": "cuda",
-        "precision": "fp32",
-        "image_size": 1024,
-        "num_points": 2048,
-        "batch_size": 1,
-        "num_workers": 4,
-        "split": "test",
-        "save_predictions": False,
-        "output_dir": "./validation_output",
-        "mask_threshold_2d": 0.5,
-        "mask_threshold_3d": 0.5,
+        # 覆盖优先级：命令行参数 > InferenceConfig.defaults > training_config.json。
+        # 默认为 None 表示不覆盖 TrainingConfig；若在此处填具体值，则会覆盖训练配置。
+        "precision": None,
+        "mask_threshold_2d": None,
+        "mask_threshold_3d": None,
     }
 
     def __init__(
@@ -28,6 +22,6 @@ class InferenceConfig(base_config.Configs):
     ):
         raw = {}
         if config_dict is not None:
-            raw.update(config_dict)
-        raw.update(overrides)
+            raw.update({k: v for k, v in config_dict.items() if v is not None})
+        raw.update({k: v for k, v in overrides.items() if v is not None})
         super().__init__(raw)
