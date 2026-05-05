@@ -87,16 +87,17 @@ def update_torchmetrics(
     image_logits = output_dict.get("image_logits")
     img_gt = input_dict.get("img_gt_tensor")
     if image_logits is not None and img_gt is not None:
-        preds_2d = image_logits.detach().sigmoid()
-        target_2d = img_gt.float()
-        img_valid = input_dict.get("img_valid_mask")
-        if img_valid is not None:
-            valid = img_valid.bool()
-            if not valid.any():
-                preds_2d = target_2d = None
-            else:
-                preds_2d = preds_2d[valid]
-                target_2d = target_2d[valid]
+        aligned_logits_2d, aligned_gt_2d = calc._align_ordered_query_masks(
+            image_logits.detach(),
+            img_gt,
+            sample_valid_mask=input_dict.get("img_valid_mask"),
+            gt_valid_mask=input_dict.get("img_gt_valid_mask"),
+        )
+        if aligned_logits_2d is None:
+            preds_2d = target_2d = None
+        else:
+            preds_2d = aligned_logits_2d.sigmoid()
+            target_2d = aligned_gt_2d.float()
         if preds_2d is not None:
             bs_2d = preds_2d.shape[0]
             iou_2d = calc.img_IoU(preds_2d, target_2d, threshold=threshold_2d)  # [B']
@@ -118,15 +119,17 @@ def update_torchmetrics(
     point_logits = output_dict.get("point_logits")
     pc_gt = input_dict.get("pc_gt_tensor")
     if point_logits is not None and pc_gt is not None:
-        preds_3d = point_logits.detach().sigmoid()
-        target_3d = pc_gt.float()
         valid_lengths = input_dict.get("pc_valid_lengths")
-        if valid_lengths is not None:
-            valid = (valid_lengths > 0).bool()
-            if not valid.any():
-                return
-            preds_3d = preds_3d[valid]
-            target_3d = target_3d[valid]
+        aligned_logits_3d, aligned_gt_3d = calc._align_ordered_query_masks(
+            point_logits.detach(),
+            pc_gt,
+            sample_valid_mask=None if valid_lengths is None else valid_lengths > 0,
+            gt_valid_mask=input_dict.get("pc_gt_valid_mask"),
+        )
+        if aligned_logits_3d is None:
+            return
+        preds_3d = aligned_logits_3d.sigmoid()
+        target_3d = aligned_gt_3d.float()
         bs = preds_3d.shape[0]
 
         # 使用多阈值平均 IoU（aIoU-20）作为 3D IoU 指标
@@ -137,7 +140,7 @@ def update_torchmetrics(
         metrics["mae_3d"].update(mae_3d.item(), weight=bs)
 
         try:
-            auc_3d = calc.pc_AUC(preds_3d, target_3d, num_thresholds=50)
+            auc_3d = calc.pc_AUC(preds_3d, target_3d, gt_threshold=threshold_3d)
             metrics["auc_3d"].update(auc_3d.item(), weight=bs)
         except Exception:
             pass
@@ -175,20 +178,36 @@ def compute_sample_metrics(
     img_valid = input_dict.get("img_valid_mask")
     if (img_logits is not None and img_gt is not None
             and (img_valid is None or img_valid[i].bool())):
-        pred_2d = img_logits[i].detach().sigmoid().unsqueeze(0)
-        gt_2d = img_gt[i].float().unsqueeze(0)
-        iou_2d = calc.img_IoU(pred_2d, gt_2d, threshold=threshold_2d)
-        record["giou_2d"] = round(iou_2d[0].item(), 6)
-        inter_2d, union_2d = calc.img_I_and_U(pred_2d, gt_2d, threshold=threshold_2d)
-        record["inter_2d"] = round(inter_2d[0].item(), 6)
-        record["union_2d"] = round(union_2d[0].item(), 6)
-        p_thresholds = torch.arange(0.5, 0.96, 0.05, device=pred_2d.device)
-        p_values = calc.img_P_at_IoU_thresholds(iou_2d, p_thresholds)
-        record["p50_2d"] = round(p_values[0].item(), 6)
-        record["p50_95_2d"] = round(p_values.mean().item(), 6)
-        record["kld_2d"] = round(calc.img_KLD(pred_2d, gt_2d)[0].item(), 6)
-        record["sim_2d"] = round(calc.img_SIM(pred_2d, gt_2d)[0].item(), 6)
-        record["nss_2d"] = round(calc.img_NSS(pred_2d, gt_2d)[0].item(), 6)
+        aligned_logits_2d, aligned_gt_2d = calc._align_ordered_query_masks(
+            img_logits[i : i + 1].detach(),
+            img_gt[i : i + 1],
+            sample_valid_mask=None,
+            gt_valid_mask=None if input_dict.get("img_gt_valid_mask") is None else input_dict.get("img_gt_valid_mask")[i : i + 1],
+        )
+        if aligned_logits_2d is not None:
+            pred_2d = aligned_logits_2d.sigmoid()
+            gt_2d = aligned_gt_2d.float()
+            iou_2d = calc.img_IoU(pred_2d, gt_2d, threshold=threshold_2d)
+            record["giou_2d"] = round(iou_2d[0].item(), 6)
+            inter_2d, union_2d = calc.img_I_and_U(pred_2d, gt_2d, threshold=threshold_2d)
+            record["inter_2d"] = round(inter_2d[0].item(), 6)
+            record["union_2d"] = round(union_2d[0].item(), 6)
+            p_thresholds = torch.arange(0.5, 0.96, 0.05, device=pred_2d.device)
+            p_values = calc.img_P_at_IoU_thresholds(iou_2d, p_thresholds)
+            record["p50_2d"] = round(p_values[0].item(), 6)
+            record["p50_95_2d"] = round(p_values.mean().item(), 6)
+            record["kld_2d"] = round(calc.img_KLD(pred_2d, gt_2d)[0].item(), 6)
+            record["sim_2d"] = round(calc.img_SIM(pred_2d, gt_2d)[0].item(), 6)
+            record["nss_2d"] = round(calc.img_NSS(pred_2d, gt_2d)[0].item(), 6)
+        else:
+            record["giou_2d"] = None
+            record["inter_2d"] = None
+            record["union_2d"] = None
+            record["p50_2d"] = None
+            record["p50_95_2d"] = None
+            record["kld_2d"] = None
+            record["sim_2d"] = None
+            record["nss_2d"] = None
     else:
         record["giou_2d"] = None
         record["inter_2d"] = None
@@ -205,14 +224,26 @@ def compute_sample_metrics(
     pc_valid = input_dict.get("pc_valid_lengths")
     if (pt_logits is not None and pc_gt is not None
             and (pc_valid is None or pc_valid[i] > 0)):
-        pred_3d = pt_logits[i].detach().sigmoid().unsqueeze(0)
-        gt_3d = pc_gt[i].float().unsqueeze(0)
-        record["iou_3d"] = round(calc.pc_aIOU(pred_3d, gt_3d, num_thresholds=20).item(), 6)
-        record["mae_3d"] = round(calc.pc_MAE(pred_3d, gt_3d).item(), 6)
-        record["sim_3d"] = round(calc.pc_SIM(pred_3d, gt_3d)[0].item(), 6)
-        try:
-            record["auc_3d"] = round(calc.pc_AUC(pred_3d, gt_3d, num_thresholds=50).item(), 6)
-        except Exception:
+        aligned_logits_3d, aligned_gt_3d = calc._align_ordered_query_masks(
+            pt_logits[i : i + 1].detach(),
+            pc_gt[i : i + 1],
+            sample_valid_mask=None,
+            gt_valid_mask=None if input_dict.get("pc_gt_valid_mask") is None else input_dict.get("pc_gt_valid_mask")[i : i + 1],
+        )
+        if aligned_logits_3d is not None:
+            pred_3d = aligned_logits_3d.sigmoid()
+            gt_3d = aligned_gt_3d.float()
+            record["iou_3d"] = round(calc.pc_aIOU(pred_3d, gt_3d, num_thresholds=20).item(), 6)
+            record["mae_3d"] = round(calc.pc_MAE(pred_3d, gt_3d).item(), 6)
+            record["sim_3d"] = round(calc.pc_SIM(pred_3d, gt_3d)[0].item(), 6)
+            try:
+                record["auc_3d"] = round(calc.pc_AUC(pred_3d, gt_3d, gt_threshold=threshold_3d).item(), 6)
+            except Exception:
+                record["auc_3d"] = None
+        else:
+            record["iou_3d"] = None
+            record["mae_3d"] = None
+            record["sim_3d"] = None
             record["auc_3d"] = None
     else:
         record["iou_3d"] = None

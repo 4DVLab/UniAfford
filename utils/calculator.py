@@ -1,6 +1,8 @@
 import torch
 import torch.nn.functional as F
 from typing import Dict, Tuple, Optional, List
+import numpy as np
+from sklearn.metrics import roc_auc_score
 
 """
 默认输入形状：
@@ -8,6 +10,70 @@ from typing import Dict, Tuple, Optional, List
     pc_pred/gt.shape = [Batch, num_points]
 """
 IGNORE_INDEX = -100
+
+
+def _align_ordered_query_masks(
+    pred_masks: torch.Tensor,
+    gt_masks: torch.Tensor,
+    sample_valid_mask: Optional[torch.Tensor] = None,
+    gt_valid_mask: Optional[torch.Tensor] = None,
+) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """
+    将 token 级预测按 GT 数量做顺序对齐。
+
+    支持旧形状 [B, ...]，也支持新形状 pred=[B, K, ...] / gt=[B, M, ...]。
+    无 GT query 维时默认每个有效样本只有 1 个 GT，只监督 pred[:, 0]。
+    """
+    if pred_masks is None or gt_masks is None:
+        return None, None
+    gt_masks = gt_masks.to(pred_masks.dtype)
+
+    pred_has_query_dim = pred_masks.dim() == gt_masks.dim() + 1
+    both_have_query_dim = (
+        pred_masks.dim() == gt_masks.dim()
+        and pred_masks.dim() >= 3
+        and pred_masks.shape[0] == gt_masks.shape[0]
+        and pred_masks.shape[2:] == gt_masks.shape[2:]
+        and (pred_masks.shape != gt_masks.shape or gt_valid_mask is not None)
+    )
+    if not pred_has_query_dim and not both_have_query_dim:
+        if pred_masks.shape != gt_masks.shape:
+            raise ValueError(
+                f"pred/gt shape mismatch: pred={tuple(pred_masks.shape)}, gt={tuple(gt_masks.shape)}"
+            )
+        valid = torch.ones(pred_masks.shape[0], dtype=torch.bool, device=pred_masks.device)
+        if sample_valid_mask is not None:
+            valid = valid & sample_valid_mask.bool().to(pred_masks.device)
+        if not valid.any():
+            return None, None
+        return pred_masks[valid], gt_masks[valid]
+
+    if pred_has_query_dim:
+        if pred_masks.shape[0] != gt_masks.shape[0] or pred_masks.shape[2:] != gt_masks.shape[1:]:
+            raise ValueError(
+                f"pred/gt spatial shape mismatch: pred={tuple(pred_masks.shape)}, gt={tuple(gt_masks.shape)}"
+            )
+        gt_masks = gt_masks.unsqueeze(1)
+    elif pred_masks.shape[0] != gt_masks.shape[0] or pred_masks.shape[2:] != gt_masks.shape[2:]:
+        raise ValueError(
+            f"pred/gt spatial shape mismatch: pred={tuple(pred_masks.shape)}, gt={tuple(gt_masks.shape)}"
+        )
+
+    max_pairs = min(pred_masks.shape[1], gt_masks.shape[1])
+    if max_pairs <= 0:
+        return None, None
+    pred_masks = pred_masks[:, :max_pairs]
+    gt_masks = gt_masks[:, :max_pairs]
+
+    valid = torch.ones(pred_masks.shape[:2], dtype=torch.bool, device=pred_masks.device)
+    if sample_valid_mask is not None:
+        valid = valid & sample_valid_mask.bool().to(pred_masks.device).unsqueeze(1)
+    if gt_valid_mask is not None:
+        valid = valid & gt_valid_mask.bool().to(pred_masks.device)[:, :max_pairs]
+    if not valid.any():
+        return None, None
+
+    return pred_masks[valid], gt_masks[valid]
 
 """ -------------------------------------- 辅助函数 ------------------------------------- """
 # Blue Archwve I and you ~ QAQ
@@ -421,14 +487,23 @@ def compute_losses(
     img_logits = output_dict.get("image_logits")
     img_gt = input_dict.get("img_gt_tensor")
     if img_logits is not None and img_gt is not None:
-        img_focal, img_dice, img_total = img_loss(
+        aligned_img_logits, aligned_img_gt = _align_ordered_query_masks(
             pred_masks=img_logits,
             gt_masks=img_gt,
-            focal_loss_weight=focal_loss_weight,
-            dice_loss_weight=dice_loss_weight,
-            focal_alpha=focal_alpha,
-            focal_gamma=focal_gamma,
+            sample_valid_mask=input_dict.get("img_valid_mask"),
+            gt_valid_mask=input_dict.get("img_gt_valid_mask"),
         )
+        if aligned_img_logits is not None:
+            img_focal, img_dice, img_total = img_loss(
+                pred_masks=aligned_img_logits,
+                gt_masks=aligned_img_gt,
+                focal_loss_weight=focal_loss_weight,
+                dice_loss_weight=dice_loss_weight,
+                focal_alpha=focal_alpha,
+                focal_gamma=focal_gamma,
+            )
+        else:
+            img_focal = img_dice = img_total = zero
     else:
         img_focal = img_dice = img_total = zero
 
@@ -436,12 +511,23 @@ def compute_losses(
     pc_logits = output_dict.get("point_logits")
     pc_gt = input_dict.get("pc_gt_tensor")
     if pc_logits is not None and pc_gt is not None:
-        pc_bce, pc_dice, pc_total = pc_loss(
-            pred_3d_masks=pc_logits,
-            gt_3d_masks=pc_gt,
-            bce_loss_weight=bce_loss_weight,
-            dice_loss_weight=pc_dice_w,
+        pc_valid_lengths = input_dict.get("pc_valid_lengths")
+        pc_sample_valid = None if pc_valid_lengths is None else pc_valid_lengths > 0
+        aligned_pc_logits, aligned_pc_gt = _align_ordered_query_masks(
+            pred_masks=pc_logits,
+            gt_masks=pc_gt,
+            sample_valid_mask=pc_sample_valid,
+            gt_valid_mask=input_dict.get("pc_gt_valid_mask"),
         )
+        if aligned_pc_logits is not None:
+            pc_bce, pc_dice, pc_total = pc_loss(
+                pred_3d_masks=aligned_pc_logits,
+                gt_3d_masks=aligned_pc_gt,
+                bce_loss_weight=bce_loss_weight,
+                dice_loss_weight=pc_dice_w,
+            )
+        else:
+            pc_bce = pc_dice = pc_total = zero
     else:
         pc_bce = pc_dice = pc_total = zero
 
@@ -510,64 +596,42 @@ def pc_MAE(pred_mask: torch.Tensor, gt_mask: torch.Tensor) -> torch.Tensor:
     Returns:
         mae: [Batch] 个样本的平均 MAE
     """
-    mae = torch.abs(pred_mask - gt_mask).flatten(1).mean(dim=1)  # [Batch]
-    return mae.mean()
+    # GREAT: sum(abs(pred - label)) / total_points
+    return torch.abs(pred_mask - gt_mask).mean()
 
 
 def pc_AUC(
     pred_mask: torch.Tensor,
     gt_mask: torch.Tensor,
-    num_thresholds: int = 100
+    gt_threshold: float = 0.5,
 ) -> torch.Tensor:
     """
-    批量计算3D ROC曲线下面积（AUC）
+    批量计算3D ROC曲线下面积（AUC），与 GREAT 对齐使用 sklearn.metrics.roc_auc_score。
     Args:
-        num_thresholds: 阈值数量
+        num_thresholds: 保留参数以兼容旧调用；sklearn 实现不使用手动阈值扫描。
     Returns:
         auc: [Batch] 个样本的平均 AUC
     """
-    batch_size = pred_mask.shape[0]
-    pred_flat = pred_mask.flatten(1)  # [Batch, N]
-    gt_flat = gt_mask.flatten(1).bool()  # [Batch, N]
-    
-    thresholds = torch.linspace(0, 1, num_thresholds, device=pred_mask.device)
-    
+    device = pred_mask.device
+    dtype = pred_mask.dtype
+
+    pred_np = pred_mask.detach().flatten(1).cpu().numpy()
+    # GREAT: targets = targets >= 0.5; targets = targets.astype(int)
+    gt_np = (gt_mask.detach().flatten(1).cpu().numpy() >= gt_threshold).astype(np.int32)
+
     auc_list = []
-    for b in range(batch_size):
-        pred_b = pred_flat[b]  # [N]
-        gt_b = gt_flat[b]  # [N]
-        
-        gt_positive = gt_b.sum().float()
-        gt_negative = (~gt_b).sum().float()
-        
-        if gt_positive == 0 or gt_negative == 0:
-            auc_list.append(torch.tensor(0.0, device=pred_mask.device))
+    for pred_b, gt_b in zip(pred_np, gt_np):
+        # roc_auc_score requires both positive and negative labels.
+        if gt_b.max() == gt_b.min():
+            auc_list.append(np.nan)
             continue
-        
-        tpr_list = []
-        fpr_list = []
-        
-        for threshold in thresholds:
-            pred_positive = pred_b >= threshold
-            tp = (pred_positive & gt_b).sum().float()
-            fp = (pred_positive & ~gt_b).sum().float()
-            
-            tpr = tp / (gt_positive + 1e-8)
-            fpr = fp / (gt_negative + 1e-8)
-            
-            tpr_list.append(tpr)
-            fpr_list.append(fpr)
-        
-        tpr_tensor = torch.stack(tpr_list)
-        fpr_tensor = torch.stack(fpr_list)
-        sorted_indices = torch.argsort(fpr_tensor)
-        fpr_sorted = fpr_tensor[sorted_indices]
-        tpr_sorted = tpr_tensor[sorted_indices]
-        
-        auc = torch.trapz(tpr_sorted, fpr_sorted)
-        auc_list.append(auc)
-    
-    return torch.stack(auc_list).mean()
+        auc_list.append(roc_auc_score(gt_b, pred_b))
+
+    if len(auc_list) == 0 or np.all(np.isnan(auc_list)):
+        auc = 0.0
+    else:
+        auc = float(np.nanmean(auc_list))
+    return torch.tensor(auc, device=device, dtype=dtype)
 
 
 def pc_aIOU(
@@ -584,7 +648,8 @@ def pc_aIOU(
     """
     batch_size = pred_mask.shape[0]
     pred_flat = pred_mask.flatten(1)  # [Batch, N]
-    gt_flat = gt_mask.flatten(1).bool()  # [Batch, N]
+    # GREAT: targets are binarized with >= 0.5 before IoU/AUC.
+    gt_flat = gt_mask.flatten(1) >= 0.5  # [Batch, N]
     
     thresholds = torch.linspace(0, 1, num_thresholds, device=pred_mask.device)
     
@@ -607,7 +672,7 @@ def pc_aIOU(
     return torch.stack(aiou_list).mean()
 
 
-def pc_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
+def pc_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
     """
     批量计算点云预测的相似度（SIM / Histogram Intersection Similarity）。
 
@@ -649,7 +714,7 @@ def pc_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.
         iou: [Batch] 每个样本的IoU
     """
     pred_flat = pred_mask.flatten(1)  # [Batch, N]
-    gt_flat = gt_mask.flatten(1).bool()  # [Batch, N]
+    gt_flat = gt_mask.flatten(1) >= 0.5  # [Batch, N]
     
     pred_bool = pred_flat >= threshold  # [Batch, N]
     
@@ -797,15 +862,16 @@ def img_batch_metrics(
     if image_logits is None or img_gt is None:
         return {}
 
-    preds_2d = image_logits.detach().sigmoid()
-    target_2d = img_gt.float()
-    img_valid = input_dict.get("img_valid_mask")
-    if img_valid is not None:
-        valid = img_valid.bool()
-        if not valid.any():
-            return {}
-        preds_2d = preds_2d[valid]
-        target_2d = target_2d[valid]
+    aligned_logits, aligned_gt = _align_ordered_query_masks(
+        pred_masks=image_logits.detach(),
+        gt_masks=img_gt,
+        sample_valid_mask=input_dict.get("img_valid_mask"),
+        gt_valid_mask=input_dict.get("img_gt_valid_mask"),
+    )
+    if aligned_logits is None:
+        return {}
+    preds_2d = aligned_logits.sigmoid()
+    target_2d = aligned_gt.float()
 
     inter_2d, union_2d = img_I_and_U(preds_2d, target_2d, threshold=threshold)
     total_union = union_2d.sum()
