@@ -84,6 +84,18 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=None, help="每卡训练 batch size（同时覆写 val_batch_size）")
     parser.add_argument("--epochs", type=int, default=None, help="训练总 epoch 数")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
+    parser.add_argument(
+        "--val_split_file",
+        type=str,
+        default=None,
+        help="验证集分割 JSON 路径；不传时使用 dataset_dir/val.json。仅指定该文件时，默认从文件所在目录加载验证集原数据",
+    )
+    parser.add_argument(
+        "--val_dataset_dir",
+        type=str,
+        default=None,
+        help="验证集原数据根目录；不传时由 val_split_file 所在目录推导，未指定 val_split_file 时跟随 dataset_dir",
+    )
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
     return parser.parse_known_args()[0]
@@ -408,6 +420,9 @@ def main():
         training_configs.dataset_dir = args.dataset_dir
     if args.log_dir:
         training_configs.log_dir = args.log_dir
+    train_dataset_root = os.path.abspath(training_configs.dataset_dir)
+    train_split_file = "train.json"
+    val_dataset_root = os.path.abspath(args.val_dataset_dir) if args.val_dataset_dir else None
 
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
@@ -471,8 +486,19 @@ def main():
     logger.info("加载数据集...")
     data_objects = [None, None]
     if local_rank == 0:
-        train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json').load_all_data()
-        val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json').load_all_data()
+        train_data = JointDataset(dataset_root=train_dataset_root, split_file=train_split_file).load_all_data()
+        if args.val_split_file:
+            val_data = JointDataset(
+                dataset_root=val_dataset_root,
+                split_file_path=args.val_split_file,
+            ).load_all_data()
+        else:
+            val_data = JointDataset(
+                dataset_root=val_dataset_root or train_dataset_root,
+                split_file="val.json",
+            ).load_all_data()
+        logger.info(f"训练集路径: root={train_data.dataset_root}, split={train_data.split_file}")
+        logger.info(f"验证集路径: root={val_data.dataset_root}, split={val_data.split_file}")
         data_objects = [train_data.samples, val_data.samples]
         logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
     dist.broadcast_object_list(data_objects, src=0)

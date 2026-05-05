@@ -85,6 +85,18 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=None, help="每卡训练 batch size（同时覆写 val_batch_size）")
     parser.add_argument("--epochs", type=int, default=None, help="训练总 epoch 数")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
+    parser.add_argument(
+        "--train_json_path",
+        type=str,
+        default=None,
+        help="训练集分割 JSON 路径；不传时使用 dataset_dir/train.json，并默认从 JSON 同目录加载原数据",
+    )
+    parser.add_argument(
+        "--val_json_path",
+        type=str,
+        default=None,
+        help="验证集分割 JSON 路径；不传时使用 dataset_dir/val.json，并默认从 JSON 同目录加载原数据",
+    )
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
     parser.add_argument("--fixed_save_interval", type=int, default=100, help="固定长周期保存 checkpoint 的间隔，用于保存收敛状态。")
@@ -426,6 +438,8 @@ def main():
         training_configs.log_dir = args.log_dir
     if args.update_epoch is not None:
         training_configs.update_epoch = max(1, int(args.update_epoch))
+    train_json_path = args.train_json_path or os.path.join(training_configs.dataset_dir, "train.json")
+    val_json_path = args.val_json_path or os.path.join(training_configs.dataset_dir, "val.json")
 
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
@@ -444,11 +458,13 @@ def main():
     logger.info("加载数据集...")
     if args.lazy_load:
         # 懒加载模式：各 rank 仅构建轻量索引（不广播 dataset/samples 大对象）
-        train_samples = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json', lazy_load=True)
-        val_samples = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json', lazy_load=True)
+        train_samples = JointDataset(split_file_path=train_json_path, lazy_load=True)
+        val_samples = JointDataset(split_file_path=val_json_path, lazy_load=True)
 
         token_obj = [None]
         if local_rank == 0:
+            logger.info(f"训练集路径: root={train_samples.dataset_root}, split={train_samples.split_file}")
+            logger.info(f"验证集路径: root={val_samples.dataset_root}, split={val_samples.split_file}")
             merged_ids = {"ins": {}, "img": {}, "pc": {}}
             for mod_key in ("ins", "img", "pc"):
                 for ds in (train_samples, val_samples):
@@ -465,8 +481,10 @@ def main():
     else:
         data_objects = [None, None, None]
         if local_rank == 0:
-            train_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='train.json', lazy_load=False).load_all_data()
-            val_data = JointDataset(dataset_root=training_configs.dataset_dir, split_file='val.json', lazy_load=False).load_all_data()
+            train_data = JointDataset(split_file_path=train_json_path, lazy_load=False).load_all_data()
+            val_data = JointDataset(split_file_path=val_json_path, lazy_load=False).load_all_data()
+            logger.info(f"训练集路径: root={train_data.dataset_root}, split={train_data.split_file}")
+            logger.info(f"验证集路径: root={val_data.dataset_root}, split={val_data.split_file}")
             train_payload = train_data.samples
             val_payload = val_data.samples
             pair_token_map = build_functional_tokens_from_samples(train_payload + val_payload)

@@ -1471,36 +1471,44 @@ class JointDataset:
     """聚合 Instruction、Image、PointCloud 三元组的数据集类。作为 train/val/test 子集使用时，通过 split_file 指定分割 JSON 文件名独立加载。"""
 
     def __init__(self,
-                 dataset_root: str,
+                 dataset_root: Optional[str] = None,
                  sample_ids=None,
                  obj_type: list[str] = None,
                  aff_type: list[str] = None,
                  keep_id: bool = True,
                  split_file: Optional[str] = None,
+                 split_file_path: Optional[str] = None,
                  lazy_load: bool = False):
         """
         初始化数据集。
 
         Args:
-            dataset_root: 数据集根目录
+            dataset_root: 数据集根目录。若传入 split_file_path 且该参数为空，则默认使用 split 文件所在目录
             sample_ids: 可选，已有的样本 ID 结构；若为 None 且 split_file 指定，则从 split_file 加载
             obj_type: 需要加载的物体类型列表，None 时加载所有
             aff_type: 需要加载的 affordance 类型列表，None 时加载所有
             keep_id: 是否保持原有的 id
             split_file: 分割 JSON 文件名，如 'train.json'、'val.json'、'test.json'。指定时从该文件加载 sample_ids 并自动执行 load_all_data
+            split_file_path: 分割 JSON 文件路径。指定时优先从该路径读取；dataset_root 为空时默认从同目录查找原数据
             lazy_load: 是否启用懒加载。True 时 __getitem__ 按需从硬盘读取；False 时配合 load_all_data 从内存读取
         """
+        split_path = self._resolve_split_file_path(dataset_root, split_file_path, split_file)
+        if dataset_root is None:
+            if split_path is None:
+                raise ValueError("dataset_root 不能为空，除非指定 split_file_path")
+            dataset_root = os.path.dirname(split_path)
+
         self.dataset_root = os.path.abspath(dataset_root)
         self.obj_type = obj_type
         self.aff_type = aff_type
         self.keep_id = keep_id
-        self.split_file = split_file
+        self.split_file_path = split_path
+        self.split_file = self._path_for_dataset_split(split_path, self.dataset_root) if split_path else split_file
         self.lazy_load = lazy_load
 
         if sample_ids is not None:
             self.sample_ids = sample_ids
-        elif split_file is not None:
-            split_path = os.path.join(self.dataset_root, split_file)
+        elif split_path is not None:
             if os.path.exists(split_path):
                 self.sample_ids = JointDataset.load_ids_from_split_file(split_path)
             else:
@@ -1513,6 +1521,35 @@ class JointDataset:
         self._instruction_cache: Dict[str, Dict[int, Dict[str, Any]]] = {}
         if self.lazy_load:
             self._lazy_sample_index = self._build_lazy_sample_index()
+
+    @staticmethod
+    def _path_for_dataset_split(split_abs_path: str, dataset_root: str) -> str:
+        """优先将 split 路径转成相对 dataset_root 的路径，便于记录与复用。"""
+        split_abs_path = os.path.abspath(split_abs_path)
+        dataset_root = os.path.abspath(dataset_root)
+        try:
+            if os.path.commonpath([split_abs_path, dataset_root]) == dataset_root:
+                return os.path.relpath(split_abs_path, dataset_root)
+        except ValueError:
+            pass
+        return split_abs_path
+
+    @staticmethod
+    def _resolve_split_file_path(
+        dataset_root: Optional[str],
+        split_file_path: Optional[str],
+        split_file: Optional[str],
+    ) -> Optional[str]:
+        if split_file_path:
+            if os.path.isabs(split_file_path):
+                return os.path.abspath(split_file_path)
+            if os.path.dirname(split_file_path):
+                return os.path.abspath(split_file_path)
+            base = os.path.abspath(dataset_root) if dataset_root else os.getcwd()
+            return os.path.abspath(os.path.join(base, split_file_path))
+        if split_file and dataset_root:
+            return os.path.abspath(os.path.join(dataset_root, split_file))
+        return None
 
     @staticmethod
     def _entry_primary_id(entry):
