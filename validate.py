@@ -72,6 +72,10 @@ def parse_args():
                         help="2D 预测概率二值化阈值覆盖项（默认使用 TrainingConfig）")
     parser.add_argument("--mask_threshold_3d", type=float, default=None,
                         help="3D 预测概率二值化阈值覆盖项（默认使用 TrainingConfig）")
+    parser.add_argument("--gt_threshold_2d", type=float, default=None,
+                        help="2D GT 二值化阈值覆盖项，用于对齐不同 benchmark（默认使用 TrainingConfig）")
+    parser.add_argument("--gt_threshold_3d", type=float, default=None,
+                        help="3D GT 二值化阈值覆盖项，用于对齐不同 benchmark（默认使用 TrainingConfig）")
     parser.add_argument("--qwen_model", type=str, default=None,
                         help="Qwen 模型路径或名称（覆盖 TrainingConfig.model_config.mllm）")
     parser.add_argument("--vision_pretrained", type=str, default=None,
@@ -489,6 +493,10 @@ def main():
         training_cfg.mask_threshold_2d = float(infer_cfg.mask_threshold_2d)
     if infer_cfg.mask_threshold_3d is not None:
         training_cfg.mask_threshold_3d = float(infer_cfg.mask_threshold_3d)
+    if args.gt_threshold_2d is not None:
+        training_cfg.gt_threshold_2d = float(args.gt_threshold_2d)
+    if args.gt_threshold_3d is not None:
+        training_cfg.gt_threshold_3d = float(args.gt_threshold_3d)
 
     device = torch.device(infer_cfg.device if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}\n")
