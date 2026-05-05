@@ -194,8 +194,17 @@ class TrainingConfig(Configs):
         "warmup_type": "linear",
         # 其他配置
         "num_classes_per_sample": 3,
+        # 预测概率图二值化阈值（可由验证集自动搜索后写回 training_config.json）
         "mask_threshold_2d": 0.5,
         "mask_threshold_3d": 0.5,
+        # GT 二值化阈值：用于对齐不同 benchmark/zero-shot setting，不应由验证集自动修改
+        "gt_threshold_2d": 0.5,
+        "gt_threshold_3d": 0.5,
+        # 验证集搜索预测阈值的候选范围
+        "auto_select_mask_threshold": True,
+        "threshold_search_min": 0.05,
+        "threshold_search_max": 0.95,
+        "threshold_search_step": 0.05,
         "gradient_checkpointing": True,
         # 损失配置
         "focal_loss_weight": 2.0,

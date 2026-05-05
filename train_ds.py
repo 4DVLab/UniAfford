@@ -170,7 +170,7 @@ def train_one_epoch(
     model_engine.train()
     metrics = build_torchmetrics_bundle(
         device=model_engine.device,
-        threshold_2d=max(config.mask_threshold_2d, 0.5),
+        threshold_2d=config.mask_threshold_2d,
         threshold_3d=config.mask_threshold_3d,
     )
 
@@ -194,7 +194,13 @@ def train_one_epoch(
         global_step += 1
 
         # 一站式更新全部指标
-        update_torchmetrics(metrics, loss_dict, output_dict, input_dict, config.batch_size)
+        update_torchmetrics(
+            metrics, loss_dict, output_dict, input_dict, config.batch_size,
+            threshold_2d=config.mask_threshold_2d,
+            threshold_3d=config.mask_threshold_3d,
+            gt_threshold_2d=getattr(config, "gt_threshold_2d", 0.5),
+            gt_threshold_3d=getattr(config, "gt_threshold_3d", 0.5),
+        )
 
         # 定期打印批次进度
         if (batch_idx + 1) % config.print_freq == 0 or (batch_idx + 1) == len(train_loader):
@@ -213,7 +219,8 @@ def train_one_epoch(
                     calc.img_batch_metrics(
                         output_dict,
                         input_dict,
-                        threshold=max(config.mask_threshold_2d, 0.5),
+                        threshold=config.mask_threshold_2d,
+                        gt_threshold=getattr(config, "gt_threshold_2d", 0.5),
                     )
                 )
                 if lr is not None:
@@ -237,6 +244,97 @@ def train_one_epoch(
     return global_step, train_results
 
 
+def _build_threshold_candidates(config, device: torch.device) -> torch.Tensor:
+    """构建验证集预测阈值搜索候选；GT 阈值不参与自动搜索。"""
+    start = float(getattr(config, "threshold_search_min", 0.05))
+    end = float(getattr(config, "threshold_search_max", 0.95))
+    step = float(getattr(config, "threshold_search_step", 0.05))
+    if step <= 0:
+        step = 0.05
+    if end < start:
+        start, end = end, start
+    count = int(round((end - start) / step)) + 1
+    values = start + torch.arange(count, device=device, dtype=torch.float32) * step
+    return values.clamp(0.0, 1.0).unique(sorted=True)
+
+
+def _init_threshold_search_stats(thresholds: torch.Tensor) -> Dict[str, torch.Tensor]:
+    zeros = torch.zeros_like(thresholds, dtype=torch.float32)
+    return {
+        "thresholds": thresholds,
+        "sum_iou_2d": zeros.clone(),
+        "count_2d": torch.zeros((), device=thresholds.device, dtype=torch.float32),
+        "sum_iou_3d": zeros.clone(),
+        "count_3d": torch.zeros((), device=thresholds.device, dtype=torch.float32),
+    }
+
+
+@torch.no_grad()
+def _update_threshold_search_stats(stats: Dict[str, torch.Tensor], output_dict: Dict, input_dict: Dict, config) -> None:
+    thresholds = stats["thresholds"]
+
+    image_logits = output_dict.get("image_logits")
+    img_gt = input_dict.get("img_gt_tensor")
+    if image_logits is not None and img_gt is not None:
+        aligned_logits, aligned_gt = calc._align_ordered_query_masks(
+            image_logits.detach(),
+            img_gt,
+            sample_valid_mask=input_dict.get("img_valid_mask"),
+            gt_valid_mask=input_dict.get("img_gt_valid_mask"),
+        )
+        if aligned_logits is not None:
+            preds = aligned_logits.sigmoid()
+            target = aligned_gt.float()
+            bs = preds.shape[0]
+            for idx, threshold in enumerate(thresholds):
+                iou = calc.img_IoU(
+                    preds, target,
+                    threshold=float(threshold.item()),
+                    gt_threshold=getattr(config, "gt_threshold_2d", 0.5),
+                )
+                stats["sum_iou_2d"][idx] += iou.sum()
+            stats["count_2d"] += bs
+
+    point_logits = output_dict.get("point_logits")
+    pc_gt = input_dict.get("pc_gt_tensor")
+    if point_logits is not None and pc_gt is not None:
+        valid_lengths = input_dict.get("pc_valid_lengths")
+        aligned_logits, aligned_gt = calc._align_ordered_query_masks(
+            point_logits.detach(),
+            pc_gt,
+            sample_valid_mask=None if valid_lengths is None else valid_lengths > 0,
+            gt_valid_mask=input_dict.get("pc_gt_valid_mask"),
+        )
+        if aligned_logits is not None:
+            preds = aligned_logits.sigmoid()
+            target = aligned_gt.float()
+            bs = preds.shape[0]
+            for idx, threshold in enumerate(thresholds):
+                iou = calc.pc_IoU(
+                    preds, target,
+                    threshold=float(threshold.item()),
+                    gt_threshold=getattr(config, "gt_threshold_3d", 0.5),
+                )
+                stats["sum_iou_3d"][idx] += iou.sum()
+            stats["count_3d"] += bs
+
+
+def _finalize_threshold_search(stats: Dict[str, torch.Tensor]) -> Dict[str, float]:
+    results = {}
+    thresholds = stats["thresholds"]
+    if stats["count_2d"].item() > 0:
+        mean_iou = stats["sum_iou_2d"] / stats["count_2d"].clamp_min(1.0)
+        best_idx = int(torch.argmax(mean_iou).item())
+        results["best_mask_threshold_2d"] = float(thresholds[best_idx].item())
+        results["best_giou_2d"] = float(mean_iou[best_idx].item())
+    if stats["count_3d"].item() > 0:
+        mean_iou = stats["sum_iou_3d"] / stats["count_3d"].clamp_min(1.0)
+        best_idx = int(torch.argmax(mean_iou).item())
+        results["best_mask_threshold_3d"] = float(thresholds[best_idx].item())
+        results["best_iou_3d"] = float(mean_iou[best_idx].item())
+    return results
+
+
 @torch.no_grad()
 def validate_one_epoch(
     val_loader, model_engine, config,
@@ -254,19 +352,42 @@ def validate_one_epoch(
     model_engine.eval()
     metrics = build_torchmetrics_bundle(
         device=model_engine.device,
-        threshold_2d=max(config.mask_threshold_2d, 0.5),
+        threshold_2d=config.mask_threshold_2d,
         threshold_3d=config.mask_threshold_3d,
     )
+    threshold_stats = None
+    if getattr(config, "auto_select_mask_threshold", True):
+        threshold_stats = _init_threshold_search_stats(
+            _build_threshold_candidates(config, model_engine.device)
+        )
 
     for val_dict in val_loader:
         val_dict = dict_to_cuda(val_dict, device=model_engine.device)
         val_output = model_engine(**val_dict)
         loss_dict = calc.compute_losses(val_output, val_dict, **loss_kwargs)
-        update_torchmetrics(metrics, loss_dict, val_output, val_dict, config.val_batch_size)
+        update_torchmetrics(
+            metrics, loss_dict, val_output, val_dict, config.val_batch_size,
+            threshold_2d=config.mask_threshold_2d,
+            threshold_3d=config.mask_threshold_3d,
+            gt_threshold_2d=getattr(config, "gt_threshold_2d", 0.5),
+            gt_threshold_3d=getattr(config, "gt_threshold_3d", 0.5),
+        )
+        if threshold_stats is not None:
+            _update_threshold_search_stats(threshold_stats, val_output, val_dict, config)
 
     val_results = compute_and_reset_torchmetrics(metrics)
+    if threshold_stats is not None:
+        val_results.update(_finalize_threshold_search(threshold_stats))
     if local_rank == 0:
         log_epoch_summary(logger, epoch + 1, config.epochs, "val", val_results)
+        if "best_mask_threshold_2d" in val_results or "best_mask_threshold_3d" in val_results:
+            logger.info(
+                "验证集最优预测阈值: "
+                f"2D={val_results.get('best_mask_threshold_2d', config.mask_threshold_2d):.4f} "
+                f"(gIoU={val_results.get('best_giou_2d', 0.0):.4f}), "
+                f"3D={val_results.get('best_mask_threshold_3d', config.mask_threshold_3d):.4f} "
+                f"(IoU={val_results.get('best_iou_3d', 0.0):.4f})"
+            )
         if writer is not None:
             log_scalar_dict(writer, "val_epoch", val_results, epoch + 1)
 
@@ -547,6 +668,23 @@ def main():
             val_loader, model_engine, training_configs, epoch, writer, logger, local_rank,
             loss_kwargs=loss_kwargs,
         )
+        # 将验证集搜索得到的预测二值化阈值写回配置；GT 阈值保持用户/benchmark 指定值不变。
+        if getattr(training_configs, "auto_select_mask_threshold", True):
+            updated_threshold = False
+            if "best_mask_threshold_2d" in val_results:
+                training_configs.mask_threshold_2d = float(val_results["best_mask_threshold_2d"])
+                updated_threshold = True
+            if "best_mask_threshold_3d" in val_results:
+                training_configs.mask_threshold_3d = float(val_results["best_mask_threshold_3d"])
+                updated_threshold = True
+            if updated_threshold and local_rank == 0:
+                training_configs.save_json(config_json_path, include_deepspeed=True)
+                logger.info(
+                    "已将验证集最优预测阈值写回配置: "
+                    f"mask_threshold_2d={training_configs.mask_threshold_2d:.4f}, "
+                    f"mask_threshold_3d={training_configs.mask_threshold_3d:.4f}, "
+                    f"path={config_json_path}"
+                )
         # 验证阶段 torchmetrics 会暂存 pred/target，结束后释放；此处统一释放碎片显存，为保存 checkpoint 腾出空间
         torch.cuda.empty_cache()
 

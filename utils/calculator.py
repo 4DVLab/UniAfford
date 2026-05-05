@@ -637,7 +637,8 @@ def pc_AUC(
 def pc_aIOU(
     pred_mask: torch.Tensor,
     gt_mask: torch.Tensor,
-    num_thresholds: int = 20
+    num_thresholds: int = 20,
+    gt_threshold: float = 0.5,
 ) -> torch.Tensor:
     """
     批量计算点云的多阈值平均IoU（aIoU）
@@ -649,7 +650,7 @@ def pc_aIOU(
     batch_size = pred_mask.shape[0]
     pred_flat = pred_mask.flatten(1)  # [Batch, N]
     # GREAT: targets are binarized with >= 0.5 before IoU/AUC.
-    gt_flat = gt_mask.flatten(1) >= 0.5  # [Batch, N]
+    gt_flat = gt_mask.flatten(1) >= gt_threshold  # [Batch, N]
     
     thresholds = torch.linspace(0, 1, num_thresholds, device=pred_mask.device)
     
@@ -701,7 +702,12 @@ def pc_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-12) -
     return sim
 
 
-def pc_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+def pc_IoU(
+    pred_mask: torch.Tensor,
+    gt_mask: torch.Tensor,
+    threshold: float = 0.5,
+    gt_threshold: float = 0.5,
+) -> torch.Tensor:
     """
     批量计算点云IoU
     
@@ -714,7 +720,7 @@ def pc_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.
         iou: [Batch] 每个样本的IoU
     """
     pred_flat = pred_mask.flatten(1)  # [Batch, N]
-    gt_flat = gt_mask.flatten(1) >= 0.5  # [Batch, N]
+    gt_flat = gt_mask.flatten(1) >= gt_threshold  # [Batch, N]
     
     pred_bool = pred_flat >= threshold  # [Batch, N]
     
@@ -728,7 +734,10 @@ def pc_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.
 """ -------------------------------------- 2D 评估指标 ------------------------------------- """
 
 def img_I_and_U(
-    pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.5,
+    pred_mask: torch.Tensor,
+    gt_mask: torch.Tensor,
+    threshold: float = 0.5,
+    gt_threshold: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     批量计算 2D 图像的交集和并集（用于累积后计算 cIoU）。
@@ -741,14 +750,26 @@ def img_I_and_U(
         intersection: [Batch]
         union: [Batch]
     """
-    pred_bool = (pred_mask.flatten(1) >= threshold)
-    gt_bool = gt_mask.flatten(1).bool()
+    # Align with Affordance-R1 zero_shot.py:
+    # gt is first normalized to [0, 1], then image_binary(gt, threshold)
+    # and image_binary uses strict ">" rather than ">=".
+    gt_threshold = threshold if gt_threshold is None else gt_threshold
+    pred_bool = pred_mask.flatten(1) > threshold
+    gt_flat = gt_mask.flatten(1).float()
+    if gt_flat.numel() > 0 and gt_flat.max() > 1.0:
+        gt_flat = gt_flat / 255.0
+    gt_bool = gt_flat > gt_threshold
     intersection = (pred_bool & gt_bool).sum(dim=1).float()
     union = (pred_bool | gt_bool).sum(dim=1).float()
     return intersection, union
 
 
-def img_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0.5) -> torch.Tensor:
+def img_IoU(
+    pred_mask: torch.Tensor,
+    gt_mask: torch.Tensor,
+    threshold: float = 0.5,
+    gt_threshold: Optional[float] = None,
+) -> torch.Tensor:
     """
     批量计算 2D 图像 IoU（逐样本，gIoU = mean(img_IoU)）。
 
@@ -759,7 +780,7 @@ def img_IoU(pred_mask: torch.Tensor, gt_mask: torch.Tensor, threshold: float = 0
     Returns:
         iou: [Batch] 每个样本的 IoU
     """
-    intersection, union = img_I_and_U(pred_mask, gt_mask, threshold)
+    intersection, union = img_I_and_U(pred_mask, gt_mask, threshold, gt_threshold=gt_threshold)
     return intersection / (union + 1e-8)
 
 
@@ -850,6 +871,7 @@ def img_batch_metrics(
     output_dict: Dict,
     input_dict: Dict,
     threshold: float = 0.5,
+    gt_threshold: Optional[float] = None,
 ) -> Dict[str, float]:
     """
     从模型输出和 batch 输入中计算 2D 指标标量，用于训练过程日志记录。
@@ -873,9 +895,17 @@ def img_batch_metrics(
     preds_2d = aligned_logits.sigmoid()
     target_2d = aligned_gt.float()
 
-    inter_2d, union_2d = img_I_and_U(preds_2d, target_2d, threshold=threshold)
+    inter_2d, union_2d = img_I_and_U(
+        preds_2d, target_2d,
+        threshold=threshold,
+        gt_threshold=gt_threshold,
+    )
     total_union = union_2d.sum()
-    iou_2d = img_IoU(preds_2d, target_2d, threshold=threshold)
+    iou_2d = img_IoU(
+        preds_2d, target_2d,
+        threshold=threshold,
+        gt_threshold=gt_threshold,
+    )
     p_thresholds = img_P_at_IoU_thresholds(
         iou_2d,
         torch.arange(0.5, 0.96, 0.05, device=iou_2d.device),

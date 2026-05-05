@@ -9,7 +9,7 @@ from configs import base_config
 class InferenceConfig(base_config.Configs):
     defaults = {
         "device": "cuda",
-        "precision": "bf16",
+        "precision": "fp32",
         "image_size": 1024,
         "num_points": 2048,
         "batch_size": 1,
@@ -17,7 +17,7 @@ class InferenceConfig(base_config.Configs):
         "split": "test",
         "save_predictions": False,
         "output_dir": "./validation_output",
-        "mask_threshold_2d": 0.0,
+        "mask_threshold_2d": 0.5,
         "mask_threshold_3d": 0.5,
     }
 

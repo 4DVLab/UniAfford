@@ -163,7 +163,14 @@ def save_batch_predictions(
         if isinstance(masks, torch.Tensor):
             if masks.dim() == 2:
                 return masks[index] if masks.shape[0] > index else None
-            return masks[index] if masks.shape[0] > index else None
+            if masks.shape[0] <= index:
+                return None
+            mask = masks[index]
+            if key == "image_logits" and mask.dim() == 3:
+                return mask[0]
+            if key == "point_logits" and mask.dim() == 2:
+                return mask[0]
+            return mask
         return None
 
     def _normalize_mask(mask_tensor: torch.Tensor) -> torch.Tensor:
@@ -505,8 +512,10 @@ def main():
         route_target_present_count=getattr(training_cfg, "route_target_present_count", 1.0),
     )
 
-    threshold_2d = max(training_cfg.mask_threshold_2d, 0.5)
+    threshold_2d = training_cfg.mask_threshold_2d
     threshold_3d = training_cfg.mask_threshold_3d
+    gt_threshold_2d = getattr(training_cfg, "gt_threshold_2d", 0.5)
+    gt_threshold_3d = getattr(training_cfg, "gt_threshold_3d", 0.5)
 
     if infer_cfg.save_predictions and infer_cfg.output_dir:
         os.makedirs(infer_cfg.output_dir, exist_ok=True)
@@ -525,6 +534,7 @@ def main():
             update_torchmetrics(
                 metrics, loss_dict, output_dict, input_dict, infer_cfg.batch_size,
                 threshold_2d=threshold_2d, threshold_3d=threshold_3d,
+                gt_threshold_2d=gt_threshold_2d, gt_threshold_3d=gt_threshold_3d,
             )
 
             pred_token_ids_batch = output_dict.get("token_ids")
@@ -606,6 +616,7 @@ def main():
                 sample_metrics = compute_sample_metrics(
                     output_dict, input_dict, i,
                     threshold_2d=threshold_2d, threshold_3d=threshold_3d,
+                    gt_threshold_2d=gt_threshold_2d, gt_threshold_3d=gt_threshold_3d,
                 )
                 for mk in (
                     "giou_2d", "inter_2d", "union_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d",

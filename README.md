@@ -351,4 +351,51 @@ dataset_root/
 }
 ```
 
+## 评估指标与阈值约定
+
+本项目的评估输入统一遵循以下约定：
+
+- 模型输出的 `image_logits` 和 `point_logits` 都是 **logits**。
+- 计算指标前，日志与验证流程会先做 `sigmoid()`，得到 `[0, 1]` 概率图：
+  - `pred_2d = image_logits.sigmoid()`
+  - `pred_3d = point_logits.sigmoid()`
+- 因此，指标函数中的 threshold 都作用在 **sigmoid 后的概率** 上，而不是原始 logits。
+- 若想表达 “logit > 0”，等价概率阈值应写作 `threshold=0.5`，不是 `threshold=0.0`。
+
+### 2D 指标
+
+2D 预测输入为 `pred_2d = image_logits.sigmoid()`，形状 `[B, H, W]`；GT 输入为 `img_gt_tensor`，形状 `[B, H, W]`。IoU 类指标对齐 Affordance-R1：预测和 GT 都使用严格大于 `>` 二值化。默认情况下 `mask_threshold_2d=gt_threshold_2d=0.5`；其中 `mask_threshold_2d` 可由验证集自动搜索，`gt_threshold_2d` 用于对齐 benchmark/zero-shot setting，不自动修改。
+
+| 指标 | 实现函数 | 预测处理 | GT 处理 | 阈值/超参数 | 含义与方向 |
+|---|---|---|---|---|---|
+| `gIoU` | `img_IoU(pred_2d, gt_2d, threshold=mask_threshold_2d, gt_threshold=gt_threshold_2d)` | `pred_2d > mask_threshold_2d` 二值化 | 若 GT 最大值大于 1，先除以 255；然后 `gt_2d > gt_threshold_2d` | 默认 `mask_threshold_2d=0.5`, `gt_threshold_2d=0.5` | 逐样本 IoU 后取平均，越高越好 |
+| `cIoU` | `img_I_and_U(...)` 后 `sum(I)/sum(U)` | 同 `gIoU` | 同 `gIoU` | 默认 `threshold_2d=0.5` | 全测试集累计 IoU，越高越好 |
+| `P50` | `img_P_at_IoU_thresholds(iou_scores, [0.50])` | 先按 `threshold_2d` 得到 IoU | 同 `gIoU` | 命中条件 `IoU > 0.50` | IoU 超过 0.50 的样本比例，越高越好 |
+| `P50-95` | `img_P_at_IoU_thresholds(iou_scores, 0.50:0.05:0.95)` | 先按 `threshold_2d` 得到 IoU | 同 `gIoU` | IoU 命中阈值 `0.50,0.55,...,0.95` | 各 IoU 阈值命中率均值，越高越好 |
+| `KLD` | `img_KLD(pred_2d, gt_2d, eps=1e-12)` | 不二值化；L1 归一化 | 不二值化；L1 归一化 | `eps=1e-12` | `KL(gt || pred)`，越低越好 |
+| `SIM` | `img_SIM(pred_2d, gt_2d, eps=1e-12)` | 不二值化；L1 归一化 | 不二值化；L1 归一化 | `eps=1e-12` | 直方图交集 `sum(min(pred, gt))`，通常 `[0,1]`，越高越好 |
+| `NSS` | `img_NSS(pred_2d, gt_2d, fixation_threshold=0.1, eps=1e-8)` | 不二值化；z-score 标准化 | min-max 归一化后 `gt_norm > 0.1` 得到 fixation map | `fixation_threshold=0.1`, `eps=1e-8` | GT 区域在预测热力图中的标准化响应，越高越好 |
+
+> 注意：`P50/P50-95` 中的 `0.50~0.95` 是 **IoU 命中阈值**，不是预测 mask 的二值化阈值；预测二值化仍由 `threshold_2d` 控制。
+
+### 3D 指标
+
+3D 预测输入为 `pred_3d = point_logits.sigmoid()`，形状 `[B, N]`；GT 输入为 `pc_gt_tensor`，形状 `[B, N]`。当前 3D 指标实现对齐 GREAT。默认 `mask_threshold_3d=gt_threshold_3d=0.5`；其中 `mask_threshold_3d` 可由验证集自动搜索，`gt_threshold_3d` 不自动修改。
+
+| 指标 | 实现函数 | 预测处理 | GT 处理 | 阈值/超参数 | 含义与方向 |
+|---|---|---|---|---|---|
+| `AUC` | `pc_AUC(pred_3d, gt_3d)` | 不二值化，连续概率作为 score | `gt_3d >= 0.5` 二值化 | 使用 `sklearn.metrics.roc_auc_score`；单类别 GT 样本记为 `NaN` 并忽略 | ROC-AUC，越高越好 |
+| `aIOU` | `pc_aIOU(pred_3d, gt_3d, num_thresholds=20, gt_threshold=gt_threshold_3d)` | 多阈值二值化：`pred_3d >= threshold` | `gt_3d >= gt_threshold_3d` 二值化 | `thresholds = linspace(0, 1, 20)` | 20 个阈值 IoU 的均值，越高越好 |
+| `IoU` | `pc_IoU(pred_3d, gt_3d, threshold=mask_threshold_3d, gt_threshold=gt_threshold_3d)` | `pred_3d >= mask_threshold_3d` 二值化 | `gt_3d >= gt_threshold_3d` 二值化 | 默认 `mask_threshold_3d=0.5`, `gt_threshold_3d=0.5` | 单阈值 IoU，当前验证流程中的 `iou_3d`，越高越好 |
+| `MAE` | `pc_MAE(pred_3d, gt_3d)` | 不二值化 | 不二值化 | 无固定阈值 | `mean(abs(pred_3d - gt_3d))`，越低越好 |
+| `SIM` | `pc_SIM(pred_3d, gt_3d, eps=1e-12)` | 不二值化；L1 归一化 | 不二值化；L1 归一化 | `eps=1e-12` | GREAT 风格 histogram intersection，通常 `[0,1]`，越高越好 |
+
+### 阈值使用注意事项
+
+- `threshold=0.0` 不能用于 sigmoid 后概率图的 IoU 类指标；因为 `sigmoid(logits) > 0` 几乎恒成立，会导致预测全为前景。
+- 若需要使用 `logit > 0` 的语义，应在概率图上使用 `threshold=0.5`。
+- 若 benchmark 明确规定阈值，应按 benchmark 执行。
+- 若 benchmark 未规定阈值，可以在验证集上选择阈值，并固定用于测试集；不应根据测试集结果调阈值。
+- 训练时若 `auto_select_mask_threshold=True`，验证集会在 `threshold_search_min/max/step` 定义的候选集合上分别搜索 2D/3D 最优预测阈值，并写回 `checkpoints/training_config.json` 的 `mask_threshold_2d/3d`；`gt_threshold_2d/3d` 不会被自动改写。
+
 # Cite

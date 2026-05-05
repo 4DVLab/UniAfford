@@ -248,8 +248,10 @@ def train_one_epoch(
         # 指标更新
         update_torchmetrics(
             metrics, loss_dict, output_dict, input_dict, config.batch_size,
-            threshold_2d=max(config.mask_threshold_2d, 0.5),
+            threshold_2d=config.mask_threshold_2d,
             threshold_3d=config.mask_threshold_3d,
+            gt_threshold_2d=getattr(config, "gt_threshold_2d", 0.5),
+            gt_threshold_3d=getattr(config, "gt_threshold_3d", 0.5),
         )
 
         # 打印与 TensorBoard
@@ -287,7 +289,8 @@ def train_one_epoch(
                     calc.img_batch_metrics(
                         output_dict,
                         input_dict,
-                        threshold=max(config.mask_threshold_2d, 0.5),
+                        threshold=config.mask_threshold_2d,
+                        gt_threshold=getattr(config, "gt_threshold_2d", 0.5),
                     )
                 )
                 batch_log["ce_ignored_token_count"] = float(ignored_cnt)
@@ -339,8 +342,10 @@ def validate_one_epoch(
         loss_dict = calc.compute_losses(val_output, val_dict, **loss_kwargs)
         update_torchmetrics(
             metrics, loss_dict, val_output, val_dict, config.val_batch_size,
-            threshold_2d=max(config.mask_threshold_2d, 0.5),
+            threshold_2d=config.mask_threshold_2d,
             threshold_3d=config.mask_threshold_3d,
+            gt_threshold_2d=getattr(config, "gt_threshold_2d", 0.5),
+            gt_threshold_3d=getattr(config, "gt_threshold_3d", 0.5),
         )
 
     val_results = compute_and_reset_torchmetrics(metrics)

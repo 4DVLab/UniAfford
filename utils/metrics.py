@@ -67,6 +67,8 @@ def update_torchmetrics(
     batch_size: int = 1,
     threshold_2d: float = 0.5,
     threshold_3d: float = 0.5,
+    gt_threshold_2d: float = 0.5,
+    gt_threshold_3d: float = 0.5,
 ):
     """
     每 batch 更新所有指标。
@@ -100,9 +102,17 @@ def update_torchmetrics(
             target_2d = aligned_gt_2d.float()
         if preds_2d is not None:
             bs_2d = preds_2d.shape[0]
-            iou_2d = calc.img_IoU(preds_2d, target_2d, threshold=threshold_2d)  # [B']
+            iou_2d = calc.img_IoU(
+                preds_2d, target_2d,
+                threshold=threshold_2d,
+                gt_threshold=gt_threshold_2d,
+            )  # [B']
             metrics["giou_2d"].update(iou_2d.mean().item(), weight=bs_2d)
-            inter_2d, union_2d = calc.img_I_and_U(preds_2d, target_2d, threshold=threshold_2d)
+            inter_2d, union_2d = calc.img_I_and_U(
+                preds_2d, target_2d,
+                threshold=threshold_2d,
+                gt_threshold=gt_threshold_2d,
+            )
             metrics["_ciou_2d_intersection"].update(inter_2d.sum().item())
             metrics["_ciou_2d_union"].update(union_2d.sum().item())
             p_thresholds = calc.img_P_at_IoU_thresholds(
@@ -132,15 +142,19 @@ def update_torchmetrics(
         target_3d = aligned_gt_3d.float()
         bs = preds_3d.shape[0]
 
-        # 使用多阈值平均 IoU（aIoU-20）作为 3D IoU 指标
-        iou_3d = calc.pc_aIOU(preds_3d, target_3d, num_thresholds=20)
+        # 使用可配置预测阈值的单阈值 IoU；aIOU 可在单独评估脚本中计算
+        iou_3d = calc.pc_IoU(
+            preds_3d, target_3d,
+            threshold=threshold_3d,
+            gt_threshold=gt_threshold_3d,
+        ).mean()
         metrics["iou_3d"].update(iou_3d.item(), weight=bs)
 
         mae_3d = calc.pc_MAE(preds_3d, target_3d)
         metrics["mae_3d"].update(mae_3d.item(), weight=bs)
 
         try:
-            auc_3d = calc.pc_AUC(preds_3d, target_3d, gt_threshold=threshold_3d)
+            auc_3d = calc.pc_AUC(preds_3d, target_3d, gt_threshold=gt_threshold_3d)
             metrics["auc_3d"].update(auc_3d.item(), weight=bs)
         except Exception:
             pass
@@ -155,6 +169,8 @@ def compute_sample_metrics(
     sample_idx: int,
     threshold_2d: float = 0.5,
     threshold_3d: float = 0.5,
+    gt_threshold_2d: float = 0.5,
+    gt_threshold_3d: float = 0.5,
 ) -> Dict[str, float]:
     """
     计算单个样本的 2D/3D 指标（供 validate.py 逐样本记录使用）。
@@ -187,9 +203,17 @@ def compute_sample_metrics(
         if aligned_logits_2d is not None:
             pred_2d = aligned_logits_2d.sigmoid()
             gt_2d = aligned_gt_2d.float()
-            iou_2d = calc.img_IoU(pred_2d, gt_2d, threshold=threshold_2d)
+            iou_2d = calc.img_IoU(
+                pred_2d, gt_2d,
+                threshold=threshold_2d,
+                gt_threshold=gt_threshold_2d,
+            )
             record["giou_2d"] = round(iou_2d[0].item(), 6)
-            inter_2d, union_2d = calc.img_I_and_U(pred_2d, gt_2d, threshold=threshold_2d)
+            inter_2d, union_2d = calc.img_I_and_U(
+                pred_2d, gt_2d,
+                threshold=threshold_2d,
+                gt_threshold=gt_threshold_2d,
+            )
             record["inter_2d"] = round(inter_2d[0].item(), 6)
             record["union_2d"] = round(union_2d[0].item(), 6)
             p_thresholds = torch.arange(0.5, 0.96, 0.05, device=pred_2d.device)
@@ -233,11 +257,15 @@ def compute_sample_metrics(
         if aligned_logits_3d is not None:
             pred_3d = aligned_logits_3d.sigmoid()
             gt_3d = aligned_gt_3d.float()
-            record["iou_3d"] = round(calc.pc_aIOU(pred_3d, gt_3d, num_thresholds=20).item(), 6)
+            record["iou_3d"] = round(calc.pc_IoU(
+                pred_3d, gt_3d,
+                threshold=threshold_3d,
+                gt_threshold=gt_threshold_3d,
+            )[0].item(), 6)
             record["mae_3d"] = round(calc.pc_MAE(pred_3d, gt_3d).item(), 6)
             record["sim_3d"] = round(calc.pc_SIM(pred_3d, gt_3d)[0].item(), 6)
             try:
-                record["auc_3d"] = round(calc.pc_AUC(pred_3d, gt_3d, gt_threshold=threshold_3d).item(), 6)
+                record["auc_3d"] = round(calc.pc_AUC(pred_3d, gt_3d, gt_threshold=gt_threshold_3d).item(), 6)
             except Exception:
                 record["auc_3d"] = None
         else:
