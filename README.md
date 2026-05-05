@@ -380,13 +380,13 @@ dataset_root/
 
 ### 3D 指标
 
-3D 预测输入为 `pred_3d = point_logits.sigmoid()`，形状 `[B, N]`；GT 输入为 `pc_gt_tensor`，形状 `[B, N]`。当前 3D 指标实现对齐 GREAT。默认 `mask_threshold_3d=gt_threshold_3d=0.5`；其中 `mask_threshold_3d` 可由验证集自动搜索，`gt_threshold_3d` 不自动修改。
+3D 预测输入为 `pred_3d = point_logits.sigmoid()`，形状 `[B, N]`；GT 输入为 `pc_gt_tensor`，形状 `[B, N]`。当前 3D 指标实现对齐 GREAT。正式 `iou_3d` 使用 `aIOU-20`，不受外部 `mask_threshold_3d` 影响；`mask_threshold_3d` 仅用于单阈值搜索、可视化或显式调用 `pc_IoU`。默认 `gt_threshold_3d=0.5`，且不自动修改。
 
 | 指标 | 实现函数 | 预测处理 | GT 处理 | 阈值/超参数 | 含义与方向 |
 |---|---|---|---|---|---|
 | `AUC` | `pc_AUC(pred_3d, gt_3d)` | 不二值化，连续概率作为 score | `gt_3d >= 0.5` 二值化 | 使用 `sklearn.metrics.roc_auc_score`；单类别 GT 样本记为 `NaN` 并忽略 | ROC-AUC，越高越好 |
-| `aIOU` | `pc_aIOU(pred_3d, gt_3d, num_thresholds=20, gt_threshold=gt_threshold_3d)` | 多阈值二值化：`pred_3d >= threshold` | `gt_3d >= gt_threshold_3d` 二值化 | `thresholds = linspace(0, 1, 20)` | 20 个阈值 IoU 的均值，越高越好 |
-| `IoU` | `pc_IoU(pred_3d, gt_3d, threshold=mask_threshold_3d, gt_threshold=gt_threshold_3d)` | `pred_3d >= mask_threshold_3d` 二值化 | `gt_3d >= gt_threshold_3d` 二值化 | 默认 `mask_threshold_3d=0.5`, `gt_threshold_3d=0.5` | 单阈值 IoU，当前验证流程中的 `iou_3d`，越高越好 |
+| `aIOU` / `iou_3d` | `pc_aIOU(pred_3d, gt_3d, num_thresholds=20, gt_threshold=gt_threshold_3d)` | 多阈值二值化：`pred_3d >= threshold` | `gt_3d >= gt_threshold_3d` 二值化 | `thresholds = linspace(0, 1, 20)` | 正式 3D IoU 指标，20 个阈值 IoU 的均值，越高越好 |
+| `IoU` | `pc_IoU(pred_3d, gt_3d, threshold=mask_threshold_3d, gt_threshold=gt_threshold_3d)` | `pred_3d >= mask_threshold_3d` 二值化 | `gt_3d >= gt_threshold_3d` 二值化 | 默认 `mask_threshold_3d=0.5`, `gt_threshold_3d=0.5` | 单阈值 IoU，仅用于阈值搜索/可视化/显式调用，不作为默认 `iou_3d` |
 | `MAE` | `pc_MAE(pred_3d, gt_3d)` | 不二值化 | 不二值化 | 无固定阈值 | `mean(abs(pred_3d - gt_3d))`，越低越好 |
 | `SIM` | `pc_SIM(pred_3d, gt_3d, eps=1e-12)` | 不二值化；L1 归一化 | 不二值化；L1 归一化 | `eps=1e-12` | GREAT 风格 histogram intersection，通常 `[0,1]`，越高越好 |
 

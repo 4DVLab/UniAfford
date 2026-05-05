@@ -142,12 +142,13 @@ def update_torchmetrics(
         target_3d = aligned_gt_3d.float()
         bs = preds_3d.shape[0]
 
-        # 使用可配置预测阈值的单阈值 IoU；aIOU 可在单独评估脚本中计算
-        iou_3d = calc.pc_IoU(
+        # 正式 3D IoU 指标对齐 GREAT，使用多阈值平均 aIOU-20。
+        # threshold_3d 仅用于 threshold_search.py 中的单阈值搜索/可视化，不影响 aIOU。
+        iou_3d = calc.pc_aIOU(
             preds_3d, target_3d,
-            threshold=threshold_3d,
+            num_thresholds=20,
             gt_threshold=gt_threshold_3d,
-        ).mean()
+        )
         metrics["iou_3d"].update(iou_3d.item(), weight=bs)
 
         mae_3d = calc.pc_MAE(preds_3d, target_3d)
@@ -257,11 +258,11 @@ def compute_sample_metrics(
         if aligned_logits_3d is not None:
             pred_3d = aligned_logits_3d.sigmoid()
             gt_3d = aligned_gt_3d.float()
-            record["iou_3d"] = round(calc.pc_IoU(
+            record["iou_3d"] = round(calc.pc_aIOU(
                 pred_3d, gt_3d,
-                threshold=threshold_3d,
+                num_thresholds=20,
                 gt_threshold=gt_threshold_3d,
-            )[0].item(), 6)
+            ).item(), 6)
             record["mae_3d"] = round(calc.pc_MAE(pred_3d, gt_3d).item(), 6)
             record["sim_3d"] = round(calc.pc_SIM(pred_3d, gt_3d)[0].item(), 6)
             try:
