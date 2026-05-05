@@ -252,30 +252,6 @@ class _SimilarityDecoderHead(nn.Module):
         self.point_proj = nn.Linear(point_feature_size, config.hidden_size)
         self.logit_scale = nn.Parameter(torch.ones(1))
 
-    @staticmethod
-    def _pool_query_tokens(
-        projected_text: torch.Tensor,
-        query_mask: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        if projected_text.dim() == 2:
-            return projected_text
-        if projected_text.dim() != 3:
-            raise ValueError(
-                "Similarity decoder expects [B, H] or [B, K, H] query embeddings, "
-                f"got {tuple(projected_text.shape)}"
-            )
-        if query_mask is None:
-            return projected_text.mean(dim=1)
-        query_mask = query_mask.bool().to(projected_text.device)
-        if query_mask.shape != projected_text.shape[:2]:
-            raise ValueError(
-                "query_mask shape mismatch: "
-                f"expected {tuple(projected_text.shape[:2])}, got {tuple(query_mask.shape)}"
-            )
-        weight = query_mask.unsqueeze(-1).to(projected_text.dtype)
-        denom = weight.sum(dim=1).clamp_min(1.0)
-        return (projected_text * weight).sum(dim=1) / denom
-
     def forward(
         self,
         query_embeddings: torch.Tensor,
@@ -287,19 +263,38 @@ class _SimilarityDecoderHead(nn.Module):
         del query_embeddings
         point_feat = per_point_features.to(self.config.compute_dtype)
         point_mask = per_point_mask.bool()
-        pooled_text = self._pool_query_tokens(
-            projected_text.to(self.config.compute_dtype),
-            query_mask=query_mask,
-        )
-        text_feat = F.normalize(pooled_text, p=2, dim=-1)
+        single_query = projected_text.dim() == 2
+        if single_query:
+            projected_text = projected_text.unsqueeze(1)
+        elif projected_text.dim() != 3:
+            raise ValueError(
+                "Similarity decoder expects [B, H] or [B, K, H] query embeddings, "
+                f"got {tuple(projected_text.shape)}"
+            )
+        if query_mask is None:
+            query_mask = torch.ones(
+                projected_text.shape[:2],
+                dtype=torch.bool,
+                device=projected_text.device,
+            )
+        else:
+            query_mask = query_mask.bool().to(projected_text.device)
+            if query_mask.shape != projected_text.shape[:2]:
+                raise ValueError(
+                    "query_mask shape mismatch: "
+                    f"expected {tuple(projected_text.shape[:2])}, got {tuple(query_mask.shape)}"
+                )
+
+        text_feat = F.normalize(projected_text.to(self.config.compute_dtype), p=2, dim=-1)
         point_feat = self.point_proj(point_feat)
         point_feat = F.normalize(point_feat, p=2, dim=-1)
         point_feat = torch.where(point_mask.unsqueeze(-1), point_feat, torch.zeros_like(point_feat))
 
-        logits = (point_feat * text_feat.unsqueeze(1)).sum(dim=-1)
+        logits = torch.einsum("bnh,bkh->bkn", point_feat, text_feat)
         logits = logits * self.logit_scale.exp().clamp(min=1e-4, max=100.0)
-        logits = torch.where(point_mask, logits, torch.zeros_like(logits))
-        return logits
+        logits = torch.where(point_mask.unsqueeze(1), logits, torch.zeros_like(logits))
+        logits = torch.where(query_mask.unsqueeze(-1), logits, torch.zeros_like(logits))
+        return logits[:, 0] if single_query else logits
 
 
 class _PromptDecoderHead(nn.Module):
@@ -351,6 +346,7 @@ class _PromptDecoderHead(nn.Module):
         point_feat = per_point_features.to(self.config.compute_dtype)
         point_mask = per_point_mask.bool()
         prompt_tokens = projected_text.to(self.config.compute_dtype)
+        single_query = prompt_tokens.dim() == 2
         if prompt_tokens.dim() == 2:
             prompt_tokens = prompt_tokens.unsqueeze(1)
         elif prompt_tokens.dim() != 3:
@@ -370,6 +366,12 @@ class _PromptDecoderHead(nn.Module):
                     f"expected {tuple(prompt_tokens.shape[:2])}, got {tuple(query_mask.shape)}"
                 )
 
+        bsz, num_queries, hidden_size = prompt_tokens.shape
+        prompt_tokens = prompt_tokens.reshape(bsz * num_queries, 1, hidden_size)
+        flat_query_mask = query_mask.reshape(bsz * num_queries, 1)
+        flat_point_feat = point_feat.repeat_interleave(num_queries, dim=0)
+        flat_point_mask = point_mask.repeat_interleave(num_queries, dim=0)
+
         mask_token = self.mask_token.weight.unsqueeze(0).expand(prompt_tokens.shape[0], -1, -1)
         sparse_prompt_tokens = torch.cat([mask_token, prompt_tokens], dim=1)
         sparse_prompt_mask = torch.cat(
@@ -379,20 +381,20 @@ class _PromptDecoderHead(nn.Module):
                     dtype=torch.bool,
                     device=prompt_tokens.device,
                 ),
-                query_mask,
+                flat_query_mask,
             ],
             dim=1,
         )
 
-        point_tokens = self.point_proj(point_feat)
+        point_tokens = self.point_proj(flat_point_feat)
         dense_prompt = self.no_dense_prompt.weight.view(1, 1, -1).to(point_tokens.dtype)
         point_tokens = point_tokens + dense_prompt
-        point_tokens = torch.where(point_mask.unsqueeze(-1), point_tokens, torch.zeros_like(point_tokens))
+        point_tokens = torch.where(flat_point_mask.unsqueeze(-1), point_tokens, torch.zeros_like(point_tokens))
 
         prompt_out, point_out = self.prompt_transformer(
             prompt_tokens=sparse_prompt_tokens,
             point_tokens=point_tokens,
-            point_mask=point_mask,
+            point_mask=flat_point_mask,
             prompt_mask=sparse_prompt_mask,
         )
 
@@ -401,8 +403,10 @@ class _PromptDecoderHead(nn.Module):
         prompt_context = self.prompt_context_proj(mask_token_out).unsqueeze(1)
         conditioned_point = refined_point + prompt_context
         logits = self.output_mask_head(conditioned_point).squeeze(-1)
-        logits = torch.where(point_mask, logits, torch.zeros_like(logits))
-        return logits
+        logits = torch.where(flat_point_mask, logits, torch.zeros_like(logits))
+        logits = logits.view(bsz, num_queries, -1)
+        logits = torch.where(query_mask.unsqueeze(-1), logits, torch.zeros_like(logits))
+        return logits[:, 0] if single_query else logits
 
 
 class PointCloudHiddenStateDecoder(nn.Module):

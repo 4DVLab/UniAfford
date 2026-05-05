@@ -16,6 +16,13 @@ from model.HeadRouter import HeadRouter
 class JointAffordanceModel(nn.Module):
     """模型管理基座，负责加载配置并组织各模块。"""
 
+    @staticmethod
+    def _apply_sample_mask(logits: Optional[torch.Tensor], sample_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        if logits is None or sample_mask is None:
+            return logits
+        view_shape = [sample_mask.shape[0]] + [1] * (logits.dim() - 1)
+        return logits * sample_mask.bool().view(*view_shape).to(logits.dtype)
+
     def _sync_point_decoder_config(self):
         point_decoder_cfg = getattr(self.config, "point_decoder", None)
         if point_decoder_cfg is None:
@@ -215,11 +222,7 @@ class JointAffordanceModel(nn.Module):
             )
 
             # 将无效样本的输出置零（不影响 loss 计算）
-            if img_valid_mask is not None:
-                mask_2d = img_valid_mask.bool().view(B, 1, 1).to(all_image_logits.dtype)
-                image_logits = all_image_logits * mask_2d
-            else:
-                image_logits = all_image_logits
+            image_logits = self._apply_sample_mask(all_image_logits, img_valid_mask)
 
             # ---- 4. 3D 点云分割 ----
             has_per_point_features = (
@@ -242,8 +245,7 @@ class JointAffordanceModel(nn.Module):
             if all_point_logits is None:
                 point_logits = None
             elif pc_valid_lengths is not None:
-                mask_3d = (pc_valid_lengths > 0).to(all_point_logits.dtype).unsqueeze(-1)
-                point_logits = all_point_logits * mask_3d
+                point_logits = self._apply_sample_mask(all_point_logits, pc_valid_lengths > 0)
             else:
                 point_logits = all_point_logits
 

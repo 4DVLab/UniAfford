@@ -173,7 +173,7 @@ class JointAffordanceDemoEngine:
         self.tokenizer = self.processor.tokenizer
         self.image_size = _normalize_image_size(self.training_cfg.image_size)
         self.num_points = int(self.training_cfg.num_points)
-        self.mask_threshold_2d = float(max(getattr(self.training_cfg, "mask_threshold_2d", 0.5), 0.5))
+        self.mask_threshold_2d = float(getattr(self.training_cfg, "mask_threshold_2d", 0.5))
         self.mask_threshold_3d = float(getattr(self.training_cfg, "mask_threshold_3d", 0.5))
         self.mllm_precision = resolve_dtype(self.model_cfg.mllm.compute_dtype) or torch.bfloat16
         self.image_precision = resolve_dtype(self.model_cfg.image_decoder.compute_dtype) or torch.float32
@@ -301,7 +301,10 @@ class JointAffordanceDemoEngine:
         image_logits = output.get("image_logits")
         has_image = bool(batch["img_valid_mask"][0].item())
         if has_image and isinstance(image_logits, torch.Tensor):
-            mask = _normalize_mask(image_logits[0])
+            image_mask_logits = image_logits[0]
+            if image_mask_logits.dim() == 3:
+                image_mask_logits = image_mask_logits[0]
+            mask = _normalize_mask(image_mask_logits)
             orig_h, orig_w = batch["original_size_list"][0]
             if mask.shape[:2] != (orig_h, orig_w):
                 mask = cv2.resize(mask, (orig_w, orig_h), interpolation=cv2.INTER_LINEAR)
@@ -311,8 +314,11 @@ class JointAffordanceDemoEngine:
         point_logits = output.get("point_logits")
         has_pc = int(batch["pc_valid_lengths"][0].item()) > 0
         if has_pc and isinstance(point_logits, torch.Tensor) and sampled_points is not None:
-            valid_len = min(int(batch["pc_valid_lengths"][0].item()), sampled_points.shape[0], point_logits.shape[-1])
-            pc_mask = _normalize_mask(point_logits[0])[:valid_len].reshape(-1)
+            point_mask_logits = point_logits[0]
+            if point_mask_logits.dim() == 2:
+                point_mask_logits = point_mask_logits[0]
+            valid_len = min(int(batch["pc_valid_lengths"][0].item()), sampled_points.shape[0], point_mask_logits.shape[-1])
+            pc_mask = _normalize_mask(point_mask_logits)[:valid_len].reshape(-1)
             pc_vis = self.visualize_3d(sampled_points[:valid_len], pc_mask)
             status_parts.append(f"3D 高亮完成，采样点数 {valid_len}，mask 均值 {float(pc_mask.mean()):.4f}，阈值 {self.mask_threshold_3d:.2f}")
 
