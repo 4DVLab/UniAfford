@@ -1072,11 +1072,17 @@ class InsPart_IMG(Image):
 class ReasonAff_IMG(Image):
     """
     ReasonAff（Affordance-R1）图片数据集：
-    官方代码使用 ``datasets.load_from_disk(path)[split]``，数据字段包含
-    ``image``、``mask``、``problem``、``solution``、``aff_name``、``part_name``。
-    这里将 ``part_name`` 作为 Image.obj_type，将 ``aff_name`` 作为 affordance
-    标签，并把 ``problem`` 保存为与图像绑定的 Instruction。
+    固定目录结构为 reasonaff/{train_new,test_new}，每个子目录是
+    HuggingFace save_to_disk 的 DatasetDict，分别包含 train/test split。
+
+    需要加载哪个 split 直接改类变量 split_names，例如 ("train",) 或 ("test",)。
     """
+    split_names = ("train",)
+    split_dirs = {
+        "train": ("train_new", "train"),
+        "test": ("test_new", "test"),
+    }
+    progress_interval = 200
 
     def __init__(self, img, obj_type, aff_mask_dict=None, obj_mask=None, visible_mask=None, **kwargs):
         super().__init__(
@@ -1094,20 +1100,14 @@ class ReasonAff_IMG(Image):
         return name if name else fallback
 
     @staticmethod
-    def _to_bgr_image(image):
-        if image is None:
-            return None
-        arr = np.asarray(image.convert('RGB') if hasattr(image, 'convert') else image)
+    def _to_bgr_image(image: np.ndarray):
+        arr = np.asarray(image, dtype=np.uint8)
         if arr.ndim == 2:
-            return cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_GRAY2BGR)
-        if arr.ndim == 3 and arr.shape[2] == 4:
-            arr = arr[:, :, :3]
-        return cv2.cvtColor(arr.astype(np.uint8), cv2.COLOR_RGB2BGR)
+            return cv2.cvtColor(arr, cv2.COLOR_GRAY2BGR)
+        return cv2.cvtColor(arr[:, :, :3], cv2.COLOR_RGB2BGR)
 
     @staticmethod
-    def _to_gray_mask(mask, target_shape):
-        if mask is None:
-            return None
+    def _to_gray_mask(mask: np.ndarray, target_shape):
         arr = np.asarray(mask)
         if arr.dtype == bool:
             arr = arr.astype(np.uint8) * 255
@@ -1120,56 +1120,21 @@ class ReasonAff_IMG(Image):
         return arr
 
     @classmethod
-    def _iter_hf_dataset(cls, dataset_root_path, splits):
+    def _load_split(cls, dataset_root_path, split_name):
         from importlib import import_module
 
         datasets = import_module('datasets')
-
-        if not (
-            os.path.isfile(os.path.join(dataset_root_path, 'dataset_dict.json')) or
-            os.path.isfile(os.path.join(dataset_root_path, 'state.json'))
-        ):
-            child_roots = []
-            for name in ('train_new', 'test_new'):
-                child = os.path.join(dataset_root_path, name)
-                if os.path.isfile(os.path.join(child, 'dataset_dict.json')):
-                    child_roots.append(child)
-            if not child_roots:
-                child_roots = [
-                    os.path.join(dataset_root_path, name)
-                    for name in sorted(os.listdir(dataset_root_path))
-                    if os.path.isfile(os.path.join(dataset_root_path, name, 'dataset_dict.json')) or
-                       os.path.isfile(os.path.join(dataset_root_path, name, 'state.json'))
-                ]
-            if child_roots:
-                for child in child_roots:
-                    yield from cls._iter_hf_dataset(child, splits)
-                return
-
-        data = datasets.load_from_disk(dataset_root_path)
-        if isinstance(data, datasets.DatasetDict):
-            split_names = tuple(splits) if splits is not None else tuple(
-                s for s in ('train', 'test', 'validation', 'val') if s in data
-            )
-            for split in split_names:
-                if split not in data:
-                    warnings.warn(f'ReasonAff_IMG: split 不存在，已跳过: {split}')
-                    continue
-                for row in data[split]:
-                    yield split, row
-        elif isinstance(data, datasets.Dataset):
-            for row in data:
-                yield 'dataset', row
-        else:
-            raise TypeError(f'ReasonAff_IMG: 不支持的 load_from_disk 返回类型: {type(data)}')
+        root_dir, hf_split = cls.split_dirs[split_name]
+        dataset_path = os.path.join(dataset_root_path, root_dir)
+        data = datasets.load_from_disk(dataset_path)[hf_split]
+        # mask 在原数据中是大尺寸 bool Sequence；numpy 格式避免逐样本 Python list 转换，速度提升明显。
+        return data.with_format("numpy", columns=["image", "mask"], output_all_columns=True)
 
     @classmethod
-    def load_all(cls, dataset_root_path, splits=None, obj_type=None, aff_type=None, **kwargs):
+    def load_all(cls, dataset_root_path, obj_type=None, aff_type=None, **kwargs):
         """
         Args:
-            dataset_root_path: ReasonAff 的 HuggingFace ``save_to_disk`` 目录；
-                可传总目录（含 train_new/test_new），也可传单个 split 目录。
-            splits: 需要读取的 split，默认自动读取 train/test/validation/val 中存在者。
+            dataset_root_path: ReasonAff 根目录，固定包含 train_new / test_new。
             obj_type: 手动覆盖对象/部件类别；默认使用数据集 ``part_name`` 字段。
             aff_type: 手动覆盖 affordance 标签；默认使用数据集 ``aff_name`` 字段。
         """
@@ -1177,37 +1142,35 @@ class ReasonAff_IMG(Image):
         root = resolve_path(dataset_root_path)
 
         def iterator():
-            for split, row in rows:
-                img = cls._to_bgr_image(row.get('image'))
-                if img is None:
-                    continue
+            loaded = 0
+            for split_name in cls.split_names:
+                rows = cls._load_split(root, split_name)
+                for row in rows:
+                    img = cls._to_bgr_image(row["image"])
+                    mask = cls._to_gray_mask(row["mask"], target_shape=img.shape[:2])
+                    obj_label = cls._normalize_name(obj_type or row["part_name"], fallback='reasonaff')
+                    aff_label = cls._normalize_name(aff_type or row["aff_name"], fallback='affordance')
 
-                mask = cls._to_gray_mask(row.get('mask'), target_shape=img.shape[:2])
-                if mask is None:
-                    continue
-
-                obj_label = cls._normalize_name(obj_type or row.get('part_name'), fallback='reasonaff')
-                aff_label = cls._normalize_name(aff_type or row.get('aff_name'), fallback='affordance')
-
-                print(f'loading ReasonAff IMG [{split}]: {row.get("id", "N/A")} | obj={obj_label} | aff={aff_label}')
-                img_obj = cls(
-                    img=img,
-                    obj_type=obj_label,
-                    aff_mask_dict={aff_label: mask},
-                )
-
-                instruction = row.get('problem')
-                if instruction:
-                    Instruction(
-                        str(instruction),
+                    img_obj = cls(
+                        img=img,
                         obj_type=obj_label,
-                        aff_type=aff_label,
-                        img_id=img_obj.id,
-                        pc_id=None,
+                        aff_mask_dict={aff_label: mask},
                     )
-                yield img_obj
 
-        rows = cls._iter_hf_dataset(root, splits)
+                    instruction = row["problem"]
+                    if instruction:
+                        Instruction(
+                            str(instruction),
+                            obj_type=obj_label,
+                            aff_type=aff_label,
+                            img_id=img_obj.id,
+                            pc_id=None,
+                        )
+                    loaded += 1
+                    if cls.progress_interval and loaded % cls.progress_interval == 0:
+                        print(f"loading ReasonAff IMG: {loaded} samples")
+                    yield img_obj
+
         return iterator()
 
 
