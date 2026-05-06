@@ -351,7 +351,10 @@ def validate_one_epoch(
     threshold_stats = None
     if getattr(config, "auto_select_mask_threshold", True):
         threshold_stats = init_threshold_search_stats(
-            build_threshold_candidates(device)
+            build_threshold_candidates(
+                device,
+                extra_thresholds=[config.mask_threshold_2d, config.mask_threshold_3d],
+            )
         )
 
     val_iter = (

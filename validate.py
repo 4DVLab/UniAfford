@@ -561,7 +561,10 @@ def main():
     threshold_stats = None
     if getattr(training_cfg, "auto_select_mask_threshold", True):
         threshold_stats = init_threshold_search_stats(
-            build_threshold_candidates(device)
+            build_threshold_candidates(
+                device,
+                extra_thresholds=[threshold_2d, threshold_3d],
+            )
         )
 
     print("开始验证...")

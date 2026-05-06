@@ -1,8 +1,9 @@
 """Utilities for selecting prediction binarization thresholds on validation data."""
 
-from typing import Dict
+from typing import Dict, Iterable
 
 import torch
+import torch.distributed as dist
 
 from utils import calculator as calc
 
@@ -12,6 +13,7 @@ def build_threshold_candidates(
     start: float = 0.05,
     end: float = 0.95,
     step: float = 0.05,
+    extra_thresholds: Iterable[float] = None,
 ) -> torch.Tensor:
     """Build candidate prediction thresholds. GT thresholds are controlled separately."""
     start = float(start)
@@ -23,6 +25,13 @@ def build_threshold_candidates(
         start, end = end, start
     count = int(round((end - start) / step)) + 1
     values = start + torch.arange(count, device=device, dtype=torch.float32) * step
+    if extra_thresholds is not None:
+        extra = [
+            float(v) for v in extra_thresholds
+            if v is not None and 0.0 <= float(v) <= 1.0
+        ]
+        if extra:
+            values = torch.cat([values, torch.tensor(extra, device=device, dtype=torch.float32)])
     return values.clamp(0.0, 1.0).unique(sorted=True)
 
 
@@ -39,6 +48,17 @@ def init_threshold_search_stats(thresholds: torch.Tensor) -> Dict[str, torch.Ten
         "sum_union_3d": zeros.clone(),
         "count_3d": torch.zeros((), device=thresholds.device, dtype=torch.float32),
     }
+
+
+def sync_threshold_search_stats(stats: Dict[str, torch.Tensor]) -> None:
+    """Synchronize accumulated threshold-search stats across distributed ranks."""
+    if not (dist.is_available() and dist.is_initialized()):
+        return
+    for key, value in stats.items():
+        if key == "thresholds":
+            continue
+        if torch.is_tensor(value):
+            dist.all_reduce(value, op=dist.ReduceOp.SUM)
 
 
 @torch.no_grad()
@@ -107,6 +127,7 @@ def update_threshold_search_stats(
 
 def finalize_threshold_search(stats: Dict[str, torch.Tensor]) -> Dict[str, float]:
     """Return best thresholds by validation mean per-sample IoU."""
+    sync_threshold_search_stats(stats)
     results = {}
     thresholds = stats["thresholds"]
     if stats["count_2d"].item() > 0:
