@@ -28,22 +28,32 @@
       "extension": ".jpg"
     }
   },
-  "items": [
+  "images": [
     {
-      "name": "spoon_grasp_img120_pc186",
+      "name": "spoon_grasp_img120",
       "obj_type": "Spoon",
       "img_id": 120,
-      "img_aff": "grasp",
-      "pc_id": 186,
-      "pc_aff": "wrapgrasp"
+      "aff": "grasp"
     },
     {
-      "name": "spoon_hold_img431_pc203",
+      "name": "spoon_hold_img431",
       "obj_type": "Spoon",
       "img_id": 431,
-      "img_aff": "hold",
+      "aff": "hold"
+    }
+  ],
+  "point_clouds": [
+    {
+      "name": "spoon_wrapgrasp_pc186",
+      "obj_type": "Spoon",
+      "pc_id": 186,
+      "aff": "wrapgrasp"
+    },
+    {
+      "name": "spoon_contain_pc203",
+      "obj_type": "Spoon",
       "pc_id": 203,
-      "pc_aff": "contain"
+      "aff": "contain"
     }
   ]
 }

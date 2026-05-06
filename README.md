@@ -104,6 +104,59 @@ dataset_root/
 - `Image` 通过 `img_id` 取样本后，用 `image.get_mask_by_aff(aff_type)` 获取 GT
 - `PointCloud` 通过 `pc_id` 取样本后，用 `pc.get_mask_by_aff(aff_type)` 获取 GT
 
+## 数据集可视化批量导出
+
+`utils/base_dataset.py` 支持通过 JSON manifest 批量导出 2D/3D affordance target，可用于统一论文图或数据检查：
+
+```bash
+python utils/base_dataset.py --render-json docs/render_manifest_example.json
+```
+
+也可以在命令行覆盖数据集路径：
+
+```bash
+python utils/base_dataset.py --render-json docs/render_manifest_example.json --dataset-root /path/to/dataset_root
+```
+
+Manifest 顶层字段：
+
+- `dataset_root`: 数据集根目录，结构同上文 `dataset_root/`。
+- `output_dir`: 输出目录。
+- `output.mode`: 输出模式。`single` 表示每个目标单独输出到 `2d/` 和 `3d/`；`grid` 表示只输出 `grid_2d.jpg` 和 `grid_3d.jpg`；`both` 表示两者都输出。
+- `output.grid`: 合并图布局。`columns` 指定列数，`rows` 可指定行数；`rows: null` 时按目标数量自动计算。`cell_width` / `cell_height` 控制每个格子的尺寸。
+- `render.image`: 2D 叠图参数。默认按 Affordance-R1 风格使用红色 `[255, 0, 0]` 与 `alpha=0.5`。
+- `render.point_cloud`: 3D 静态图参数。默认使用灰色点云、红色 affordance、固定视角与居中归一化。
+- `images`: 2D 渲染列表，每项为 `{name, obj_type, img_id, aff}`。
+- `point_clouds`: 3D 渲染列表，每项为 `{name, obj_type, pc_id, aff}`。
+
+注意：`images` 与 `point_clouds` 是两个独立列表，不要求图片与点云一一配对；渲染会分别生成 2D 和 3D 结果。
+
+示例：
+
+```json
+{
+  "dataset_root": "../dataset",
+  "output_dir": "../outputs/rendered_targets",
+  "output": {
+    "mode": "both",
+    "grid": {
+      "columns": 4,
+      "rows": null,
+      "cell_width": 800,
+      "cell_height": 800,
+      "padding": 12,
+      "background": [255, 255, 255]
+    }
+  },
+  "images": [
+    {"name": "spoon_grasp_img120", "obj_type": "Spoon", "img_id": 120, "aff": "grasp"}
+  ],
+  "point_clouds": [
+    {"name": "spoon_wrapgrasp_pc186", "obj_type": "Spoon", "pc_id": 186, "aff": "wrapgrasp"}
+  ]
+}
+```
+
 ## 数据分割策略
 
 数据分割由 `utils/data_process/create_split.py` 中的 `SplitManager.split()` 执行，核心流程如下（默认从磁盘扫描 IDs，也可切换到内存 IDs 来源）：

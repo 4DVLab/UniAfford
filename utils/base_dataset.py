@@ -2280,6 +2280,36 @@ class JointDataset:
 
 """ --------------------------------------- 批量可视化导出 ----------------------------------- """
 
+RENDER_MANIFEST_SCHEMA_NOTE = """
+Render manifest JSON:
+{
+  "dataset_root": "path/to/dataset_root",
+  "output_dir": "outputs/rendered_targets",
+  "output": {
+    "mode": "single | grid | both",
+    "grid": {
+      "columns": 4,
+      "rows": null,
+      "cell_width": 800,
+      "cell_height": 800,
+      "padding": 12,
+      "background": [255, 255, 255]
+    }
+  },
+  "render": {
+    "image": {"alpha": 0.5, "color_rgb": [255, 0, 0], "threshold": 0.0, "extension": ".jpg"},
+    "point_cloud": {"size": 800, "elev": 30, "azim": 45, "point_size": 8, "max_points": 20000, "extension": ".jpg"}
+  },
+  "images": [{"name": "optional_name", "obj_type": "spoon", "img_id": 120, "aff": "grasp"}],
+  "point_clouds": [{"name": "optional_name", "obj_type": "spoon", "pc_id": 186, "aff": "wrapgrasp"}]
+}
+
+output.mode:
+- single: 每个目标分别输出到 2d/ 和 3d/
+- grid: 只输出 grid_2d.jpg 和 grid_3d.jpg
+- both: 同时输出单图和合并图
+"""
+
 def _resolve_relative_path(path_value: str, base_dir: str) -> str:
     """解析 manifest 中的路径；相对路径优先相对 manifest 所在目录。"""
     if not path_value:
@@ -2296,10 +2326,8 @@ def _load_render_manifest(manifest_path: str, dataset_root_override: Optional[st
     with open(manifest_path, 'r', encoding='utf-8') as f:
         manifest = json.load(f)
 
-    if isinstance(manifest, list):
-        manifest = {"items": manifest}
     if not isinstance(manifest, dict):
-        raise ValueError("渲染 JSON 必须是对象，或直接是 items 数组")
+        raise ValueError("渲染 JSON 必须是对象，格式参照 docs/render_manifest_example.json")
 
     dataset_root = dataset_root_override or manifest.get("dataset_root")
     if not dataset_root:
@@ -2546,9 +2574,12 @@ def render_targets_from_json(manifest_path: str, dataset_root_override: Optional
     manifest = _load_render_manifest(manifest_path, dataset_root_override=dataset_root_override)
     dataset_root = manifest["dataset_root"]
     output_dir = manifest["output_dir"]
-    items = manifest.get("items", [])
-    if not isinstance(items, list) or not items:
-        raise ValueError("渲染 JSON 需要提供非空 items 数组")
+    image_items = manifest.get("images", [])
+    point_items = manifest.get("point_clouds", [])
+    if not isinstance(image_items, list) or not isinstance(point_items, list):
+        raise ValueError("渲染 JSON 的 images 与 point_clouds 必须是数组")
+    if not image_items and not point_items:
+        raise ValueError("渲染 JSON 需要提供非空 images 或 point_clouds 数组")
 
     output_cfg = manifest.get("output", {})
     mode = str(output_cfg.get("mode", "single")).lower()
@@ -2568,56 +2599,67 @@ def render_targets_from_json(manifest_path: str, dataset_root_override: Optional
     point_results: List[np.ndarray] = []
     saved_paths = {"2d": [], "3d": [], "grid": []}
 
-    for idx, item in enumerate(items):
+    for idx, item in enumerate(image_items):
         if not isinstance(item, dict):
-            warnings.warn(f"跳过非法 item[{idx}]：必须是对象")
+            warnings.warn(f"跳过非法 images[{idx}]：必须是对象")
             continue
         obj_type = item.get("obj_type")
         if not obj_type:
-            warnings.warn(f"跳过 item[{idx}]：缺少 obj_type")
+            warnings.warn(f"跳过 images[{idx}]：缺少 obj_type")
+            continue
+        if item.get("img_id") is None or item.get("aff") is None:
+            warnings.warn(f"跳过 images[{idx}]：缺少 img_id 或 aff")
             continue
 
-        common_aff = item.get("aff")
-        img_aff = item.get("img_aff", common_aff)
-        pc_aff = item.get("pc_aff", common_aff)
+        img_id = int(item["img_id"])
+        img_aff = Modality._normalize_label(item["aff"])
+        img_bgr, img_mask = _load_render_image_target(dataset_root, obj_type, img_id, img_aff)
+        overlay = _render_image_overlay_affordance_r1(
+            img_bgr,
+            img_mask,
+            alpha=float(image_cfg.get("alpha", 0.5)),
+            color_rgb=tuple(image_cfg.get("color_rgb", [255, 0, 0])),
+            threshold=float(image_cfg.get("threshold", 0.0)),
+        )
+        image_results.append(overlay)
+        if save_single:
+            name = _safe_render_name(item, idx, "img", img_aff)
+            out_path = os.path.join(output_dir, "2d", f"{name}{image_ext}")
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            cv2.imwrite(out_path, overlay)
+            saved_paths["2d"].append(out_path)
 
-        if item.get("img_id") is not None and img_aff is not None:
-            img_id = int(item["img_id"])
-            img_bgr, img_mask = _load_render_image_target(dataset_root, obj_type, img_id, img_aff)
-            overlay = _render_image_overlay_affordance_r1(
-                img_bgr,
-                img_mask,
-                alpha=float(image_cfg.get("alpha", 0.5)),
-                color_rgb=tuple(image_cfg.get("color_rgb", [255, 0, 0])),
-                threshold=float(image_cfg.get("threshold", 0.0)),
-            )
-            image_results.append(overlay)
-            if save_single:
-                name = _safe_render_name(item, idx, "img", Modality._normalize_label(img_aff))
-                out_path = os.path.join(output_dir, "2d", f"{name}{image_ext}")
-                os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                cv2.imwrite(out_path, overlay)
-                saved_paths["2d"].append(out_path)
+    for idx, item in enumerate(point_items):
+        if not isinstance(item, dict):
+            warnings.warn(f"跳过非法 point_clouds[{idx}]：必须是对象")
+            continue
+        obj_type = item.get("obj_type")
+        if not obj_type:
+            warnings.warn(f"跳过 point_clouds[{idx}]：缺少 obj_type")
+            continue
+        if item.get("pc_id") is None or item.get("aff") is None:
+            warnings.warn(f"跳过 point_clouds[{idx}]：缺少 pc_id 或 aff")
+            continue
 
-        if item.get("pc_id") is not None and pc_aff is not None:
-            pc_id = int(item["pc_id"])
-            points, pc_mask = _load_render_point_target(dataset_root, obj_type, pc_id, pc_aff)
-            point_img = _render_point_cloud_static(
-                points,
-                pc_mask,
-                size=int(point_cfg.get("size", 800)),
-                elev=float(point_cfg.get("elev", 30)),
-                azim=float(point_cfg.get("azim", 45)),
-                point_size=float(point_cfg.get("point_size", 8)),
-                max_points=point_cfg.get("max_points", 20000),
-            )
-            point_results.append(point_img)
-            if save_single:
-                name = _safe_render_name(item, idx, "pc", Modality._normalize_label(pc_aff))
-                out_path = os.path.join(output_dir, "3d", f"{name}{point_ext}")
-                os.makedirs(os.path.dirname(out_path), exist_ok=True)
-                cv2.imwrite(out_path, point_img)
-                saved_paths["3d"].append(out_path)
+        pc_id = int(item["pc_id"])
+        pc_aff = Modality._normalize_label(item["aff"])
+        points, pc_mask = _load_render_point_target(dataset_root, obj_type, pc_id, pc_aff)
+        point_img = _render_point_cloud_static(
+            points,
+            pc_mask,
+            size=int(point_cfg.get("size", 800)),
+            elev=float(point_cfg.get("elev", 30)),
+            azim=float(point_cfg.get("azim", 45)),
+            point_size=float(point_cfg.get("point_size", 8)),
+            max_points=point_cfg.get("max_points", 20000),
+        )
+        point_results.append(point_img)
+        if save_single:
+            name = _safe_render_name(item, idx, "pc", pc_aff)
+            out_path = os.path.join(output_dir, "3d", f"{name}{point_ext}")
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            cv2.imwrite(out_path, point_img)
+            saved_paths["3d"].append(out_path)
 
     if save_grid:
         grid_cfg = output_cfg.get("grid", {})
@@ -2641,7 +2683,7 @@ def main():
     parser.add_argument('-s', '--show', type=str, nargs='+', default=None,
                         help='渲染模式：指定一个或多个文件/目录路径，自动识别 2D 图像或 3D 点云并依次调用 show()')
     parser.add_argument('--render-json', type=str, default=None,
-                        help='批量导出模式：读取 JSON manifest，按 obj/img_id/img_aff/pc_id/pc_aff 渲染保存，JSON格式参照 docs/render_manifest_example.json')
+                        help='批量导出模式：读取 JSON manifest，按 images 与 point_clouds 独立列表渲染保存，JSON格式参照 docs/render_manifest_example.json')
     parser.add_argument('--dataset-root', type=str, default=None,
                         help='可选：覆盖 JSON manifest 中的 dataset_root')
     args = parser.parse_args()
