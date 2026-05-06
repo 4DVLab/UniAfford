@@ -125,7 +125,7 @@ Manifest 顶层字段：
 - `output.mode`: 输出模式。`single` 表示每个目标单独输出到 `2d/` 和 `3d/`；`grid` 表示只输出 `grid_2d.jpg` 和 `grid_3d.jpg`；`both` 表示两者都输出。
 - `output.grid`: 合并图布局。`columns` 指定列数，`rows` 可指定行数；`rows: null` 时按目标数量自动计算。`cell_width` / `cell_height` 控制每个格子的尺寸。
 - `render.image`: 2D 叠图参数。默认按 Affordance-R1 风格使用红色 `[255, 0, 0]` 与 `alpha=0.5`。
-- `render.point_cloud`: 3D 静态图参数。默认使用灰色点云、红色 affordance、固定视角与居中归一化。
+- `render.point_cloud`: 3D 静态图参数。默认 `backend: "realistic"` 会优先使用 Open3D 离屏渲染，将点转成小球并启用材质、光照和地面阴影；若 Open3D 离屏渲染不可用，会自动回退到 `matplotlib`。`sphere_radius` 控制小球大小，`sphere_resolution` 控制球面细分，`point_size` 仅用于 `matplotlib` 回退后端。
 - `images`: 2D 渲染列表，每项为 `{name, obj_type, img_id, aff}`。
 - `point_clouds`: 3D 渲染列表，每项为 `{name, obj_type, pc_id, aff}`。
 
@@ -153,7 +153,16 @@ Manifest 顶层字段：
   ],
   "point_clouds": [
     {"name": "spoon_wrapgrasp_pc186", "obj_type": "Spoon", "pc_id": 186, "aff": "wrapgrasp"}
-  ]
+  ],
+  "render": {
+    "point_cloud": {
+      "backend": "realistic",
+      "sphere_radius": 0.024,
+      "sphere_resolution": 8,
+      "ground_plane": true,
+      "max_points": 6000
+    }
+  }
 }
 ```
 
