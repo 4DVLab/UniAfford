@@ -41,17 +41,6 @@ def init_threshold_search_stats(thresholds: torch.Tensor) -> Dict[str, torch.Ten
     }
 
 
-def _positive_2d_samples(gt: torch.Tensor, gt_threshold: float) -> torch.Tensor:
-    gt_flat = gt.flatten(1).float()
-    if gt_flat.numel() > 0 and gt_flat.max() > 1.0:
-        gt_flat = gt_flat / 255.0
-    return (gt_flat > gt_threshold).any(dim=1)
-
-
-def _positive_3d_samples(gt: torch.Tensor, gt_threshold: float) -> torch.Tensor:
-    return (gt.flatten(1).float() >= gt_threshold).any(dim=1)
-
-
 @torch.no_grad()
 def update_threshold_search_stats(
     stats: Dict[str, torch.Tensor],
@@ -75,23 +64,19 @@ def update_threshold_search_stats(
             preds = aligned_logits.sigmoid()
             target = aligned_gt.float()
             gt_threshold = float(getattr(config, "gt_threshold_2d", 0.5))
-            valid = _positive_2d_samples(target, gt_threshold)
-            if valid.any():
-                preds = preds[valid]
-                target = target[valid]
-                batch_size = preds.shape[0]
-                for idx, threshold in enumerate(thresholds):
-                    inter, union = calc.img_I_and_U(
-                        preds,
-                        target,
-                        threshold=float(threshold.item()),
-                        gt_threshold=gt_threshold,
-                    )
-                    iou = inter / (union + 1e-8)
-                    stats["sum_iou_2d"][idx] += iou.sum()
-                    stats["sum_inter_2d"][idx] += inter.sum()
-                    stats["sum_union_2d"][idx] += union.sum()
-                stats["count_2d"] += batch_size
+            batch_size = preds.shape[0]
+            for idx, threshold in enumerate(thresholds):
+                inter, union = calc.img_I_and_U(
+                    preds,
+                    target,
+                    threshold=float(threshold.item()),
+                    gt_threshold=gt_threshold,
+                )
+                iou = inter / (union + 1e-8)
+                stats["sum_iou_2d"][idx] += iou.sum()
+                stats["sum_inter_2d"][idx] += inter.sum()
+                stats["sum_union_2d"][idx] += union.sum()
+            stats["count_2d"] += batch_size
 
     point_logits = output_dict.get("point_logits")
     pc_gt = input_dict.get("pc_gt_tensor")
@@ -107,21 +92,17 @@ def update_threshold_search_stats(
             preds = aligned_logits.sigmoid()
             target = aligned_gt.float()
             gt_threshold = float(getattr(config, "gt_threshold_3d", 0.5))
-            valid = _positive_3d_samples(target, gt_threshold)
-            if valid.any():
-                preds = preds[valid]
-                target = target[valid]
-                batch_size = preds.shape[0]
-                for idx, threshold in enumerate(thresholds):
-                    pred_bool = preds.flatten(1) >= float(threshold.item())
-                    gt_bool = target.flatten(1) >= gt_threshold
-                    inter = (pred_bool & gt_bool).sum(dim=1).float()
-                    union = (pred_bool | gt_bool).sum(dim=1).float()
-                    iou = inter / (union + 1e-8)
-                    stats["sum_iou_3d"][idx] += iou.sum()
-                    stats["sum_inter_3d"][idx] += inter.sum()
-                    stats["sum_union_3d"][idx] += union.sum()
-                stats["count_3d"] += batch_size
+            batch_size = preds.shape[0]
+            for idx, threshold in enumerate(thresholds):
+                pred_bool = preds.flatten(1) >= float(threshold.item())
+                gt_bool = target.flatten(1) >= gt_threshold
+                inter = (pred_bool & gt_bool).sum(dim=1).float()
+                union = (pred_bool | gt_bool).sum(dim=1).float()
+                iou = inter / (union + 1e-8)
+                stats["sum_iou_3d"][idx] += iou.sum()
+                stats["sum_inter_3d"][idx] += inter.sum()
+                stats["sum_union_3d"][idx] += union.sum()
+            stats["count_3d"] += batch_size
 
 
 def finalize_threshold_search(stats: Dict[str, torch.Tensor]) -> Dict[str, float]:
