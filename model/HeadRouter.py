@@ -396,6 +396,110 @@ class HeadRouter(nn.Module):
         route_mask[:, :use_len - 1] = valid_answer_pos
         return route_mask
 
+    def fixed_anchor_forward(
+        self,
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        img_available: Optional[torch.Tensor] = None,
+        pc_available: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        base_token_ids: Optional[torch.Tensor] = None,
+    ) -> Dict[str, Any]:
+        """
+        仅用于消融实验的固定锚点路由基准方案。
+        
+        该方案跳过了可学习的路由头部，而是在标签[t + 1]位置是<img_aff>或<pc_aff>时，选择位置t处的隐藏状态。
+        这样一来，解码器的查询功能仍然可以正常使用，同时又能避免在比较过程中进行基于标记级别的路由学习。
+        """
+        hidden_states, attention_mask, img_available, pc_available, labels, base_token_ids = self._normalize_router_inputs(
+            hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            img_available=img_available,
+            pc_available=pc_available,
+            labels=labels,
+            base_token_ids=base_token_ids,
+        )
+        bsz, seq_len, _ = hidden_states.shape
+        hard_route = torch.full(
+            (bsz, seq_len),
+            self.route_text_idx,
+            dtype=torch.long,
+            device=hidden_states.device,
+        )
+        route_mask = self.build_route_mask_from_labels(
+            labels=labels,
+            seq_len=seq_len,
+        )
+
+        if labels is not None and labels.dim() == 2 and labels.shape[1] > 1:
+            pred_len = min(seq_len, labels.shape[1] - 1)
+            shifted_labels = labels[:, 1 : 1 + pred_len]
+            img_sel = shifted_labels.eq(self.img_placeholder_id)
+            pc_sel = shifted_labels.eq(self.pc_placeholder_id)
+            if route_mask is not None:
+                valid = route_mask[:, :pred_len].bool()
+                img_sel = img_sel & valid
+                pc_sel = pc_sel & valid
+            if attention_mask is not None:
+                valid = attention_mask[:, :pred_len].bool()
+                img_sel = img_sel & valid
+                pc_sel = pc_sel & valid
+            if img_available is not None:
+                img_sel = img_sel & img_available.bool().view(-1, 1)
+            if pc_available is not None:
+                pc_sel = pc_sel & pc_available.bool().view(-1, 1)
+            hard_route[:, :pred_len] = torch.where(
+                img_sel,
+                torch.full_like(hard_route[:, :pred_len], self.route_img_idx),
+                hard_route[:, :pred_len],
+            )
+            hard_route[:, :pred_len] = torch.where(
+                pc_sel,
+                torch.full_like(hard_route[:, :pred_len], self.route_pc_idx),
+                hard_route[:, :pred_len],
+            )
+
+        img_token_emb = self.img_branch_head(hidden_states)
+        pc_token_emb = self.pc_branch_head(hidden_states)
+        routed_token_ids = self.build_routed_token_ids(
+            base_token_ids=base_token_ids,
+            hard_route=hard_route,
+            route_mask=route_mask,
+        )
+        aff_token_pairs = self.build_aff_token_pairs(
+            hard_route=hard_route,
+            token_hidden_states=hidden_states,
+            attention_mask=attention_mask,
+            route_mask=route_mask,
+        )
+        img_query_tokens, img_query_mask, pc_query_tokens, pc_query_mask = self.build_branch_query_tokens(
+            img_token_emb=img_token_emb,
+            pc_token_emb=pc_token_emb,
+            hard_route=hard_route,
+            attention_mask=attention_mask,
+            route_mask=route_mask,
+        )
+
+        return {
+            "route_logits": None,
+            "route_probs": None,
+            "hard_route": hard_route,
+            "route_mask": route_mask,
+            "img_token_emb": img_token_emb,
+            "pc_token_emb": pc_token_emb,
+            "img_query_tokens": img_query_tokens,
+            "img_query_mask": img_query_mask,
+            "pc_query_tokens": pc_query_tokens,
+            "pc_query_mask": pc_query_mask,
+            "routed_token_ids": routed_token_ids,
+            "aff_token_pairs": aff_token_pairs,
+            "structure_valid_mask": None,
+            "img_any_prob": None,
+            "pc_any_prob": None,
+            "img_expected_count": None,
+            "pc_expected_count": None,
+        }
+
     def forward(
         self,
         hidden_states: torch.Tensor,

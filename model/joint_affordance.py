@@ -74,6 +74,10 @@ class JointAffordanceModel(nn.Module):
             img_placeholder_token="<img_aff>",
             pc_placeholder_token="<pc_aff>",
         )
+        # 只有在执行路由设计相关的“消融”操作时，才应将此开关设置为“fixed_anchor”状态。
+        self.routing_design_ablation = None
+        assert self.routing_design_ablation is None, "手动注释这行以启用 fixed-anchor 的路由模式"
+
         # 兼容现有训练/日志代码使用的字段名
         self.img_placeholder_token = self.router.img_placeholder_token
         self.pc_placeholder_token = self.router.pc_placeholder_token
@@ -197,7 +201,7 @@ class JointAffordanceModel(nn.Module):
         if hidden_states is not None:
             img_available = img_valid_mask if img_valid_mask is not None else None
             pc_available = (pc_valid_lengths > 0) if pc_valid_lengths is not None else None
-            route_out = self.router(
+            route_kwargs = dict(
                 hidden_states=hidden_states,
                 attention_mask=model_attention_mask,
                 img_available=img_available,
@@ -205,6 +209,10 @@ class JointAffordanceModel(nn.Module):
                 labels=model_labels,
                 base_token_ids=logits_token_ids,
             )
+            if self.routing_design_ablation == "fixed_anchor":
+                route_out = self.router.fixed_anchor_forward(**route_kwargs)
+            else:
+                route_out = self.router(**route_kwargs)
 
             # ---- 3. 2D 图像分割 ----
             image_embeddings = self.image_decoder.get_visual_embs(images)
