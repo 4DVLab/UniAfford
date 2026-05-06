@@ -1082,6 +1082,9 @@ class ReasonAff_IMG(Image):
         "train": ("train_new", "train"),
         "test": ("test_new", "test"),
     }
+    filter_train_test_overlap = True
+    overlap_reference_split = "test"
+    restore_image_to_mask_size = True
     progress_interval = 200
 
     def __init__(self, img, obj_type, aff_mask_dict=None, obj_mask=None, visible_mask=None, **kwargs):
@@ -1120,15 +1123,37 @@ class ReasonAff_IMG(Image):
         return arr
 
     @classmethod
-    def _load_split(cls, dataset_root_path, split_name):
+    def _load_raw_split(cls, dataset_root_path, split_name):
         from importlib import import_module
 
         datasets = import_module('datasets')
         root_dir, hf_split = cls.split_dirs[split_name]
         dataset_path = os.path.join(dataset_root_path, root_dir)
-        data = datasets.load_from_disk(dataset_path)[hf_split]
+        return datasets.load_from_disk(dataset_path)[hf_split]
+
+    @classmethod
+    def _load_split(cls, dataset_root_path, split_name):
+        data = cls._load_raw_split(dataset_root_path, split_name)
         # mask 在原数据中是大尺寸 bool Sequence；numpy 格式避免逐样本 Python list 转换，速度提升明显。
         return data.with_format("numpy", columns=["image", "mask"], output_all_columns=True)
+
+    @staticmethod
+    def _row_signature(row):
+        """临时用于过滤 train/test 泄漏；id 在两个 split 内会重复，不能作为签名。"""
+        return (
+            str(row["problem"]),
+            str(row["solution"]),
+            str(row["aff_name"]),
+            str(row["part_name"]),
+            int(row["img_height"]),
+            int(row["img_width"]),
+        )
+
+    @classmethod
+    def _build_overlap_signatures(cls, dataset_root_path):
+        rows = cls._load_raw_split(dataset_root_path, cls.overlap_reference_split)
+        rows = rows.remove_columns(["image", "mask"])
+        return {cls._row_signature(row) for row in rows}
 
     @classmethod
     def load_all(cls, dataset_root_path, obj_type=None, aff_type=None, **kwargs):
@@ -1143,11 +1168,29 @@ class ReasonAff_IMG(Image):
 
         def iterator():
             loaded = 0
+            skipped_overlap = 0
+            overlap_signatures = None
             for split_name in cls.split_names:
+                if split_name == "train" and cls.filter_train_test_overlap:
+                    overlap_signatures = cls._build_overlap_signatures(root)
+                    print(
+                        f"ReasonAff_IMG: 将从 train 中过滤 {len(overlap_signatures)} 条 "
+                        f"{cls.overlap_reference_split} 重叠签名"
+                    )
                 rows = cls._load_split(root, split_name)
                 for row in rows:
+                    if overlap_signatures is not None and cls._row_signature(row) in overlap_signatures:
+                        skipped_overlap += 1
+                        continue
+
                     img = cls._to_bgr_image(row["image"])
-                    mask = cls._to_gray_mask(row["mask"], target_shape=img.shape[:2])
+                    mask = cls._to_gray_mask(row["mask"], target_shape=(int(row["img_height"]), int(row["img_width"])))
+                    if cls.restore_image_to_mask_size and img.shape[:2] != mask.shape[:2]:
+                        img = cv2.resize(
+                            img,
+                            (mask.shape[1], mask.shape[0]),
+                            interpolation=cv2.INTER_LINEAR,
+                        )
                     obj_label = cls._normalize_name(obj_type or row["part_name"], fallback='reasonaff')
                     aff_label = cls._normalize_name(aff_type or row["aff_name"], fallback='affordance')
 
@@ -1168,7 +1211,10 @@ class ReasonAff_IMG(Image):
                         )
                     loaded += 1
                     if cls.progress_interval and loaded % cls.progress_interval == 0:
-                        print(f"loading ReasonAff IMG: {loaded} samples")
+                        print(
+                            f"loading ReasonAff IMG: {loaded} samples"
+                            + (f", skipped_overlap={skipped_overlap}" if skipped_overlap else "")
+                        )
                     yield img_obj
 
         return iterator()
