@@ -1,0 +1,49 @@
+{
+  "dataset_root": "../dataset",
+  "output_dir": "../outputs/rendered_targets",
+  "output": {
+    "mode": "both",
+    "grid": {
+      "columns": 4,
+      "rows": null,
+      "cell_width": 800,
+      "cell_height": 800,
+      "padding": 12,
+      "background": [255, 255, 255]
+    }
+  },
+  "render": {
+    "image": {
+      "alpha": 0.5,
+      "color_rgb": [255, 0, 0],
+      "threshold": 0.0,
+      "extension": ".jpg"
+    },
+    "point_cloud": {
+      "size": 800,
+      "elev": 30,
+      "azim": 45,
+      "point_size": 8,
+      "max_points": 20000,
+      "extension": ".jpg"
+    }
+  },
+  "items": [
+    {
+      "name": "spoon_grasp_img120_pc186",
+      "obj_type": "Spoon",
+      "img_id": 120,
+      "img_aff": "grasp",
+      "pc_id": 186,
+      "pc_aff": "wrapgrasp"
+    },
+    {
+      "name": "spoon_hold_img431_pc203",
+      "obj_type": "Spoon",
+      "img_id": 431,
+      "img_aff": "hold",
+      "pc_id": 203,
+      "pc_aff": "contain"
+    }
+  ]
+}
