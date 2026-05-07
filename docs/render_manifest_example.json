@@ -30,7 +30,16 @@
       "max_points": 6000,
       "background": [255, 255, 255],
       "ground_plane": true,
-      "extension": ".jpg"
+      "extension": ".jpg",
+      "iagnet": {
+        "size": 800,
+        "sample_count": 256,
+        "fov": 25,
+        "sphere_radius": 0.025,
+        "max_points": 2048,
+        "camera_origin": "3,3,3",
+        "radiance": 6
+      }
     }
   },
   "images": [

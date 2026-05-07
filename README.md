@@ -131,6 +131,26 @@ Manifest 顶层字段：
 
 注意：`images` 与 `point_clouds` 是两个独立列表，不要求图片与点云一一配对；渲染会分别生成 2D 和 3D 结果。
 
+如果需要尽量复现 IAGNet 的高质量点云渲染（小球、Mitsuba path tracing、地面阴影、面积光），使用独立脚本生成 Mitsuba XML：
+
+```bash
+python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json
+```
+
+这会读取 manifest 中的 `point_clouds`，输出到 `output_dir/iagnet_xml/`。如果本机已安装 Mitsuba，并且命令行可直接调用 `mitsuba`，可以继续批量渲染 EXR：
+
+```bash
+python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json --run-mitsuba
+```
+
+如果还安装了 `OpenEXR` 和 `Imath`，可以同时转 JPG：
+
+```bash
+python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json --run-mitsuba --convert-jpg
+```
+
+IAGNet 风格参数写在 `render.point_cloud.iagnet` 下：`sphere_radius` 控制球大小，`sample_count` 控制 Mitsuba 采样数，`fov` 控制相机视角，`camera_origin` 默认 `"3,3,3"`，`radiance` 控制面积光强度，`max_points` 控制导出到 XML 的点数上限。
+
 示例：
 
 ```json
