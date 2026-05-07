@@ -10,6 +10,7 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -184,6 +185,33 @@ def _find_rgb_path(dataset_root: str, obj_type: str, img_id: int) -> Optional[st
     return None
 
 
+def _find_mask_path(dataset_root: str, obj_type: str, aff_type: str, img_id: int) -> Optional[str]:
+    mask_dir = os.path.join(dataset_root, obj_type, "Image", "mask", aff_type)
+    normalized_obj = _normalize(obj_type)
+    prefixes = [obj_type]
+    if normalized_obj != obj_type:
+        prefixes.append(normalized_obj)
+    for prefix in prefixes:
+        for ext in (".png", ".jpg", ".jpeg"):
+            candidate = os.path.join(mask_dir, f"{prefix}_{img_id}_{aff_type}{ext}")
+            if os.path.exists(candidate):
+                return candidate
+    return None
+
+
+def _find_point_path(dataset_root: str, obj_type: str, pc_id: int) -> Optional[str]:
+    pc_dir = os.path.join(dataset_root, obj_type, "PointCloud")
+    normalized_obj = _normalize(obj_type)
+    prefixes = [obj_type]
+    if normalized_obj != obj_type:
+        prefixes.append(normalized_obj)
+    for prefix in prefixes:
+        candidate = os.path.join(pc_dir, f"{prefix}_{pc_id}.csv")
+        if os.path.exists(candidate):
+            return candidate
+    return None
+
+
 def _sample_ids(ids: Sequence[int], limit: int, rng: Optional[random.Random]) -> List[int]:
     ids = list(ids)
     if limit <= 0 or len(ids) <= limit:
@@ -206,39 +234,67 @@ def _iter_selected_affs(
 
 def _filter_image_ids_by_files(dataset_root: str, obj_type: str, aff_type: str, ids: Sequence[int]) -> List[int]:
     """Keep ids whose RGB and mask files are present."""
-    mask_dir = os.path.join(dataset_root, obj_type, "Image", "mask", aff_type)
-    normalized_obj = _normalize(obj_type)
-    prefixes = [obj_type]
-    if normalized_obj != obj_type:
-        prefixes.append(normalized_obj)
     kept = []
     for img_id in ids:
         if not _find_rgb_path(dataset_root, obj_type, img_id):
             continue
-        has_mask = False
-        for prefix in prefixes:
-            for ext in (".png", ".jpg", ".jpeg"):
-                if os.path.exists(os.path.join(mask_dir, f"{prefix}_{img_id}_{aff_type}{ext}")):
-                    has_mask = True
-                    break
-            if has_mask:
-                break
-        if has_mask:
+        if _find_mask_path(dataset_root, obj_type, aff_type, img_id):
             kept.append(int(img_id))
     return sorted(set(kept))
 
 
 def _filter_point_ids_by_files(dataset_root: str, obj_type: str, ids: Sequence[int]) -> List[int]:
-    pc_dir = os.path.join(dataset_root, obj_type, "PointCloud")
-    normalized_obj = _normalize(obj_type)
-    prefixes = [obj_type]
-    if normalized_obj != obj_type:
-        prefixes.append(normalized_obj)
     kept = []
     for pc_id in ids:
-        if any(os.path.exists(os.path.join(pc_dir, f"{prefix}_{pc_id}.csv")) for prefix in prefixes):
+        if _find_point_path(dataset_root, obj_type, pc_id):
             kept.append(int(pc_id))
     return sorted(set(kept))
+
+
+def _copy_file_preserve_relative(src: str, dataset_root: str, output_root: str) -> Optional[str]:
+    if not src or not os.path.exists(src):
+        return None
+    rel_path = os.path.relpath(src, dataset_root)
+    dst = os.path.join(output_root, rel_path)
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    shutil.copy2(src, dst)
+    return dst
+
+
+def copy_selected_files(manifest: Dict, source_dataset_root: str, output_root: str) -> Dict[str, int]:
+    """Copy selected RGB/mask/point-cloud files while preserving dataset layout."""
+    source_dataset_root = os.path.abspath(source_dataset_root)
+    output_root = os.path.abspath(output_root)
+    copied = {"rgb": 0, "mask": 0, "point_cloud": 0}
+    seen: Set[str] = set()
+
+    for item in manifest.get("images", []):
+        obj_type = item.get("obj_type")
+        img_id = item.get("img_id")
+        aff_type = item.get("aff")
+        if obj_type is None or img_id is None or aff_type is None:
+            continue
+        for src, key in (
+            (_find_rgb_path(source_dataset_root, obj_type, int(img_id)), "rgb"),
+            (_find_mask_path(source_dataset_root, obj_type, aff_type, int(img_id)), "mask"),
+        ):
+            if src and src not in seen:
+                _copy_file_preserve_relative(src, source_dataset_root, output_root)
+                seen.add(src)
+                copied[key] += 1
+
+    for item in manifest.get("point_clouds", []):
+        obj_type = item.get("obj_type")
+        pc_id = item.get("pc_id")
+        if obj_type is None or pc_id is None:
+            continue
+        src = _find_point_path(source_dataset_root, obj_type, int(pc_id))
+        if src and src not in seen:
+            _copy_file_preserve_relative(src, source_dataset_root, output_root)
+            seen.add(src)
+            copied["point_cloud"] += 1
+
+    return copied
 
 
 def build_render_manifest(
@@ -353,6 +409,10 @@ def main() -> None:
                         help="Manifest output.mode.")
     parser.add_argument("--absolute-paths", action="store_true",
                         help="Write absolute dataset_root instead of a path relative to the manifest.")
+    parser.add_argument("--copy-selected-to", default=None,
+                        help="Optional directory to copy selected RGB/mask/point-cloud files into, preserving dataset layout.")
+    parser.add_argument("--use-copy-root", action="store_true",
+                        help="When --copy-selected-to is set, write manifest dataset_root to the copied subset directory.")
     args = parser.parse_args()
 
     output_path = os.path.abspath(args.output)
@@ -370,7 +430,22 @@ def main() -> None:
         metadata_file=args.metadata_file,
     )
 
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    if args.copy_selected_to:
+        copy_root = os.path.abspath(args.copy_selected_to)
+        copied = copy_selected_files(manifest, os.path.abspath(args.dataset_root), copy_root)
+        manifest["metadata"]["copied_selected_to"] = copy_root
+        manifest["metadata"]["copied_selected_counts"] = copied
+        if args.use_copy_root:
+            manifest_base = os.path.dirname(output_path)
+            manifest["dataset_root"] = _path_for_json(copy_root, manifest_base, absolute=args.absolute_paths)
+        print(
+            "Selected files copied: "
+            f"rgb={copied['rgb']}, mask={copied['mask']}, point_cloud={copied['point_cloud']} -> {copy_root}"
+        )
+
+    output_parent = os.path.dirname(output_path)
+    if output_parent:
+        os.makedirs(output_parent, exist_ok=True)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, ensure_ascii=False, indent=2)
     print(f"Render manifest saved: {output_path}")

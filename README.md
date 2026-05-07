@@ -202,6 +202,19 @@ python scripts/generate_render_manifest.py \
 - `--aff-types grasp,contain`: 只导出指定 affordance。
 - `--backend iagnet`: 生成 manifest 时直接指定 3D 渲染后端。
 - `--output-mode single|grid|both`: 指定 manifest 的输出模式。
+- `--copy-selected-to /path/to/subset`: 将最终选中的 RGB、mask、点云 CSV 按原目录结构复制到新目录。
+- `--use-copy-root`: 配合 `--copy-selected-to` 使用，让生成的 manifest 直接指向复制出的子集目录。
+
+复制出的目录保持原数据集结构，例如：
+
+```bash
+subset_root/
+├── spoon/
+│   ├── Image/
+│   │   ├── rgb/
+│   │   └── mask/<aff>/
+│   └── PointCloud/
+```
 
 示例：
 
