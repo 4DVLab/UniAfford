@@ -58,6 +58,10 @@ XML_HEAD = """<scene version="0.6.0">
         <float name="intIOR" value="1.46"/>
         <rgb name="diffuseReflectance" value="1,1,1"/>
     </bsdf>
+"""
+
+# 可选：均匀环境光。radiance 过大时会在 path tracer 下冲淡阴影并把彩色漫反射“洗白”。
+XML_ENV_CONSTANT = """
     <emitter type="constant">
         <rgb name="radiance" value="{background_radiance},{background_radiance},{background_radiance}"/>
     </emitter>
@@ -134,8 +138,12 @@ def _write_iagnet_xml(
     sample_count = int(cfg.get("sample_count", 256))
     fov = float(cfg.get("fov", 25))
     radiance = float(cfg.get("radiance", 6))
-    background_radiance = float(cfg.get("background_radiance", 1.0))
-    camera_origin = cfg.get("camera_origin", "3,3,3")
+    background_radiance = float(cfg.get("background_radiance", 0.0))
+    camera_origin_raw = cfg.get("camera_origin", "3,3,3")
+    if isinstance(camera_origin_raw, (list, tuple)):
+        camera_origin_str = ",".join(str(float(v)) for v in camera_origin_raw)
+    else:
+        camera_origin_str = str(camera_origin_raw).strip()
     ground_scale = float(cfg.get("ground_scale", 100.0))
 
     xml_parts = [
@@ -144,10 +152,13 @@ def _write_iagnet_xml(
             height=height,
             sample_count=sample_count,
             fov=fov,
-            camera_origin=camera_origin,
-            background_radiance=background_radiance,
+            camera_origin=camera_origin_str,
         )
     ]
+    if background_radiance > 1e-8:
+        xml_parts.append(
+            XML_ENV_CONSTANT.format(background_radiance=background_radiance)
+        )
     posed_points = _apply_iagnet_pose(points)
     for point, color in zip(posed_points, colors):
         xml_parts.append(
@@ -309,12 +320,12 @@ def _build_mitsuba_scene_dict(points: np.ndarray, colors: np.ndarray, cfg: Dict,
     sample_count = int(cfg.get("sample_count", 256))
     fov = float(cfg.get("fov", 25))
     radiance = float(cfg.get("radiance", 6))
-    background_radiance = float(cfg.get("background_radiance", 1.0))
+    background_radiance = float(cfg.get("background_radiance", 0.0))
     camera_origin = _parse_vec3(cfg.get("camera_origin", "3,3,3"))
     ground_scale = float(cfg.get("ground_scale", 100.0))
 
     transform = mi.ScalarTransform4f
-    scene = {
+    scene: Dict = {
         "type": "scene",
         "integrator": {"type": "path", "max_depth": -1},
         "sensor": {
@@ -350,10 +361,6 @@ def _build_mitsuba_scene_dict(points: np.ndarray, colors: np.ndarray, cfg: Dict,
                 "diffuse_reflectance": _mitsuba_rgb((1.0, 1.0, 1.0)),
             },
         },
-        "background": {
-            "type": "constant",
-            "radiance": _mitsuba_rgb((background_radiance, background_radiance, background_radiance)),
-        },
         "area_light": {
             "type": "rectangle",
             "to_world": transform.look_at(
@@ -367,6 +374,11 @@ def _build_mitsuba_scene_dict(points: np.ndarray, colors: np.ndarray, cfg: Dict,
             },
         },
     }
+    if background_radiance > 1e-8:
+        scene["background"] = {
+            "type": "constant",
+            "radiance": _mitsuba_rgb((background_radiance, background_radiance, background_radiance)),
+        }
 
     posed_points = _apply_iagnet_pose(points)
     for idx, (point, color) in enumerate(zip(posed_points, colors)):

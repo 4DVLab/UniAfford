@@ -536,7 +536,7 @@ def render_targets_from_json(manifest_path: str, dataset_root_override: Optional
             cv2.imwrite(out_path, overlay)
             saved_paths["2d"].append(out_path)
 
-    point_backend = str(point_cfg.get("backend", "realistic")).lower()
+    point_backend = str(point_cfg.get("backend", "iagnet")).lower()
     if point_items and point_backend in {"iagnet", "mitsuba", "mitsuba_iagnet"}:
         from scripts.render_points import export_iagnet_style
 

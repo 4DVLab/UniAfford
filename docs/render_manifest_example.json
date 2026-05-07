@@ -20,7 +20,7 @@
       "extension": ".jpg"
     },
     "point_cloud": {
-      "backend": "realistic",
+      "backend": "iagnet",
       "size": 800,
       "fov": 25,
       "camera_origin": [3, 3, 3],
@@ -41,10 +41,10 @@
         "max_points": 2048,
         "camera_origin": "3,3,3",
         "radiance": 6,
-        "background_radiance": 1.0,
+        "background_radiance": 0.0,
         "ground_scale": 100.0,
-        "run_mitsuba": false,
-        "convert_jpg": false,
+        "run_mitsuba": true,
+        "convert_jpg": true,
         "mitsuba_renderer": "python",
         "mitsuba_variant": "cuda_ad_rgb",
         "exr_wait_timeout": 60.0,
