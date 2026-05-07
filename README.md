@@ -143,7 +143,7 @@ python scripts/render_iagnet_style.py --render-json docs/render_manifest_example
 python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json --run-mitsuba
 ```
 
-脚本默认使用 Mitsuba Python API，并设置 `--mitsuba-variant scalar_rgb`，这个 variant 不走 Dr.Jit LLVM/JIT 后端，适合避开 `LLVM` 库找不到的问题。若仍然报 LLVM，通常是进程里已有代码提前导入 Mitsuba 并设置了 `llvm_*` 或 `cuda_*` variant；请在全新的命令行进程里运行上面的命令，或显式指定：
+脚本默认使用 Mitsuba Python API，并设置 `--mitsuba-variant cuda_ad_rgb`，默认走 CUDA GPU 渲染。若当前机器没有可用 CUDA/LLVM 环境，可以切换到 CPU fallback：
 
 ```bash
 python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json --run-mitsuba --mitsuba-variant scalar_rgb
@@ -162,6 +162,7 @@ python scripts/render_iagnet_style.py --render-json docs/render_manifest_example
 ```
 
 IAGNet 风格参数写在 `render.point_cloud.iagnet` 下：`sphere_radius` 控制球大小，`sample_count` 控制 Mitsuba 采样数，`fov` 控制相机视角，`camera_origin` 默认 `"3,3,3"`，`radiance` 控制面积光强度，`max_points` 控制导出到 XML 的点数上限。
+若渲染图出现明显地面边界，可保持默认 `ground_scale: 100.0` 和 `background_radiance: 1.0`，让白色地面覆盖相机视野并用白色环境背景填充地面外区域。
 
 也可以直接在通用批量导出入口中选择 IAGNet 后端：
 
@@ -174,7 +175,7 @@ IAGNet 风格参数写在 `render.point_cloud.iagnet` 下：`sphere_radius` 控�
         "run_mitsuba": true,
         "convert_jpg": true,
         "mitsuba_renderer": "python",
-        "mitsuba_variant": "scalar_rgb",
+        "mitsuba_variant": "cuda_ad_rgb",
         "exr_wait_timeout": 60.0,
         "exr_wait_interval": 0.25
       }

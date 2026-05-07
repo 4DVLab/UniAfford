@@ -301,9 +301,10 @@ def _render_point_cloud_realistic(
     renderer.scene.add_geometry("affordance_spheres", mesh, material)
 
     if ground_plane:
-        plane = o3d.geometry.TriangleMesh.create_box(width=1.8, height=1.8, depth=0.01)
-        plane.translate((-0.9, -0.9, -0.58), relative=True)
-        plane.paint_uniform_color((0.94, 0.94, 0.92))
+        plane_size = 20.0
+        plane = o3d.geometry.TriangleMesh.create_box(width=plane_size, height=plane_size, depth=0.01)
+        plane.translate((-plane_size / 2.0, -plane_size / 2.0, -0.58), relative=True)
+        plane.paint_uniform_color((bg[0], bg[1], bg[2]))
         plane.compute_vertex_normals()
         plane_material = rendering.MaterialRecord()
         plane_material.shader = "defaultLit"
@@ -517,7 +518,7 @@ def render_targets_from_json(manifest_path: str, dataset_root_override: Optional
             convert_jpg=bool(iagnet_cfg.get("convert_jpg", False)),
             mitsuba_bin=str(iagnet_cfg.get("mitsuba_bin", "mitsuba")),
             mitsuba_renderer=str(iagnet_cfg.get("mitsuba_renderer", "python")),
-            mitsuba_variant=str(iagnet_cfg.get("mitsuba_variant", "scalar_rgb")),
+            mitsuba_variant=str(iagnet_cfg.get("mitsuba_variant", "cuda_ad_rgb")),
             exr_wait_timeout=float(iagnet_cfg.get("exr_wait_timeout", 60.0)),
             exr_wait_interval=float(iagnet_cfg.get("exr_wait_interval", 0.25)),
         )
@@ -581,11 +582,15 @@ def render_targets_from_json(manifest_path: str, dataset_root_override: Optional
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="批量渲染 2D/3D 数据")
-    parser.add_argument('--render-json', type=str, default=None,
+    parser.add_argument('--render-json', type=str, required=True,
                         help='批量导出模式：读取 JSON manifest，按 images 与 point_clouds 独立列表渲染保存，JSON格式参照 docs/render_manifest_example.json')
+    parser.add_argument('--dataset-root', type=str, default=None,
+                        help='可选：覆盖 JSON manifest 中的 dataset_root')
     args = parser.parse_args()
 
-    if args.render_json:
-        saved_paths = render_targets_from_json(args.render_json, dataset_root_override=args.dataset_root)
-        total = sum(len(paths) for paths in saved_paths.values())
-        print(f"批量渲染完成，共保存 {total} 个文件")
+    saved_paths = render_targets_from_json(args.render_json, dataset_root_override=args.dataset_root)
+    total = sum(len(paths) for paths in saved_paths.values())
+    print(f"批量渲染完成，共保存 {total} 个文件")
+    for group, paths in saved_paths.items():
+        for path in paths:
+            print(f"{group}: {path}")

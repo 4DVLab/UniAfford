@@ -39,10 +39,12 @@
         "max_points": 2048,
         "camera_origin": "3,3,3",
         "radiance": 6,
+        "background_radiance": 1.0,
+        "ground_scale": 100.0,
         "run_mitsuba": false,
         "convert_jpg": false,
         "mitsuba_renderer": "python",
-        "mitsuba_variant": "scalar_rgb",
+        "mitsuba_variant": "cuda_ad_rgb",
         "exr_wait_timeout": 60.0,
         "exr_wait_interval": 0.25
       }

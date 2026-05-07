@@ -58,6 +58,9 @@ XML_HEAD = """<scene version="0.6.0">
         <float name="intIOR" value="1.46"/>
         <rgb name="diffuseReflectance" value="1,1,1"/>
     </bsdf>
+    <emitter type="constant">
+        <rgb name="radiance" value="{background_radiance},{background_radiance},{background_radiance}"/>
+    </emitter>
 """
 
 
@@ -78,7 +81,7 @@ XML_TAIL = """
     <shape type="rectangle">
         <ref name="bsdf" id="surfaceMaterial"/>
         <transform name="toWorld">
-            <scale x="10" y="10" z="1"/>
+            <scale x="{ground_scale}" y="{ground_scale}" z="1"/>
             <translate x="0" y="0" z="-0.5"/>
         </transform>
     </shape>
@@ -131,7 +134,9 @@ def _write_iagnet_xml(
     sample_count = int(cfg.get("sample_count", 256))
     fov = float(cfg.get("fov", 25))
     radiance = float(cfg.get("radiance", 6))
+    background_radiance = float(cfg.get("background_radiance", 1.0))
     camera_origin = cfg.get("camera_origin", "3,3,3")
+    ground_scale = float(cfg.get("ground_scale", 100.0))
 
     xml_parts = [
         XML_HEAD.format(
@@ -140,6 +145,7 @@ def _write_iagnet_xml(
             sample_count=sample_count,
             fov=fov,
             camera_origin=camera_origin,
+            background_radiance=background_radiance,
         )
     ]
     posed_points = _apply_iagnet_pose(points)
@@ -155,7 +161,7 @@ def _write_iagnet_xml(
                 b=float(color[2]),
             )
         )
-    xml_parts.append(XML_TAIL.format(radiance=radiance))
+    xml_parts.append(XML_TAIL.format(radiance=radiance, ground_scale=ground_scale))
 
     with open(xml_path, "w", encoding="utf-8") as f:
         f.write(''.join(xml_parts))
@@ -187,7 +193,21 @@ def _convert_exr_to_jpg(exr_path: str, jpg_path: str) -> None:
         channel = np.clip(channel * 255.0, 0, 255).astype(np.uint8)
         rgb8.append(Image.frombytes("L", size, channel.tobytes()))
     os.makedirs(os.path.dirname(jpg_path), exist_ok=True)
-    Image.merge("RGB", rgb8).save(jpg_path, "JPEG", quality=95)
+    tmp_path = f"{jpg_path}.tmp"
+    try:
+        image = Image.merge("RGB", rgb8)
+        image.save(tmp_path, "JPEG", quality=95)
+        _wait_for_file_stable(tmp_path)
+        _validate_image_file(tmp_path)
+        os.replace(tmp_path, jpg_path)
+        _wait_for_file_stable(jpg_path)
+        _validate_image_file(jpg_path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def _wait_for_file_stable(
@@ -212,6 +232,17 @@ def _wait_for_file_stable(
                 last_size = size
         time.sleep(float(poll_interval))
     raise TimeoutError(f"等待渲染输出文件稳定超时: {path}")
+
+
+def _validate_image_file(path: str) -> None:
+    """Ensure an image exists, is non-empty, and can be decoded by PIL."""
+    if not os.path.exists(path) or os.path.getsize(path) <= 0:
+        raise RuntimeError(f"图片文件为空或不存在: {path}")
+    try:
+        with Image.open(path) as img:
+            img.verify()
+    except Exception as exc:
+        raise RuntimeError(f"图片文件无法读取: {path}") from exc
 
 
 def _run_mitsuba_cli(
@@ -278,7 +309,9 @@ def _build_mitsuba_scene_dict(points: np.ndarray, colors: np.ndarray, cfg: Dict,
     sample_count = int(cfg.get("sample_count", 256))
     fov = float(cfg.get("fov", 25))
     radiance = float(cfg.get("radiance", 6))
+    background_radiance = float(cfg.get("background_radiance", 1.0))
     camera_origin = _parse_vec3(cfg.get("camera_origin", "3,3,3"))
+    ground_scale = float(cfg.get("ground_scale", 100.0))
 
     transform = mi.ScalarTransform4f
     scene = {
@@ -308,7 +341,7 @@ def _build_mitsuba_scene_dict(points: np.ndarray, colors: np.ndarray, cfg: Dict,
         },
         "ground": {
             "type": "rectangle",
-            "to_world": transform.translate([0.0, 0.0, -0.5]) @ transform.scale([10.0, 10.0, 1.0]),
+            "to_world": transform.translate([0.0, 0.0, -0.5]) @ transform.scale([ground_scale, ground_scale, 1.0]),
             "bsdf": {
                 "type": "roughplastic",
                 "distribution": "ggx",
@@ -316,6 +349,10 @@ def _build_mitsuba_scene_dict(points: np.ndarray, colors: np.ndarray, cfg: Dict,
                 "int_ior": 1.46,
                 "diffuse_reflectance": _mitsuba_rgb((1.0, 1.0, 1.0)),
             },
+        },
+        "background": {
+            "type": "constant",
+            "radiance": _mitsuba_rgb((background_radiance, background_radiance, background_radiance)),
         },
         "area_light": {
             "type": "rectangle",
@@ -350,7 +387,7 @@ def _run_mitsuba_python(
     colors: np.ndarray,
     exr_path: str,
     cfg: Dict,
-    variant: str = "scalar_rgb",
+    variant: str = "cuda_ad_rgb",
     exr_wait_timeout: float = 60.0,
     exr_wait_interval: float = 0.25,
 ) -> str:
@@ -375,7 +412,7 @@ def export_iagnet_style(
     convert_jpg: bool = False,
     mitsuba_bin: str = "mitsuba",
     mitsuba_renderer: str = "python",
-    mitsuba_variant: str = "scalar_rgb",
+    mitsuba_variant: str = "cuda_ad_rgb",
     exr_wait_timeout: float = 60.0,
     exr_wait_interval: float = 0.25,
 ) -> Dict[str, List[str]]:
@@ -426,8 +463,9 @@ def export_iagnet_style(
                     )
                 except Exception as exc:
                     warnings.warn(
-                        "Mitsuba Python API 渲染失败。若报 LLVM 相关错误，请确认使用 "
-                        f"--mitsuba-variant scalar_rgb，且没有提前导入 mitsuba 并设置 llvm/cuda variant。错误: {exc}"
+                        "Mitsuba Python API 渲染失败。默认使用 cuda_ad_rgb；"
+                        "如果 CUDA/LLVM 环境不可用，可改用 --mitsuba-variant scalar_rgb。"
+                        f"错误: {exc}"
                     )
                     exr_path = None
             else:
@@ -463,8 +501,8 @@ def main() -> None:
     )
     parser.add_argument(
         "--mitsuba-variant",
-        default="scalar_rgb",
-        help="Mitsuba Python variant. scalar_rgb avoids Dr.Jit LLVM/JIT dependency.",
+        default="cuda_ad_rgb",
+        help="Mitsuba Python variant. Default uses CUDA GPU; use scalar_rgb for CPU fallback.",
     )
     parser.add_argument("--mitsuba-bin", default="mitsuba", help="Mitsuba executable name or path.")
     parser.add_argument("--convert-jpg", action="store_true", help="Convert rendered EXR files to JPG.")
