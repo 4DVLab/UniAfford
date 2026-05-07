@@ -187,7 +187,7 @@ def _convert_exr_to_jpg(exr_path: str, jpg_path: str) -> None:
     Image.merge("RGB", rgb8).save(jpg_path, "JPEG", quality=95)
 
 
-def _run_mitsuba(xml_path: str, mitsuba_bin: str) -> Optional[str]:
+def _run_mitsuba_cli(xml_path: str, mitsuba_bin: str) -> Optional[str]:
     result = subprocess.run(
         [mitsuba_bin, os.path.basename(xml_path)],
         cwd=os.path.dirname(xml_path),
@@ -200,6 +200,127 @@ def _run_mitsuba(xml_path: str, mitsuba_bin: str) -> Optional[str]:
     return exr_path if os.path.exists(exr_path) else None
 
 
+def _init_mitsuba_python(variant: str):
+    """Import Mitsuba with a non-LLVM scalar variant to avoid Dr.Jit LLVM errors."""
+    os.environ.setdefault("MITSUBA_VARIANT", variant)
+    import mitsuba as mi
+
+    try:
+        mi.set_variant(variant)
+    except Exception as exc:
+        current = None
+        try:
+            current = mi.variant()
+        except Exception:
+            pass
+        if current != variant:
+            raise RuntimeError(
+                f"无法设置 Mitsuba variant={variant}。如果你遇到 LLVM 报错，"
+                "请确认没有在别处提前设置 llvm_* / cuda_* variant。"
+            ) from exc
+    return mi
+
+
+def _parse_vec3(text: str) -> List[float]:
+    if isinstance(text, (list, tuple)):
+        return [float(v) for v in text]
+    return [float(v.strip()) for v in str(text).split(',')]
+
+
+def _mitsuba_rgb(value: Tuple[float, float, float]) -> Dict:
+    return {"type": "rgb", "value": [float(value[0]), float(value[1]), float(value[2])]}
+
+
+def _build_mitsuba_scene_dict(points: np.ndarray, colors: np.ndarray, cfg: Dict, mi) -> Dict:
+    width = int(cfg.get("width", cfg.get("size", 800)))
+    height = int(cfg.get("height", cfg.get("size", 800)))
+    sphere_radius = float(cfg.get("sphere_radius", 0.025))
+    sample_count = int(cfg.get("sample_count", 256))
+    fov = float(cfg.get("fov", 25))
+    radiance = float(cfg.get("radiance", 6))
+    camera_origin = _parse_vec3(cfg.get("camera_origin", "3,3,3"))
+
+    transform = mi.ScalarTransform4f
+    scene = {
+        "type": "scene",
+        "integrator": {"type": "path", "max_depth": -1},
+        "sensor": {
+            "type": "perspective",
+            "near_clip": 0.1,
+            "far_clip": 100.0,
+            "fov": fov,
+            "to_world": transform.look_at(
+                origin=camera_origin,
+                target=[0.0, 0.0, 0.0],
+                up=[0.0, 0.0, 1.0],
+            ),
+            "sampler": {
+                "type": "independent",
+                "sample_count": sample_count,
+            },
+            "film": {
+                "type": "hdrfilm",
+                "width": width,
+                "height": height,
+                "pixel_format": "rgb",
+                "rfilter": {"type": "gaussian"},
+            },
+        },
+        "ground": {
+            "type": "rectangle",
+            "to_world": transform.translate([0.0, 0.0, -0.5]) @ transform.scale([10.0, 10.0, 1.0]),
+            "bsdf": {
+                "type": "roughplastic",
+                "distribution": "ggx",
+                "alpha": 0.05,
+                "int_ior": 1.46,
+                "diffuse_reflectance": _mitsuba_rgb((1.0, 1.0, 1.0)),
+            },
+        },
+        "area_light": {
+            "type": "rectangle",
+            "to_world": transform.look_at(
+                origin=[-4.0, 4.0, 20.0],
+                target=[0.0, 0.0, 0.0],
+                up=[0.0, 0.0, 1.0],
+            ) @ transform.scale([10.0, 10.0, 1.0]),
+            "emitter": {
+                "type": "area",
+                "radiance": _mitsuba_rgb((radiance, radiance, radiance)),
+            },
+        },
+    }
+
+    posed_points = _apply_iagnet_pose(points)
+    for idx, (point, color) in enumerate(zip(posed_points, colors)):
+        scene[f"sphere_{idx:05d}"] = {
+            "type": "sphere",
+            "center": [float(point[0]), float(point[1]), float(point[2])],
+            "radius": sphere_radius,
+            "bsdf": {
+                "type": "diffuse",
+                "reflectance": _mitsuba_rgb((float(color[0]), float(color[1]), float(color[2]))),
+            },
+        }
+    return scene
+
+
+def _run_mitsuba_python(
+    points: np.ndarray,
+    colors: np.ndarray,
+    exr_path: str,
+    cfg: Dict,
+    variant: str = "scalar_rgb",
+) -> str:
+    mi = _init_mitsuba_python(variant)
+    scene_dict = _build_mitsuba_scene_dict(points, colors, cfg, mi)
+    scene = mi.load_dict(scene_dict)
+    image = mi.render(scene)
+    os.makedirs(os.path.dirname(exr_path), exist_ok=True)
+    mi.util.write_bitmap(exr_path, image)
+    return exr_path
+
+
 def export_iagnet_style(
     manifest_path: str,
     dataset_root_override: Optional[str] = None,
@@ -207,6 +328,8 @@ def export_iagnet_style(
     run_mitsuba: bool = False,
     convert_jpg: bool = False,
     mitsuba_bin: str = "mitsuba",
+    mitsuba_renderer: str = "python",
+    mitsuba_variant: str = "scalar_rgb",
 ) -> Dict[str, List[str]]:
     manifest = _load_render_manifest(manifest_path, dataset_root_override=dataset_root_override)
     dataset_root = manifest["dataset_root"]
@@ -217,6 +340,7 @@ def export_iagnet_style(
     max_points = xml_cfg.get("max_points", 2048)
 
     xml_dir = os.path.join(output_dir, "iagnet_xml")
+    exr_dir = os.path.join(output_dir, "iagnet_exr")
     jpg_dir = os.path.join(output_dir, "iagnet_jpg")
     point_items = manifest.get("point_clouds", [])
     if not isinstance(point_items, list) or not point_items:
@@ -240,7 +364,24 @@ def export_iagnet_style(
         print(f"XML saved: {xml_path}")
 
         if run_mitsuba:
-            exr_path = _run_mitsuba(xml_path, mitsuba_bin)
+            if mitsuba_renderer == "python":
+                exr_path = os.path.join(exr_dir, f"{_safe_name(name)}.exr")
+                try:
+                    exr_path = _run_mitsuba_python(
+                        points,
+                        colors,
+                        exr_path,
+                        xml_cfg,
+                        variant=mitsuba_variant,
+                    )
+                except Exception as exc:
+                    warnings.warn(
+                        "Mitsuba Python API 渲染失败。若报 LLVM 相关错误，请确认使用 "
+                        f"--mitsuba-variant scalar_rgb，且没有提前导入 mitsuba 并设置 llvm/cuda variant。错误: {exc}"
+                    )
+                    exr_path = None
+            else:
+                exr_path = _run_mitsuba_cli(xml_path, mitsuba_bin)
             if exr_path is not None:
                 outputs["exr"].append(exr_path)
                 print(f"EXR saved: {exr_path}")
@@ -259,6 +400,17 @@ def main() -> None:
     parser.add_argument("--dataset-root", default=None, help="Override dataset_root in manifest.")
     parser.add_argument("--output-dir", default=None, help="Override output_dir in manifest.")
     parser.add_argument("--run-mitsuba", action="store_true", help="Run mitsuba for each generated XML.")
+    parser.add_argument(
+        "--mitsuba-renderer",
+        choices=("python", "cli"),
+        default="python",
+        help="Use Mitsuba Python API by default; cli keeps the original executable workflow.",
+    )
+    parser.add_argument(
+        "--mitsuba-variant",
+        default="scalar_rgb",
+        help="Mitsuba Python variant. scalar_rgb avoids Dr.Jit LLVM/JIT dependency.",
+    )
     parser.add_argument("--mitsuba-bin", default="mitsuba", help="Mitsuba executable name or path.")
     parser.add_argument("--convert-jpg", action="store_true", help="Convert rendered EXR files to JPG.")
     args = parser.parse_args()
@@ -270,6 +422,8 @@ def main() -> None:
         run_mitsuba=args.run_mitsuba,
         convert_jpg=args.convert_jpg,
         mitsuba_bin=args.mitsuba_bin,
+        mitsuba_renderer=args.mitsuba_renderer,
+        mitsuba_variant=args.mitsuba_variant,
     )
     print("Done.")
     for group, paths in outputs.items():

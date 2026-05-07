@@ -137,10 +137,22 @@ Manifest 顶层字段：
 python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json
 ```
 
-这会读取 manifest 中的 `point_clouds`，输出到 `output_dir/iagnet_xml/`。如果本机已安装 Mitsuba，并且命令行可直接调用 `mitsuba`，可以继续批量渲染 EXR：
+这会读取 manifest 中的 `point_clouds`，输出到 `output_dir/iagnet_xml/`。如果已安装 Python 版 Mitsuba，可以继续批量渲染 EXR：
 
 ```bash
 python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json --run-mitsuba
+```
+
+脚本默认使用 Mitsuba Python API，并设置 `--mitsuba-variant scalar_rgb`，这个 variant 不走 Dr.Jit LLVM/JIT 后端，适合避开 `LLVM` 库找不到的问题。若仍然报 LLVM，通常是进程里已有代码提前导入 Mitsuba 并设置了 `llvm_*` 或 `cuda_*` variant；请在全新的命令行进程里运行上面的命令，或显式指定：
+
+```bash
+python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json --run-mitsuba --mitsuba-variant scalar_rgb
+```
+
+如果你安装的是可执行程序版 Mitsuba，并希望沿用 IAGNet 的命令行流程，可以改用 CLI 后端：
+
+```bash
+python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json --run-mitsuba --mitsuba-renderer cli --mitsuba-bin mitsuba
 ```
 
 如果还安装了 `OpenEXR` 和 `Imath`，可以同时转 JPG：
