@@ -8,6 +8,7 @@ colors, sphere primitives, a rough ground plane, perspective camera, and a large
 area light for soft shadows.
 """
 import argparse
+import importlib
 import os
 import subprocess
 import sys
@@ -161,8 +162,8 @@ def _write_iagnet_xml(
 
 def _convert_exr_to_jpg(exr_path: str, jpg_path: str) -> None:
     try:
-        import Imath
-        import OpenEXR
+        Imath = importlib.import_module("Imath")
+        OpenEXR = importlib.import_module("OpenEXR")
     except ImportError as exc:
         raise RuntimeError("EXR 转 JPG 需要安装 OpenEXR 和 Imath") from exc
 
@@ -203,7 +204,7 @@ def _run_mitsuba_cli(xml_path: str, mitsuba_bin: str) -> Optional[str]:
 def _init_mitsuba_python(variant: str):
     """Import Mitsuba with a non-LLVM scalar variant to avoid Dr.Jit LLVM errors."""
     os.environ.setdefault("MITSUBA_VARIANT", variant)
-    import mitsuba as mi
+    mi = importlib.import_module("mitsuba")
 
     try:
         mi.set_variant(variant)
