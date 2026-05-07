@@ -1,10 +1,12 @@
 """
 生成渲染 manifest：基于数据集 metadata/split 自动构建渲染清单。
 
-对于 metadata/split 中同时包含 Image（图像）和 PointCloud（点云）数据的每个物体，
-本脚本会查找两个模态共有的 affordance。
-对于每个共同的 affordance，分别随机导出不超过 N 个图像 ID 与 N 个点云 ID，组合为 manifest，
-供 utils/batch_render.py 和 scripts/render_points.py 等脚本批量渲染使用。
+对于 metadata/split 中同时包含 Image（图像）与 PointCloud（点云）的每个物体，
+默认会查找两个模态共有的 affordance，并对每个共有 aff 分别抽样不超过 N 个图像 ID 与 N 个点云 ID。
+
+使用 --images-only 时，仅读取 Image 模态（无需 PointCloud 条目），按每个物体的全部图像 aff
+导出图像清单（`point_clouds` 为空），适合「只批量渲染整个 2D 数据集」。
+输出 manifest 供 utils/batch_render.py（或 python utils/base_dataset.py --render-json）等批量渲染。
 """
 import argparse
 import json
@@ -232,6 +234,13 @@ def _iter_selected_affs(
     return sorted(shared)
 
 
+def _iter_image_only_affs(image_affs: Dict[str, List[int]], aff_filter: Optional[Set[str]] = None) -> Iterable[str]:
+    keys = set(image_affs.keys())
+    if aff_filter is not None:
+        keys &= aff_filter
+    return sorted(keys)
+
+
 def _filter_image_ids_by_files(dataset_root: str, obj_type: str, aff_type: str, ids: Sequence[int]) -> List[int]:
     """Keep ids whose RGB and mask files are present."""
     kept = []
@@ -309,6 +318,7 @@ def build_render_manifest(
     absolute_paths: bool = False,
     manifest_path: Optional[str] = None,
     metadata_file: Optional[str] = None,
+    images_only: bool = False,
 ) -> Dict:
     dataset_root = os.path.abspath(dataset_root)
     manifest_base = os.path.dirname(os.path.abspath(manifest_path)) if manifest_path else os.getcwd()
@@ -328,32 +338,51 @@ def build_render_manifest(
         "source_metadata_file": None,
         "max_per_aff": max_per_aff,
         "seed": seed,
-        "selection": "shared_affordances_per_object",
+        "selection": "image_only_all_affordances" if images_only else "shared_affordances_per_object",
     }
 
     metadata_image_ids, metadata_point_ids, used_metadata = _load_ids_from_metadata(dataset_root, metadata_file=metadata_file)
     manifest["metadata"]["source_metadata_file"] = used_metadata
-    if not metadata_image_ids or not metadata_point_ids:
+    if images_only:
+        if not metadata_image_ids:
+            raise ValueError("未从 metadata/split 文件中找到可用的 Image ID（--images-only）")
+    elif not metadata_image_ids or not metadata_point_ids:
         raise ValueError("未从 metadata/split 文件中找到可用的 Image/PointCloud ID")
 
-    obj_candidates = sorted(set(metadata_image_ids.keys()) & set(metadata_point_ids.keys()))
+    if images_only:
+        obj_candidates = sorted(metadata_image_ids.keys())
+    else:
+        obj_candidates = sorted(set(metadata_image_ids.keys()) & set(metadata_point_ids.keys()))
     if obj_filter is not None:
         obj_candidates = [obj for obj in obj_candidates if obj in obj_filter]
 
     for obj_norm in obj_candidates:
         obj_type = obj_norm
         image_affs = metadata_image_ids.get(obj_norm)
-        point_affs = metadata_point_ids.get(obj_norm)
-        if image_affs is None or point_affs is None:
+        if image_affs is None:
             continue
+        point_affs = metadata_point_ids.get(obj_norm) if not images_only else None
 
-        for aff in _iter_selected_affs(image_affs, point_affs, aff_filter=aff_filter):
-            image_ids = _filter_image_ids_by_files(dataset_root, obj_type, aff, image_affs[aff])
-            point_ids = _filter_point_ids_by_files(dataset_root, obj_type, point_affs[aff])
-            image_ids = _sample_ids(image_ids, max_per_aff, rng)
-            point_ids = _sample_ids(point_ids, max_per_aff, rng)
-            if not image_ids or not point_ids:
+        if images_only:
+            aff_iter = _iter_image_only_affs(image_affs, aff_filter=aff_filter)
+        else:
+            if point_affs is None:
                 continue
+            aff_iter = _iter_selected_affs(image_affs, point_affs, aff_filter=aff_filter)
+
+        for aff in aff_iter:
+            image_ids = _filter_image_ids_by_files(dataset_root, obj_type, aff, image_affs[aff])
+            image_ids = _sample_ids(image_ids, max_per_aff, rng)
+            if not image_ids:
+                continue
+            if images_only:
+                point_ids: List[int] = []
+            else:
+                assert point_affs is not None
+                point_ids = _filter_point_ids_by_files(dataset_root, obj_type, point_affs[aff])
+                point_ids = _sample_ids(point_ids, max_per_aff, rng)
+                if not point_ids:
+                    continue
             obj_norm = _normalize(obj_type)
             aff_norm = _normalize(aff)
             for img_id in image_ids:
@@ -393,7 +422,12 @@ def main() -> None:
     parser.add_argument("--render-output-dir", default="../outputs/rendered_targets",
                         help="output_dir written into the generated manifest.")
     parser.add_argument("--max-per-aff", type=int, default=10,
-                        help="Max image IDs and max point-cloud IDs sampled per shared obj-aff.")
+                        help="每物体·每 aff 抽样上限；设为 0 表示该 aff 下全部 ID（仍受磁盘上 rgb/mask 存在性过滤）。")
+    parser.add_argument(
+        "--images-only",
+        action="store_true",
+        help="仅根据 Image 模态生成 manifest（point_clouds 为空），用于批量导出整个 2D 数据集。",
+    )
     parser.add_argument("--seed", type=int, default=None,
                         help="Random seed. If omitted, the first sorted IDs are used.")
     parser.add_argument("--obj-types", default=None,
@@ -428,6 +462,7 @@ def main() -> None:
         absolute_paths=args.absolute_paths,
         manifest_path=output_path,
         metadata_file=args.metadata_file,
+        images_only=args.images_only,
     )
 
     if args.copy_selected_to:
