@@ -198,8 +198,10 @@ def _prepare_point_cloud_render_data(
     points: np.ndarray,
     mask: np.ndarray,
     max_points: Optional[int] = 20000,
+    base_color_rgb: Tuple[int, int, int] = (190, 190, 190),
+    affordance_color_rgb: Tuple[int, int, int] = (255, 0, 0),
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """归一化点云并生成红/灰 affordance 颜色。"""
+    """归一化点云并生成 IAGNet 风格红/浅灰 affordance 颜色。"""
     points = np.asarray(points, dtype=np.float32)
     mask = np.asarray(mask, dtype=np.float32).reshape(-1)
     valid = np.isfinite(points).all(axis=1)
@@ -225,10 +227,28 @@ def _prepare_point_cloud_render_data(
     if mask.max() > 1.0:
         mask = mask / mask.max()
     mask = np.sqrt(np.clip(mask, 0.0, 1.0))
-    base_color = np.array([190, 190, 190], dtype=np.float32) / 255.0
-    affordance_color = np.array([255, 0, 0], dtype=np.float32) / 255.0
+    base_color = np.array(base_color_rgb, dtype=np.float32) / 255.0
+    affordance_color = np.array(affordance_color_rgb, dtype=np.float32) / 255.0
     colors = base_color + (affordance_color - base_color) * mask[:, None]
     return points, colors
+
+
+def _rotation_matrix_xyz(rx: float, ry: float, rz: float) -> np.ndarray:
+    sx, cx = np.sin(rx), np.cos(rx)
+    sy, cy = np.sin(ry), np.cos(ry)
+    sz, cz = np.sin(rz), np.cos(rz)
+    rot_x = np.array([[1, 0, 0], [0, cx, -sx], [0, sx, cx]], dtype=np.float32)
+    rot_y = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], dtype=np.float32)
+    rot_z = np.array([[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]], dtype=np.float32)
+    return rot_z @ rot_y @ rot_x
+
+
+def _apply_iagnet_pose(points: np.ndarray) -> np.ndarray:
+    """Mirror IAGNet rend_point.py pose: translate, rotate, then remap axes."""
+    posed = points.astype(np.float32, copy=True)
+    posed += np.array([0.0, 0.2, -0.3], dtype=np.float32)
+    posed = posed @ _rotation_matrix_xyz(np.pi / 6.0, 0.0, np.pi / 3.0).T
+    return np.stack([posed[:, 2], posed[:, 0], posed[:, 1]], axis=1)
 
 
 def _render_point_cloud_matplotlib(
@@ -247,8 +267,9 @@ def _render_point_cloud_matplotlib(
     dpi = 100
     fig = plt.figure(figsize=(size / dpi, size / dpi), dpi=dpi, facecolor="white")
     ax = fig.add_subplot(111, projection="3d", facecolor="white")
+    points = _apply_iagnet_pose(points)
     ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=colors, s=point_size, depthshade=True)
-    ax.view_init(elev=elev, azim=azim)
+    ax.view_init(elev=35.264, azim=45.0)
     ax.set_xlim(-0.55, 0.55)
     ax.set_ylim(-0.55, 0.55)
     ax.set_zlim(-0.55, 0.55)
@@ -272,11 +293,14 @@ def _render_point_cloud_realistic(
     sphere_resolution: int = 8,
     background_rgb: Tuple[int, int, int] = (255, 255, 255),
     ground_plane: bool = True,
+    fov: float = 25.0,
+    camera_origin: Tuple[float, float, float] = (3.0, 3.0, 3.0),
 ) -> np.ndarray:
     """Open3D 离屏渲染：把点转成小球，使用 lit material 和阴影。"""
     import open3d as o3d
     from open3d.visualization import rendering
 
+    points = _apply_iagnet_pose(points)
     mesh = o3d.geometry.TriangleMesh()
     sphere_resolution = max(3, int(sphere_resolution))
     sphere_radius = float(sphere_radius)
@@ -304,10 +328,10 @@ def _render_point_cloud_realistic(
     renderer.scene.add_geometry("affordance_spheres", mesh, material)
 
     if ground_plane:
-        plane_size = 20.0
+        plane_size = 10.0
         plane = o3d.geometry.TriangleMesh.create_box(width=plane_size, height=plane_size, depth=0.01)
         plane.translate((-plane_size / 2.0, -plane_size / 2.0, -0.58), relative=True)
-        plane.paint_uniform_color((0.94, 0.94, 0.92))
+        plane.paint_uniform_color((bg[0], bg[1], bg[2]))
         plane.compute_vertex_normals()
         plane_material = rendering.MaterialRecord()
         plane_material.shader = "defaultLit"
@@ -323,20 +347,12 @@ def _render_point_cloud_realistic(
         renderer.scene.scene.enable_sun_light(True)
         renderer.scene.set_lighting(
             rendering.Open3DScene.LightingProfile.SOFT_SHADOWS,
-            [-0.45, -0.35, -0.82],
+            [-4.0, 4.0, 20.0],
         )
     except Exception:
         pass
 
-    elev_rad = np.deg2rad(float(elev))
-    azim_rad = np.deg2rad(float(azim))
-    radius = 2.05
-    eye = [
-        radius * np.cos(elev_rad) * np.cos(azim_rad),
-        radius * np.cos(elev_rad) * np.sin(azim_rad),
-        radius * np.sin(elev_rad),
-    ]
-    renderer.setup_camera(35.0, [0.0, 0.0, 0.0], eye, [0.0, 0.0, 1.0])
+    renderer.setup_camera(float(fov), [0.0, 0.0, 0.0], list(camera_origin), [0.0, 0.0, 1.0])
     rendered = renderer.render_to_image()
     rgb = np.asarray(rendered)
     if rgb.shape[2] == 4:
@@ -357,9 +373,19 @@ def _render_point_cloud_static(
     sphere_resolution: int = 8,
     background_rgb: Tuple[int, int, int] = (255, 255, 255),
     ground_plane: bool = True,
+    base_color_rgb: Tuple[int, int, int] = (190, 190, 190),
+    affordance_color_rgb: Tuple[int, int, int] = (255, 0, 0),
+    fov: float = 25.0,
+    camera_origin: Tuple[float, float, float] = (3.0, 3.0, 3.0),
 ) -> np.ndarray:
     """用固定视角导出点云图；realistic 后端提供小球、材质与光照。"""
-    points, colors = _prepare_point_cloud_render_data(points, mask, max_points=max_points)
+    points, colors = _prepare_point_cloud_render_data(
+        points,
+        mask,
+        max_points=max_points,
+        base_color_rgb=base_color_rgb,
+        affordance_color_rgb=affordance_color_rgb,
+    )
     backend = str(backend or "realistic").lower()
     if backend in {"realistic", "open3d", "sphere"}:
         try:
@@ -373,6 +399,8 @@ def _render_point_cloud_static(
                 sphere_resolution=sphere_resolution,
                 background_rgb=background_rgb,
                 ground_plane=ground_plane,
+                fov=fov,
+                camera_origin=camera_origin,
             )
         except Exception as exc:
             warnings.warn(f"Open3D realistic 渲染失败，回退到 matplotlib: {exc}")
@@ -557,6 +585,10 @@ def render_targets_from_json(manifest_path: str, dataset_root_override: Optional
                 sphere_resolution=int(point_cfg.get("sphere_resolution", 8)),
                 background_rgb=tuple(point_cfg.get("background", [255, 255, 255])),
                 ground_plane=bool(point_cfg.get("ground_plane", True)),
+                base_color_rgb=tuple(point_cfg.get("base_color_rgb", [190, 190, 190])),
+                affordance_color_rgb=tuple(point_cfg.get("affordance_color_rgb", [255, 0, 0])),
+                fov=float(point_cfg.get("fov", 25)),
+                camera_origin=tuple(point_cfg.get("camera_origin", [3, 3, 3])),
             )
             point_results.append(point_img)
             if save_single:

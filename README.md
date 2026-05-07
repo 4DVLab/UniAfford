@@ -161,8 +161,7 @@ python scripts/render_iagnet_style.py --render-json docs/render_manifest_example
 python scripts/render_iagnet_style.py --render-json docs/render_manifest_example.json --run-mitsuba --convert-jpg
 ```
 
-IAGNet 风格参数写在 `render.point_cloud.iagnet` 下：`sphere_radius` 控制球大小，`sample_count` 控制 Mitsuba 采样数，`fov` 控制相机视角，`camera_origin` 默认 `"3,3,3"`，`radiance` 控制面积光强度，`max_points` 控制导出到 XML 的点数上限。
-若渲染图出现明显地面边界，可保持默认 `ground_scale: 100.0` 和 `background_radiance: 1.0`，让白色地面覆盖相机视野并用白色环境背景填充地面外区域。
+IAGNet 风格参数写在 `render.point_cloud.iagnet` 下：`sphere_radius` 控制球大小，`sample_count` 控制 Mitsuba 采样数，`fov` 控制相机视角，`camera_origin` 默认 `"3,3,3"`，`radiance` 控制面积光强度，`max_points` 控制导出到 XML 的点数上限。默认值对齐 IAGNet：点云先平移 `(0, 0.2, -0.3)`，再旋转 `(pi/6, 0, pi/3)`，最后按 `(z, x, y)` 映射；相机 `origin="3,3,3"`，`fov=25`，球半径 `0.025`，地面尺度 `10`，面积光 `origin="-4,4,20"`、`radiance=6`。Open3D 后端也会应用同样的点云姿态和相机方向，但阴影/材质只能近似 Mitsuba。
 
 也可以直接在通用批量导出入口中选择 IAGNet 后端：
 

@@ -441,7 +441,13 @@ def export_iagnet_style(
             continue
 
         points, mask = _load_render_point_target(dataset_root, obj_type, int(pc_id), aff)
-        points, colors = _prepare_point_cloud_render_data(points, mask, max_points=max_points)
+        points, colors = _prepare_point_cloud_render_data(
+            points,
+            mask,
+            max_points=max_points,
+            base_color_rgb=tuple(xml_cfg.get("base_color_rgb", [190, 190, 190])),
+            affordance_color_rgb=tuple(xml_cfg.get("affordance_color_rgb", [255, 0, 0])),
+        )
         name = item.get("name") or f"{Modality._normalize_label(obj_type)}_pc{pc_id}_{Modality._normalize_label(aff)}"
         xml_path = os.path.join(xml_dir, f"{_safe_name(name)}.xml")
         _write_iagnet_xml(xml_path, points, colors, xml_cfg)
