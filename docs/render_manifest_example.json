@@ -25,7 +25,7 @@
       "elev": 30,
       "azim": 45,
       "point_size": 12,
-      "sphere_radius": 0.024,
+      "sphere_radius": 0.018,
       "sphere_resolution": 8,
       "max_points": 6000,
       "background": [255, 255, 255],
@@ -35,10 +35,16 @@
         "size": 800,
         "sample_count": 256,
         "fov": 25,
-        "sphere_radius": 0.025,
+        "sphere_radius": 0.018,
         "max_points": 2048,
         "camera_origin": "3,3,3",
-        "radiance": 6
+        "radiance": 6,
+        "run_mitsuba": false,
+        "convert_jpg": false,
+        "mitsuba_renderer": "python",
+        "mitsuba_variant": "scalar_rgb",
+        "exr_wait_timeout": 60.0,
+        "exr_wait_interval": 0.25
       }
     }
   },

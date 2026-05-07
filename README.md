@@ -163,6 +163,28 @@ python scripts/render_iagnet_style.py --render-json docs/render_manifest_example
 
 IAGNet 风格参数写在 `render.point_cloud.iagnet` 下：`sphere_radius` 控制球大小，`sample_count` 控制 Mitsuba 采样数，`fov` 控制相机视角，`camera_origin` 默认 `"3,3,3"`，`radiance` 控制面积光强度，`max_points` 控制导出到 XML 的点数上限。
 
+也可以直接在通用批量导出入口中选择 IAGNet 后端：
+
+```json
+{
+  "render": {
+    "point_cloud": {
+      "backend": "iagnet",
+      "iagnet": {
+        "run_mitsuba": true,
+        "convert_jpg": true,
+        "mitsuba_renderer": "python",
+        "mitsuba_variant": "scalar_rgb",
+        "exr_wait_timeout": 60.0,
+        "exr_wait_interval": 0.25
+      }
+    }
+  }
+}
+```
+
+`backend: "iagnet"` 会跳过低分辨率 Open3D/Matplotlib 点云图，改为输出 `iagnet_xml/`、可选 `iagnet_exr/` 与 `iagnet_jpg/`。由于 Mitsuba/EXR 写盘可能存在延迟，脚本会在 JPG 转换前等待 EXR 文件存在且大小稳定；等待时长可用 `exr_wait_timeout` 与 `exr_wait_interval` 调整。
+
 示例：
 
 ```json

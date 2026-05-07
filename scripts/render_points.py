@@ -12,6 +12,7 @@ import importlib
 import os
 import subprocess
 import sys
+import time
 import warnings
 from typing import Dict, List, Optional, Tuple
 
@@ -22,8 +23,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
-from utils.base_dataset import (  # noqa: E402
-    Modality,
+from utils.base_dataset import Modality  # noqa: E402
+from utils.batch_render import (  # noqa: E402
     _load_render_manifest,
     _load_render_point_target,
     _prepare_point_cloud_render_data,
@@ -161,6 +162,7 @@ def _write_iagnet_xml(
 
 
 def _convert_exr_to_jpg(exr_path: str, jpg_path: str) -> None:
+    _wait_for_file_stable(exr_path)
     try:
         Imath = importlib.import_module("Imath")
         OpenEXR = importlib.import_module("OpenEXR")
@@ -188,7 +190,36 @@ def _convert_exr_to_jpg(exr_path: str, jpg_path: str) -> None:
     Image.merge("RGB", rgb8).save(jpg_path, "JPEG", quality=95)
 
 
-def _run_mitsuba_cli(xml_path: str, mitsuba_bin: str) -> Optional[str]:
+def _wait_for_file_stable(
+    path: str,
+    timeout: float = 60.0,
+    poll_interval: float = 0.25,
+    stable_polls: int = 3,
+) -> str:
+    """Wait until a renderer output exists and its size stops changing."""
+    deadline = time.time() + float(timeout)
+    last_size = None
+    stable_count = 0
+    while time.time() < deadline:
+        if os.path.exists(path):
+            size = os.path.getsize(path)
+            if size > 0 and size == last_size:
+                stable_count += 1
+                if stable_count >= stable_polls:
+                    return path
+            else:
+                stable_count = 0
+                last_size = size
+        time.sleep(float(poll_interval))
+    raise TimeoutError(f"等待渲染输出文件稳定超时: {path}")
+
+
+def _run_mitsuba_cli(
+    xml_path: str,
+    mitsuba_bin: str,
+    exr_wait_timeout: float = 60.0,
+    exr_wait_interval: float = 0.25,
+) -> Optional[str]:
     result = subprocess.run(
         [mitsuba_bin, os.path.basename(xml_path)],
         cwd=os.path.dirname(xml_path),
@@ -198,7 +229,15 @@ def _run_mitsuba_cli(xml_path: str, mitsuba_bin: str) -> Optional[str]:
         warnings.warn(f"Mitsuba 渲染失败: {xml_path}")
         return None
     exr_path = os.path.splitext(xml_path)[0] + ".exr"
-    return exr_path if os.path.exists(exr_path) else None
+    try:
+        return _wait_for_file_stable(
+            exr_path,
+            timeout=exr_wait_timeout,
+            poll_interval=exr_wait_interval,
+        )
+    except TimeoutError as exc:
+        warnings.warn(str(exc))
+        return None
 
 
 def _init_mitsuba_python(variant: str):
@@ -312,6 +351,8 @@ def _run_mitsuba_python(
     exr_path: str,
     cfg: Dict,
     variant: str = "scalar_rgb",
+    exr_wait_timeout: float = 60.0,
+    exr_wait_interval: float = 0.25,
 ) -> str:
     mi = _init_mitsuba_python(variant)
     scene_dict = _build_mitsuba_scene_dict(points, colors, cfg, mi)
@@ -319,7 +360,11 @@ def _run_mitsuba_python(
     image = mi.render(scene)
     os.makedirs(os.path.dirname(exr_path), exist_ok=True)
     mi.util.write_bitmap(exr_path, image)
-    return exr_path
+    return _wait_for_file_stable(
+        exr_path,
+        timeout=exr_wait_timeout,
+        poll_interval=exr_wait_interval,
+    )
 
 
 def export_iagnet_style(
@@ -331,6 +376,8 @@ def export_iagnet_style(
     mitsuba_bin: str = "mitsuba",
     mitsuba_renderer: str = "python",
     mitsuba_variant: str = "scalar_rgb",
+    exr_wait_timeout: float = 60.0,
+    exr_wait_interval: float = 0.25,
 ) -> Dict[str, List[str]]:
     manifest = _load_render_manifest(manifest_path, dataset_root_override=dataset_root_override)
     dataset_root = manifest["dataset_root"]
@@ -374,6 +421,8 @@ def export_iagnet_style(
                         exr_path,
                         xml_cfg,
                         variant=mitsuba_variant,
+                        exr_wait_timeout=exr_wait_timeout,
+                        exr_wait_interval=exr_wait_interval,
                     )
                 except Exception as exc:
                     warnings.warn(
@@ -382,7 +431,12 @@ def export_iagnet_style(
                     )
                     exr_path = None
             else:
-                exr_path = _run_mitsuba_cli(xml_path, mitsuba_bin)
+                exr_path = _run_mitsuba_cli(
+                    xml_path,
+                    mitsuba_bin,
+                    exr_wait_timeout=exr_wait_timeout,
+                    exr_wait_interval=exr_wait_interval,
+                )
             if exr_path is not None:
                 outputs["exr"].append(exr_path)
                 print(f"EXR saved: {exr_path}")
@@ -414,6 +468,10 @@ def main() -> None:
     )
     parser.add_argument("--mitsuba-bin", default="mitsuba", help="Mitsuba executable name or path.")
     parser.add_argument("--convert-jpg", action="store_true", help="Convert rendered EXR files to JPG.")
+    parser.add_argument("--exr-wait-timeout", type=float, default=60.0,
+                        help="Seconds to wait until EXR exists and file size is stable.")
+    parser.add_argument("--exr-wait-interval", type=float, default=0.25,
+                        help="Polling interval while waiting for EXR output.")
     args = parser.parse_args()
 
     outputs = export_iagnet_style(
@@ -425,6 +483,8 @@ def main() -> None:
         mitsuba_bin=args.mitsuba_bin,
         mitsuba_renderer=args.mitsuba_renderer,
         mitsuba_variant=args.mitsuba_variant,
+        exr_wait_timeout=args.exr_wait_timeout,
+        exr_wait_interval=args.exr_wait_interval,
     )
     print("Done.")
     for group, paths in outputs.items():
