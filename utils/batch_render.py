@@ -9,6 +9,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 from utils.base_dataset import Modality
 from utils.common import resolve_path
 
