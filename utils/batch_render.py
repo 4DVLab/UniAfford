@@ -307,7 +307,7 @@ def _render_point_cloud_realistic(
         plane_size = 20.0
         plane = o3d.geometry.TriangleMesh.create_box(width=plane_size, height=plane_size, depth=0.01)
         plane.translate((-plane_size / 2.0, -plane_size / 2.0, -0.58), relative=True)
-        plane.paint_uniform_color((bg[0], bg[1], bg[2]))
+        plane.paint_uniform_color((0.94, 0.94, 0.92))
         plane.compute_vertex_normals()
         plane_material = rendering.MaterialRecord()
         plane_material.shader = "defaultLit"
