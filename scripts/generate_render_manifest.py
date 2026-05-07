@@ -1,8 +1,8 @@
 """
-生成渲染 manifest：扫描数据集目录，自动构建渲染清单。
+生成渲染 manifest：基于数据集 metadata/split 自动构建渲染清单。
 
-对于同时包含 Image（图像）和 PointCloud（点云）数据的每个物体，
-本脚本会查找既存在于 2D 掩码、又出现在 3D 点云 CSV 表头的 affordance。
+对于 metadata/split 中同时包含 Image（图像）和 PointCloud（点云）数据的每个物体，
+本脚本会查找两个模态共有的 affordance。
 对于每个共同的 affordance，分别随机导出不超过 N 个图像 ID 与 N 个点云 ID，组合为 manifest，
 供 utils/batch_render.py 和 scripts/render_points.py 等脚本批量渲染使用。
 """
@@ -12,7 +12,7 @@ import os
 import random
 import sys
 from copy import deepcopy
-from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -56,19 +56,117 @@ def _path_for_json(path: str, base_dir: str, absolute: bool = False) -> str:
     return rel.replace(os.sep, "/")
 
 
-def _list_object_dirs(dataset_root: str, obj_filter: Optional[Set[str]] = None) -> List[str]:
-    object_dirs = []
-    for name in sorted(os.listdir(dataset_root)):
-        path = os.path.join(dataset_root, name)
-        if not os.path.isdir(path):
+def _entry_primary_id(entry: Any) -> Optional[int]:
+    """Extract the primary id from split entries: int, [id, ...], or {id: ...}."""
+    try:
+        if isinstance(entry, dict):
+            value = entry.get("id", entry.get("img_id", entry.get("pc_id")))
+            return int(value) if value not in (None, "", "None", "none") else None
+        if isinstance(entry, (list, tuple)):
+            return int(entry[0]) if entry else None
+        return int(entry)
+    except (TypeError, ValueError):
+        return None
+
+
+def _collect_ids_from_modality_map(modality_map: Any) -> Dict[str, Dict[str, List[int]]]:
+    """Normalize {obj: {aff: [ids]}} metadata into lower-case obj/aff maps."""
+    collected: Dict[str, Dict[str, Set[int]]] = {}
+    if not isinstance(modality_map, dict):
+        return {}
+
+    for obj_type, aff_map in modality_map.items():
+        if not isinstance(aff_map, dict):
             continue
-        if obj_filter is not None and _normalize(name) not in obj_filter:
+        obj_norm = _normalize(obj_type)
+        for aff_type, entries in aff_map.items():
+            aff_norm = _normalize(aff_type)
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                entry_id = _entry_primary_id(entry)
+                if entry_id is not None:
+                    collected.setdefault(obj_norm, {}).setdefault(aff_norm, set()).add(entry_id)
+    return {
+        obj: {aff: sorted(ids) for aff, ids in aff_map.items() if ids}
+        for obj, aff_map in collected.items()
+    }
+
+
+def _merge_modality_ids(
+    target: Dict[str, Dict[str, Set[int]]],
+    source: Dict[str, Dict[str, List[int]]],
+) -> None:
+    for obj_type, aff_map in source.items():
+        for aff_type, ids in aff_map.items():
+            target.setdefault(obj_type, {}).setdefault(aff_type, set()).update(ids)
+
+
+def _finalize_modality_ids(data: Dict[str, Dict[str, Set[int]]]) -> Dict[str, Dict[str, List[int]]]:
+    return {
+        obj: {aff: sorted(ids) for aff, ids in aff_map.items() if ids}
+        for obj, aff_map in data.items()
+    }
+
+
+def _collect_render_ids_from_metadata(metadata: Dict[str, Any]) -> Tuple[Dict[str, Dict[str, List[int]]], Dict[str, Dict[str, List[int]]]]:
+    """Read object/aff/id lists from split-style metadata files."""
+    image_ids: Dict[str, Dict[str, Set[int]]] = {}
+    point_ids: Dict[str, Dict[str, Set[int]]] = {}
+
+    # Supports either top-level Image/PointCloud or split sections: train/val/test.
+    _merge_modality_ids(image_ids, _collect_ids_from_modality_map(metadata.get("Image", metadata.get("img"))))
+    _merge_modality_ids(point_ids, _collect_ids_from_modality_map(metadata.get("PointCloud", metadata.get("pc"))))
+    for split_name in ("train", "val", "test"):
+        split_data = metadata.get(split_name)
+        if not isinstance(split_data, dict):
             continue
-        image_dir = os.path.join(path, "Image")
-        pc_dir = os.path.join(path, "PointCloud")
-        if os.path.isdir(image_dir) and os.path.isdir(pc_dir):
-            object_dirs.append(name)
-    return object_dirs
+        _merge_modality_ids(image_ids, _collect_ids_from_modality_map(split_data.get("Image", split_data.get("img"))))
+        _merge_modality_ids(point_ids, _collect_ids_from_modality_map(split_data.get("PointCloud", split_data.get("pc"))))
+
+    return _finalize_modality_ids(image_ids), _finalize_modality_ids(point_ids)
+
+
+def _candidate_metadata_files(dataset_root: str, explicit_path: Optional[str] = None) -> List[str]:
+    if explicit_path:
+        return [os.path.abspath(explicit_path)]
+    names = (
+        "render_ids.json",
+        "split.json",
+        "dataset_split.json",
+        "all.json",
+        "train.json",
+        "val.json",
+        "test.json",
+        "info.json",
+        "metadata.json",
+    )
+    return [os.path.join(dataset_root, name) for name in names]
+
+
+def _load_ids_from_metadata(dataset_root: str, metadata_file: Optional[str] = None) -> Tuple[Dict[str, Dict[str, List[int]]], Dict[str, Dict[str, List[int]]], Optional[str]]:
+    """Load Image/PointCloud ids from the first useful metadata/split file."""
+    merged_images: Dict[str, Dict[str, Set[int]]] = {}
+    merged_points: Dict[str, Dict[str, Set[int]]] = {}
+    used_files: List[str] = []
+
+    for path in _candidate_metadata_files(dataset_root, metadata_file):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        image_ids, point_ids = _collect_render_ids_from_metadata(data)
+        if image_ids or point_ids:
+            _merge_modality_ids(merged_images, image_ids)
+            _merge_modality_ids(merged_points, point_ids)
+            used_files.append(path)
+        if metadata_file and used_files:
+            break
+
+    return _finalize_modality_ids(merged_images), _finalize_modality_ids(merged_points), ";".join(used_files) if used_files else None
 
 
 def _find_rgb_path(dataset_root: str, obj_type: str, img_id: int) -> Optional[str]:
@@ -84,95 +182,6 @@ def _find_rgb_path(dataset_root: str, obj_type: str, img_id: int) -> Optional[st
             if os.path.exists(candidate):
                 return candidate
     return None
-
-
-def _extract_id_from_mask_name(filename: str, obj_type: str, aff_type: str) -> Optional[int]:
-    stem, ext = os.path.splitext(filename)
-    if ext.lower() not in {".png", ".jpg", ".jpeg"}:
-        return None
-
-    prefixes = [f"{obj_type}_"]
-    normalized = _normalize(obj_type)
-    if normalized != obj_type:
-        prefixes.append(f"{normalized}_")
-    suffix = f"_{aff_type}"
-    for prefix in prefixes:
-        if stem.startswith(prefix) and stem.endswith(suffix):
-            id_part = stem[len(prefix):-len(suffix)]
-            try:
-                return int(id_part)
-            except ValueError:
-                return None
-    return None
-
-
-def _scan_image_affordances(dataset_root: str, obj_type: str) -> Dict[str, List[int]]:
-    mask_root = os.path.join(dataset_root, obj_type, "Image", "mask")
-    aff_to_ids: Dict[str, List[int]] = {}
-    if not os.path.isdir(mask_root):
-        return aff_to_ids
-
-    for aff_dir in sorted(os.listdir(mask_root)):
-        aff_path = os.path.join(mask_root, aff_dir)
-        if not os.path.isdir(aff_path):
-            continue
-        aff = _normalize(aff_dir)
-        ids: Set[int] = set()
-        for filename in os.listdir(aff_path):
-            img_id = _extract_id_from_mask_name(filename, obj_type, aff_dir)
-            if img_id is None:
-                img_id = _extract_id_from_mask_name(filename, _normalize(obj_type), aff)
-            if img_id is not None and _find_rgb_path(dataset_root, obj_type, img_id):
-                ids.add(img_id)
-        if ids:
-            aff_to_ids[aff] = sorted(ids)
-    return aff_to_ids
-
-
-def _extract_pc_id(filename: str, obj_type: str) -> Optional[int]:
-    stem, ext = os.path.splitext(filename)
-    if ext.lower() != ".csv":
-        return None
-    prefixes = [f"{obj_type}_"]
-    normalized = _normalize(obj_type)
-    if normalized != obj_type:
-        prefixes.append(f"{normalized}_")
-    for prefix in prefixes:
-        if stem.startswith(prefix):
-            try:
-                return int(stem[len(prefix):])
-            except ValueError:
-                return None
-    return None
-
-
-def _read_pc_affordances(csv_path: str) -> List[str]:
-    with open(csv_path, "r", encoding="utf-8") as f:
-        first_line = f.readline().strip()
-    if first_line.startswith("#"):
-        first_line = first_line[1:].strip()
-    header = [col.strip() for col in first_line.split(",") if col.strip()]
-    return [_normalize(col) for col in header[3:]]
-
-
-def _scan_point_affordances(dataset_root: str, obj_type: str) -> Dict[str, List[int]]:
-    pc_root = os.path.join(dataset_root, obj_type, "PointCloud")
-    aff_to_ids: Dict[str, Set[int]] = {}
-    if not os.path.isdir(pc_root):
-        return {}
-
-    for filename in sorted(os.listdir(pc_root)):
-        pc_id = _extract_pc_id(filename, obj_type)
-        if pc_id is None:
-            continue
-        csv_path = os.path.join(pc_root, filename)
-        try:
-            affs = _read_pc_affordances(csv_path)
-        except OSError:
-            continue
-        for aff in affs:
-            aff_to_ids.setdefault(aff, set()).add(pc_id)
-    return {aff: sorted(ids) for aff, ids in aff_to_ids.items() if ids}
 
 
 def _sample_ids(ids: Sequence[int], limit: int, rng: Optional[random.Random]) -> List[int]:
@@ -195,6 +204,43 @@ def _iter_selected_affs(
     return sorted(shared)
 
 
+def _filter_image_ids_by_files(dataset_root: str, obj_type: str, aff_type: str, ids: Sequence[int]) -> List[int]:
+    """Keep ids whose RGB and mask files are present."""
+    mask_dir = os.path.join(dataset_root, obj_type, "Image", "mask", aff_type)
+    normalized_obj = _normalize(obj_type)
+    prefixes = [obj_type]
+    if normalized_obj != obj_type:
+        prefixes.append(normalized_obj)
+    kept = []
+    for img_id in ids:
+        if not _find_rgb_path(dataset_root, obj_type, img_id):
+            continue
+        has_mask = False
+        for prefix in prefixes:
+            for ext in (".png", ".jpg", ".jpeg"):
+                if os.path.exists(os.path.join(mask_dir, f"{prefix}_{img_id}_{aff_type}{ext}")):
+                    has_mask = True
+                    break
+            if has_mask:
+                break
+        if has_mask:
+            kept.append(int(img_id))
+    return sorted(set(kept))
+
+
+def _filter_point_ids_by_files(dataset_root: str, obj_type: str, ids: Sequence[int]) -> List[int]:
+    pc_dir = os.path.join(dataset_root, obj_type, "PointCloud")
+    normalized_obj = _normalize(obj_type)
+    prefixes = [obj_type]
+    if normalized_obj != obj_type:
+        prefixes.append(normalized_obj)
+    kept = []
+    for pc_id in ids:
+        if any(os.path.exists(os.path.join(pc_dir, f"{prefix}_{pc_id}.csv")) for prefix in prefixes):
+            kept.append(int(pc_id))
+    return sorted(set(kept))
+
+
 def build_render_manifest(
     dataset_root: str,
     output_dir: str,
@@ -206,6 +252,7 @@ def build_render_manifest(
     output_mode: str = "both",
     absolute_paths: bool = False,
     manifest_path: Optional[str] = None,
+    metadata_file: Optional[str] = None,
 ) -> Dict:
     dataset_root = os.path.abspath(dataset_root)
     manifest_base = os.path.dirname(os.path.abspath(manifest_path)) if manifest_path else os.getcwd()
@@ -222,17 +269,35 @@ def build_render_manifest(
     manifest["point_clouds"] = []
     manifest["metadata"] = {
         "source_dataset_root": dataset_root,
+        "source_metadata_file": None,
         "max_per_aff": max_per_aff,
         "seed": seed,
         "selection": "shared_affordances_per_object",
     }
 
-    for obj_type in _list_object_dirs(dataset_root, obj_filter=obj_filter):
-        image_affs = _scan_image_affordances(dataset_root, obj_type)
-        point_affs = _scan_point_affordances(dataset_root, obj_type)
+    metadata_image_ids, metadata_point_ids, used_metadata = _load_ids_from_metadata(dataset_root, metadata_file=metadata_file)
+    manifest["metadata"]["source_metadata_file"] = used_metadata
+    if not metadata_image_ids or not metadata_point_ids:
+        raise ValueError("未从 metadata/split 文件中找到可用的 Image/PointCloud ID")
+
+    obj_candidates = sorted(set(metadata_image_ids.keys()) & set(metadata_point_ids.keys()))
+    if obj_filter is not None:
+        obj_candidates = [obj for obj in obj_candidates if obj in obj_filter]
+
+    for obj_norm in obj_candidates:
+        obj_type = obj_norm
+        image_affs = metadata_image_ids.get(obj_norm)
+        point_affs = metadata_point_ids.get(obj_norm)
+        if image_affs is None or point_affs is None:
+            continue
+
         for aff in _iter_selected_affs(image_affs, point_affs, aff_filter=aff_filter):
-            image_ids = _sample_ids(image_affs[aff], max_per_aff, rng)
-            point_ids = _sample_ids(point_affs[aff], max_per_aff, rng)
+            image_ids = _filter_image_ids_by_files(dataset_root, obj_type, aff, image_affs[aff])
+            point_ids = _filter_point_ids_by_files(dataset_root, obj_type, point_affs[aff])
+            image_ids = _sample_ids(image_ids, max_per_aff, rng)
+            point_ids = _sample_ids(point_ids, max_per_aff, rng)
+            if not image_ids or not point_ids:
+                continue
             obj_norm = _normalize(obj_type)
             aff_norm = _normalize(aff)
             for img_id in image_ids:
@@ -282,6 +347,8 @@ def main() -> None:
     parser.add_argument("--backend", default="realistic",
                         choices=("realistic", "open3d", "sphere", "matplotlib", "iagnet", "mitsuba", "mitsuba_iagnet"),
                         help="Point-cloud backend written into render.point_cloud.backend.")
+    parser.add_argument("--metadata-file", default=None,
+                        help="Optional split/metadata JSON. If omitted, train/val/test/info/metadata files under dataset_root are tried.")
     parser.add_argument("--output-mode", default="both", choices=("single", "grid", "both"),
                         help="Manifest output.mode.")
     parser.add_argument("--absolute-paths", action="store_true",
@@ -300,6 +367,7 @@ def main() -> None:
         output_mode=args.output_mode,
         absolute_paths=args.absolute_paths,
         manifest_path=output_path,
+        metadata_file=args.metadata_file,
     )
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)

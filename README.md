@@ -185,7 +185,7 @@ IAGNet 风格参数写在 `render.point_cloud.iagnet` 下：`sphere_radius` 控�
 
 `backend: "iagnet"` 会跳过低分辨率 Open3D/Matplotlib 点云图，改为输出 `iagnet_xml/`、可选 `iagnet_exr/` 与 `iagnet_jpg/`。由于 Mitsuba/EXR 写盘可能存在延迟，脚本会在 JPG 转换前等待 EXR 文件存在且大小稳定；等待时长可用 `exr_wait_timeout` 与 `exr_wait_interval` 调整。
 
-可以从数据集目录自动生成 manifest。脚本会扫描同时包含 `Image/` 和 `PointCloud/` 的物体，取 2D mask 目录与点云 CSV header 的 affordance 交集，并对每个共有 `obj-aff` 最多选 10 个图片 ID 和 10 个点云 ID：
+可以从数据集目录自动生成 manifest。脚本会读取数据集目录下的 split/metadata JSON（如 `train.json`、`val.json`、`test.json`、`info.json`、`metadata.json`）中的 `Image` / `PointCloud` 模态映射，直接获得物体、affordance 和候选 ID。每个共有 `obj-aff` 最多选 10 个图片 ID 和 10 个点云 ID：
 
 ```bash
 python scripts/generate_render_manifest.py \
@@ -197,6 +197,7 @@ python scripts/generate_render_manifest.py \
 常用选项：
 
 - `--seed 42`: 随机采样；不传时取排序后的前 N 个 ID。
+- `--metadata-file path/to/train.json`: 显式指定 split/metadata 文件。
 - `--obj-types Spoon,Mug`: 只扫描指定物体。
 - `--aff-types grasp,contain`: 只导出指定 affordance。
 - `--backend iagnet`: 生成 manifest 时直接指定 3D 渲染后端。
