@@ -69,42 +69,39 @@ def parse_args():
     parser.add_argument("--vision_pretrained", type=str, default=None, help="SAM 权重路径")
     parser.add_argument("--point_backbone_pretrained", type=str, default=None, help="SONATA point backbone 预训练权重路径")
     parser.add_argument(
-        "--point_decoder_backbone_mode",
-        type=str,
-        default='independent',
-        choices=["shared", "independent"],
+        "--point_decoder_backbone_mode", type=str, default='independent', choices=["shared", "independent"],
         help="3D decoder backbone 模式：shared 为与 encoder 共用基座，independent 为独立随机初始化 backbone",
     )
     parser.add_argument(
-        "--point_decoder_decode_mode",
-        type=str,
-        default='similarity',
-        choices=["prompt", "similarity"],
+        "--point_decoder_decode_mode", type=str, default='similarity', choices=["prompt", "similarity"],
         help="3D decoder 后端对齐方式：prompt 为 prompt-based 解码，similarity 为逐点相似度对齐",
     )
     parser.add_argument("--batch_size", type=int, default=None, help="每卡训练 batch size（同时覆写 val_batch_size）")
     parser.add_argument("--epochs", type=int, default=None, help="训练总 epoch 数")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument(
-        "--train_json_path",
-        type=str,
-        default=None,
+        "--train_json_path", type=str, default=None,
         help="训练集分割 JSON 路径；不传时使用 dataset_dir/train.json，并默认从 JSON 同目录加载原数据",
     )
     parser.add_argument(
-        "--val_json_path",
-        type=str,
-        default=None,
+        "--val_json_path", type=str, default=None,
         help="验证集分割 JSON 路径；不传时使用 dataset_dir/val.json，并默认从 JSON 同目录加载原数据",
     )
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
     parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
     parser.add_argument("--fixed_save_interval", type=int, default=100, help="固定长周期保存 checkpoint 的间隔，用于保存收敛状态。")
     parser.add_argument("--lazy_load", dest="lazy_load", action="store_true", help="启用懒加载（默认启用）", default=True)
-    parser.add_argument("--resume", action="store_true", help="从 checkpoint 断点续训")
+    parser.add_argument("--resume", action="store_true", help="从 checkpoint 断点续训", default=False)
     parser.add_argument("--resume_ckpt", type=str, default=None, help="断点续训 checkpoint 路径；为空则默认 latest_fsdp.pth")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
-    return parser.parse_known_args()[0]
+
+    args, _ = parser.parse_known_args()
+    if args.resume_ckpt is not None:
+        args.resume = True
+    assert args.point_decoder_backbone_mode == 'independent', '建议使用独立权重的3D decoder backbone模式'
+    assert args.point_decoder_decode_mode == 'similarity', '请使用相似度解码的3D decoder decode模式，prompt解码效果很差'
+
+    return args
 
 
 def apply_point_decoder_backbone_mode(model_config, mode: str):
