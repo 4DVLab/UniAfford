@@ -1,17 +1,15 @@
 """
-Batch render point-cloud affordance targets with the IAGNet/Mitsuba style.
+IAGNet / Mitsuba-style point-cloud affordance rendering.
 
-This script reads the same render manifest used by utils/base_dataset.py, but
-only consumes the independent "point_clouds" list. It writes Mitsuba XML scenes
-that follow IAGNet's rend_point.py: normalized points, red/gray affordance
-colors, sphere primitives, a rough ground plane, perspective camera, and a large
-area light for soft shadows.
+Reads the same render manifest as :func:`render_targets_from_json` in
+``utils.rendering.batch_render``, consuming only the ``point_clouds`` list.
+Writes Mitsuba XML scenes aligned with IAGNet's ``rend_point.py``:
+normalized points, affordance coloring, spheres, ground plane, camera, area light.
 """
 import argparse
 import importlib
 import os
 import subprocess
-import sys
 import time
 import warnings
 from typing import Dict, List, Optional, Tuple
@@ -19,12 +17,8 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-if REPO_ROOT not in sys.path:
-    sys.path.insert(0, REPO_ROOT)
-
-from utils.base_dataset import Modality  # noqa: E402
-from utils.batch_render import (  # noqa: E402
+from utils.base_dataset import Modality
+from utils.rendering.batch_render import (
     _load_render_manifest,
     _load_render_point_target,
     _prepare_point_cloud_render_data,

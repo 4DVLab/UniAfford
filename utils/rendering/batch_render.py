@@ -9,9 +9,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import cv2
 import numpy as np
 
-import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
 from utils.base_dataset import Modality
 from utils.common import resolve_path
 
@@ -538,7 +535,7 @@ def render_targets_from_json(manifest_path: str, dataset_root_override: Optional
 
     point_backend = str(point_cfg.get("backend", "iagnet")).lower()
     if point_items and point_backend in {"iagnet", "mitsuba", "mitsuba_iagnet"}:
-        from scripts.render_points import export_iagnet_style
+        from utils.rendering.render_point import export_iagnet_style
 
         iagnet_cfg = point_cfg.get("iagnet", {})
         iagnet_outputs = export_iagnet_style(

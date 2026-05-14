@@ -6,7 +6,7 @@
 
 使用 --images-only 时，仅读取 Image 模态（无需 PointCloud 条目），按每个物体的全部图像 aff
 导出图像清单（`point_clouds` 为空），适合「只批量渲染整个 2D 数据集」。
-输出 manifest 供 utils/batch_render.py（或 python utils/base_dataset.py --render-json）等批量渲染。
+输出 manifest 供 `utils/batch_render.py`（`utils/rendering/batch_render.py`）等清单驱动批量渲染使用。
 """
 import argparse
 import json
