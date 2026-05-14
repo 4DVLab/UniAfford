@@ -1,5 +1,5 @@
 
-"""Batch visualization export utilities for 2D/3D affordance targets."""
+"""同时批渲染2D和3D数据"""
 
 import os
 import warnings
