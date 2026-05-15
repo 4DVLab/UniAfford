@@ -123,3 +123,5 @@ Thumbs.db
 */try.py
 runs/
 paper/
+.cursorindexingignore
+.specstory/
