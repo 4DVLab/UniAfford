@@ -119,7 +119,7 @@ logs/
 .DS_Store
 Thumbs.db
 
-
+.specstory/
 */try.py
 runs/
 paper/
