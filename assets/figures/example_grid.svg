@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="390" viewBox="0 0 520 390">
+  <rect width="520" height="390" fill="#f7f8fc"/>
+  <g fill="#ffffff" stroke="#dfe5f1" stroke-width="3">
+    <rect x="74" y="62" width="160" height="110" rx="18"/>
+    <rect x="286" y="62" width="160" height="110" rx="18"/>
+    <rect x="74" y="202" width="160" height="110" rx="18"/>
+    <rect x="286" y="202" width="160" height="110" rx="18"/>
+  </g>
+  <g fill="#f05b4f" opacity="0.62">
+    <circle cx="154" cy="117" r="28"/><circle cx="366" cy="117" r="28"/>
+    <circle cx="154" cy="257" r="28"/><circle cx="366" cy="257" r="28"/>
+  </g>
+  <text x="260" y="358" font-family="Inter, Arial" font-size="28" font-weight="800" fill="#121827" text-anchor="middle">Batch Grid</text>
+</svg>

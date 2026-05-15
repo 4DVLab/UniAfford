@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="520" height="390" viewBox="0 0 520 390">
+  <rect width="520" height="390" fill="#fff3e3"/>
+  <rect x="70" y="62" width="380" height="260" rx="36" fill="#ffffff" stroke="#f5d4a0" stroke-width="3"/>
+  <circle cx="260" cy="192" r="82" fill="#f05b4f" opacity="0.62"/>
+  <text x="260" y="350" font-family="Inter, Arial" font-size="28" font-weight="800" fill="#9a5a07" text-anchor="middle">2D Mask</text>
+</svg>

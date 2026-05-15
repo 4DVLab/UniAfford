@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="560" viewBox="0 0 1400 560" role="img" aria-label="UniAfford teaser placeholder">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0" stop-color="#eef4ff"/>
+      <stop offset="1" stop-color="#fff7ec"/>
+    </linearGradient>
+    <linearGradient id="blue" x1="0" x2="1">
+      <stop offset="0" stop-color="#315fce"/>
+      <stop offset="1" stop-color="#15a4b8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1400" height="560" rx="34" fill="url(#bg)"/>
+  <text x="700" y="74" fill="#121827" font-family="Inter, Arial, sans-serif" font-size="38" font-weight="800" text-anchor="middle">UniAfford Overview</text>
+  <text x="700" y="114" fill="#5d6b82" font-family="Inter, Arial, sans-serif" font-size="20" text-anchor="middle">Language-conditioned 2D and 3D affordance perception</text>
+  <g transform="translate(78 170)">
+    <rect width="300" height="250" rx="24" fill="#fff" stroke="#dfe6f2"/>
+    <text x="150" y="42" fill="#121827" font-family="Inter, Arial" font-size="22" font-weight="800" text-anchor="middle">Inputs</text>
+    <rect x="44" y="76" width="212" height="34" rx="17" fill="#e9f0ff"/>
+    <text x="150" y="99" fill="#2149a7" font-family="Inter, Arial" font-size="15" font-weight="700" text-anchor="middle">instruction</text>
+    <rect x="44" y="124" width="212" height="34" rx="17" fill="#fff0db"/>
+    <text x="150" y="147" fill="#9a5a07" font-family="Inter, Arial" font-size="15" font-weight="700" text-anchor="middle">RGB image</text>
+    <rect x="44" y="172" width="212" height="34" rx="17" fill="#e5f8f7"/>
+    <text x="150" y="195" fill="#08737d" font-family="Inter, Arial" font-size="15" font-weight="700" text-anchor="middle">point cloud</text>
+  </g>
+  <path d="M405 295 C455 240, 505 240, 555 295" stroke="#315fce" stroke-width="7" fill="none" stroke-linecap="round"/>
+  <polygon points="552,283 582,295 552,307" fill="#315fce"/>
+  <g transform="translate(550 150)">
+    <rect width="300" height="290" rx="24" fill="#fff" stroke="#dfe6f2"/>
+    <text x="150" y="42" fill="#121827" font-family="Inter, Arial" font-size="22" font-weight="800" text-anchor="middle">Token Router</text>
+    <circle cx="150" cy="128" r="54" fill="url(#blue)" opacity="0.92"/>
+    <text x="150" y="124" fill="#fff" font-family="Inter, Arial" font-size="17" font-weight="800" text-anchor="middle">MLLM</text>
+    <text x="150" y="148" fill="#fff" font-family="Inter, Arial" font-size="12" text-anchor="middle">hidden states</text>
+    <rect x="38" y="212" width="70" height="34" rx="17" fill="#edf2ff"/>
+    <text x="73" y="234" fill="#2149a7" font-family="Inter, Arial" font-size="13" font-weight="700" text-anchor="middle">text</text>
+    <rect x="115" y="212" width="70" height="34" rx="17" fill="#fff0db"/>
+    <text x="150" y="234" fill="#9a5a07" font-family="Inter, Arial" font-size="13" font-weight="700" text-anchor="middle">2D</text>
+    <rect x="192" y="212" width="70" height="34" rx="17" fill="#e5f8f7"/>
+    <text x="227" y="234" fill="#08737d" font-family="Inter, Arial" font-size="13" font-weight="700" text-anchor="middle">3D</text>
+  </g>
+  <path d="M878 295 C928 240, 978 240, 1028 295" stroke="#315fce" stroke-width="7" fill="none" stroke-linecap="round"/>
+  <polygon points="1025,283 1055,295 1025,307" fill="#315fce"/>
+  <g transform="translate(1022 170)">
+    <rect width="300" height="250" rx="24" fill="#fff" stroke="#dfe6f2"/>
+    <text x="150" y="42" fill="#121827" font-family="Inter, Arial" font-size="22" font-weight="800" text-anchor="middle">Outputs</text>
+    <rect x="46" y="74" width="208" height="58" rx="18" fill="#fff3e3"/>
+    <text x="150" y="109" fill="#9a5a07" font-family="Inter, Arial" font-size="15" font-weight="800" text-anchor="middle">2D affordance mask</text>
+    <rect x="46" y="152" width="208" height="58" rx="18" fill="#e8f7fb"/>
+    <text x="150" y="187" fill="#08737d" font-family="Inter, Arial" font-size="15" font-weight="800" text-anchor="middle">3D point logits</text>
+  </g>
+</svg>

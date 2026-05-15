@@ -1,0 +1,566 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UniAfford: Token-Routed Multitask Learning for Generalizable 2D-3D Affordance Perception</title>
+
+  <meta name="description" content="UniAfford: token-routed multitask learning for generalizable 2D-3D affordance perception across language, RGB images, and point clouds.">
+  <meta name="keywords" content="Affordance, 2D-3D Perception, Multimodal Learning, Point Cloud, Segmentation, MLLM">
+  <meta property="og:title" content="UniAfford: Token-Routed Multitask Learning for Generalizable 2D-3D Affordance Perception">
+  <meta property="og:description" content="A unified language-image-point-cloud affordance framework with token routing, 2D masks, and 3D point-wise prediction.">
+  <meta property="og:type" content="website">
+  <meta property="og:image" content="assets/figures/teaser.svg">
+
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css">
+
+  <style>
+    :root {
+      --bg: #f7f8fc;
+      --card: #ffffff;
+      --ink: #121827;
+      --muted: #5d6b82;
+      --line: #e5e9f2;
+      --brand: #315fce;
+      --brand-dark: #2149a7;
+      --accent: #f39b31;
+      --cyan: #15a4b8;
+      --shadow: 0 22px 52px rgba(27, 42, 73, 0.10);
+      --radius: 26px;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 10% 0%, rgba(49, 95, 206, 0.16), transparent 32rem),
+        radial-gradient(circle at 90% 0%, rgba(243, 155, 49, 0.16), transparent 30rem),
+        var(--bg);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.65;
+    }
+
+    a { color: var(--brand); text-decoration: none; }
+    a:hover { color: var(--brand-dark); text-decoration: underline; }
+
+    .container {
+      width: min(1120px, calc(100% - 40px));
+      margin: 0 auto;
+    }
+
+    .navbar {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      border-bottom: 1px solid rgba(229, 233, 242, 0.82);
+      backdrop-filter: blur(18px);
+      background: rgba(247, 248, 252, 0.82);
+    }
+
+    .nav-container {
+      width: min(1180px, calc(100% - 32px));
+      height: 66px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 20px;
+    }
+
+    .nav-brand {
+      font-weight: 800;
+      letter-spacing: -0.02em;
+      color: var(--ink);
+    }
+
+    .nav-menu {
+      display: flex;
+      align-items: center;
+      gap: 18px;
+      margin: 0;
+      padding: 0;
+      list-style: none;
+      font-size: 14px;
+      font-weight: 650;
+    }
+
+    .nav-menu a { color: var(--muted); }
+    .nav-menu a:hover { color: var(--ink); text-decoration: none; }
+
+    .hero {
+      padding: 76px 0 34px;
+      text-align: center;
+    }
+
+    .hero-kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 14px;
+      border: 1px solid rgba(49, 95, 206, 0.20);
+      border-radius: 999px;
+      color: var(--brand-dark);
+      background: rgba(255, 255, 255, 0.78);
+      font-size: 14px;
+      font-weight: 750;
+    }
+
+    .hero-title-main {
+      display: block;
+      margin: 20px 0 6px;
+      font-size: clamp(52px, 9vw, 104px);
+      line-height: 0.95;
+      letter-spacing: -0.07em;
+      font-weight: 800;
+    }
+
+    .hero-title-sub {
+      max-width: 960px;
+      margin: 0 auto 18px;
+      font-size: clamp(26px, 4.5vw, 54px);
+      line-height: 1.08;
+      letter-spacing: -0.05em;
+      font-weight: 800;
+    }
+
+    .hero-description {
+      max-width: 850px;
+      margin: 0 auto;
+      color: var(--muted);
+      font-size: 18px;
+    }
+
+    .hero-links {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 12px;
+      margin: 28px 0 22px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      min-height: 44px;
+      padding: 0 18px;
+      border-radius: 999px;
+      color: #fff;
+      background: var(--brand);
+      font-size: 14px;
+      font-weight: 800;
+      box-shadow: 0 12px 28px rgba(49, 95, 206, 0.24);
+    }
+
+    .btn:hover {
+      color: #fff;
+      background: var(--brand-dark);
+      text-decoration: none;
+    }
+
+    .btn.secondary {
+      color: var(--ink);
+      background: #fff;
+      border: 1px solid var(--line);
+      box-shadow: none;
+    }
+
+    .authors {
+      max-width: 920px;
+      margin: 18px auto 0;
+      color: var(--muted);
+      font-size: 15px;
+    }
+
+    .authors a {
+      color: var(--ink);
+      font-weight: 700;
+    }
+
+    .institutions {
+      margin-top: 8px;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    section {
+      margin: 34px auto;
+      padding: clamp(24px, 4vw, 40px);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: var(--shadow);
+    }
+
+    h2 {
+      margin: 0 0 16px;
+      font-size: clamp(26px, 3.2vw, 40px);
+      line-height: 1.12;
+      letter-spacing: -0.04em;
+    }
+
+    h3 {
+      margin: 0 0 8px;
+      font-size: 18px;
+    }
+
+    .muted { color: var(--muted); }
+
+    .teaser-card {
+      padding: 0;
+      overflow: hidden;
+    }
+
+    .teaser-card img {
+      display: block;
+      width: 100%;
+      height: auto;
+      background: #fff;
+    }
+
+    .video-wrapper {
+      position: relative;
+      overflow: hidden;
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: #101827;
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
+    }
+
+    .video-placeholder {
+      min-height: 390px;
+      display: grid;
+      place-items: center;
+      padding: 30px;
+      color: #dbe6ff;
+      text-align: center;
+      background:
+        linear-gradient(135deg, rgba(49, 95, 206, 0.34), rgba(21, 164, 184, 0.22)),
+        radial-gradient(circle at 70% 30%, rgba(243, 155, 49, 0.28), transparent 20rem),
+        #101827;
+    }
+
+    .play {
+      width: 78px;
+      height: 78px;
+      margin: 0 auto 16px;
+      display: grid;
+      place-items: center;
+      border-radius: 50%;
+      background: rgba(255,255,255,0.14);
+      border: 1px solid rgba(255,255,255,0.22);
+      font-size: 28px;
+    }
+
+    .grid2, .grid3, .gallery-grid {
+      display: grid;
+      gap: 18px;
+    }
+
+    .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+    .gallery-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .card {
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: #fff;
+    }
+
+    .pill {
+      display: inline-flex;
+      margin-bottom: 10px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      color: var(--brand-dark);
+      background: rgba(49, 95, 206, 0.10);
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .gallery-item {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      background: #fff;
+    }
+
+    .gallery-item img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 4 / 3;
+      object-fit: cover;
+      background: #f3f6fb;
+    }
+
+    .gallery-item span {
+      display: block;
+      padding: 10px 12px;
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 700;
+    }
+
+    .pipeline-img, .chart-img {
+      width: 100%;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: #fff;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      overflow: hidden;
+      border-radius: 16px;
+      background: #fff;
+    }
+
+    th, td {
+      padding: 13px 14px;
+      border-bottom: 1px solid var(--line);
+      text-align: left;
+      font-size: 14px;
+    }
+
+    th {
+      color: var(--muted);
+      background: #f4f6fb;
+      font-weight: 800;
+    }
+
+    pre {
+      margin: 0;
+      padding: 18px;
+      overflow-x: auto;
+      border-radius: 18px;
+      color: #e8edf7;
+      background: #111827;
+      font-size: 13px;
+    }
+
+    footer {
+      padding: 28px 0 48px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 14px;
+    }
+
+    @media (max-width: 880px) {
+      .nav-menu { display: none; }
+      .grid2, .grid3, .gallery-grid { grid-template-columns: 1fr; }
+      .hero { padding-top: 48px; }
+      .video-placeholder { min-height: 280px; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="navbar">
+    <div class="nav-container">
+      <a class="nav-brand" href="#home">UniAfford</a>
+      <ul class="nav-menu">
+        <li><a href="#home">Home</a></li>
+        <li><a href="#video">Video</a></li>
+        <li><a href="#gallery">Gallery</a></li>
+        <li><a href="#method">Method</a></li>
+        <li><a href="#results">Results</a></li>
+        <li><a href="#citation">Citation</a></li>
+      </ul>
+    </div>
+  </nav>
+
+  <header id="home" class="hero">
+    <div class="container">
+      <span class="hero-kicker">2D-3D Affordance Perception · Token-Routed Multitask Learning</span>
+      <span class="hero-title-main">UniAfford</span>
+      <h1 class="hero-title-sub">Token-Routed Multitask Learning for Generalizable 2D-3D Affordance Perception</h1>
+      <p class="hero-description">
+        A unified language-image-point-cloud framework for reasoning about actionable regions in RGB images
+        and point clouds, using routed MLLM tokens as downstream 2D/3D affordance queries.
+      </p>
+
+      <div class="hero-links">
+        <a href="#" class="btn"><i class="fa-solid fa-file-lines"></i> Paper Coming Soon</a>
+        <a href="../README.md" class="btn secondary"><i class="fa-brands fa-github"></i> Code</a>
+        <a href="https://huggingface.co/your-org/2d-3d-uniafford" class="btn secondary">🤗 Weights</a>
+        <a href="https://huggingface.co/datasets/your-org/2d-3d-uniafford" class="btn secondary">🤗 Dataset</a>
+        <a href="DATASET.md" class="btn secondary"><i class="fa-solid fa-database"></i> Dataset Format</a>
+      </div>
+
+      <div class="authors">
+        <a href="#">Author One</a><sup>*</sup>,
+        <a href="#">Author Two</a><sup>*</sup>,
+        <a href="#">Author Three</a>,
+        <a href="#">Corresponding Author</a>
+      </div>
+      <div class="institutions">
+        <sup>*</sup>Equal contribution · Institution / Lab · Venue Coming Soon
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="teaser-card" aria-label="Teaser">
+      <img src="assets/figures/teaser.svg" alt="UniAfford teaser">
+    </section>
+
+    <section id="video">
+      <h2>Video Demo</h2>
+      <p class="muted">
+        This section is reserved for the final video or animation demo. Replace the placeholder with
+        <code>assets/videos/demo.mp4</code> or an embedded online video before release.
+      </p>
+      <div class="video-wrapper">
+        <div class="video-placeholder">
+          <div>
+            <div class="play"><i class="fa-solid fa-play"></i></div>
+            <h3>Video / Animation Demo Placeholder</h3>
+            <p>RGB input · point cloud input · routed affordance tokens · 2D/3D predictions</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="gallery">
+      <h2>Gallery</h2>
+      <p class="muted">
+        Example slots for qualitative visualizations. Replace the SVG placeholders with rendered images,
+        GIFs, or video thumbnails generated by <code>utils/rendering/</code>.
+      </p>
+      <div class="gallery-grid">
+        <div class="gallery-item">
+          <img src="assets/figures/example_2d.svg" alt="2D affordance example">
+          <span>2D affordance mask</span>
+        </div>
+        <div class="gallery-item">
+          <img src="assets/figures/example_3d.svg" alt="3D affordance example">
+          <span>3D point-wise affordance</span>
+        </div>
+        <div class="gallery-item">
+          <img src="assets/figures/example_route.svg" alt="Token routing example">
+          <span>Token routing analysis</span>
+        </div>
+        <div class="gallery-item">
+          <img src="assets/figures/example_grid.svg" alt="Grid visualization example">
+          <span>Batch rendering grid</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="abstract">
+      <h2>Abstract</h2>
+      <p class="muted">
+        UniAfford studies generalizable 2D-3D affordance perception under a unified multimodal setting.
+        Given language instructions, RGB images, and point clouds, the model learns to route MLLM hidden
+        states into text, 2D, and 3D branches. Routed affordance tokens are used as task queries for
+        downstream decoders, producing image masks and point-wise 3D affordance logits. This design supports
+        flexible supervision across image-only, point-cloud-only, and paired multimodal samples.
+      </p>
+    </section>
+
+    <section id="method">
+      <h2>Method Overview</h2>
+      <div class="grid2">
+        <div>
+          <img class="pipeline-img" src="assets/figures/pipeline.svg" alt="UniAfford pipeline">
+        </div>
+        <div class="grid2" style="grid-template-columns:1fr;">
+          <div class="card">
+            <span class="pill">Token Router</span>
+            <h3>Soft branch assignment</h3>
+            <p class="muted">
+              The router predicts text / image / point-cloud probabilities for each MLLM hidden state.
+              Supervision from <code>&lt;img_aff&gt;</code> and <code>&lt;pc_aff&gt;</code> anchors
+              downstream affordance queries.
+            </p>
+          </div>
+          <div class="card">
+            <span class="pill">Similarity Alignment</span>
+            <h3>Point-wise 3D decoding</h3>
+            <p class="muted">
+              Routed 3D affordance queries and per-point features are projected into a shared space,
+              normalized, and matched with a learned logit scale.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="results">
+      <h2>Results</h2>
+      <p class="muted">Quantitative results will be added after the paper is finalized.</p>
+      <div class="grid2">
+        <img class="chart-img" src="assets/figures/result_chart.svg" alt="Result chart placeholder">
+        <div>
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>2D gIoU</th>
+                <th>3D aIOU</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>UniAfford</td>
+                <td>Coming soon</td>
+                <td>Coming soon</td>
+              </tr>
+              <tr>
+                <td>Baseline</td>
+                <td>Coming soon</td>
+                <td>Coming soon</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
+    <section id="resources">
+      <h2>Resources</h2>
+      <div class="grid3">
+        <div class="card">
+          <span class="pill">Code</span>
+          <h3>Repository</h3>
+          <p class="muted">Installation, training, validation, and demo usage are documented in the repository README.</p>
+          <a href="../README.md">Open README</a>
+        </div>
+        <div class="card">
+          <span class="pill">Data</span>
+          <h3>Dataset</h3>
+          <p class="muted">The dataset format and split convention are documented separately for release packaging.</p>
+          <a href="DATASET.md">Open DATASET.md</a>
+        </div>
+        <div class="card">
+          <span class="pill">Rendering</span>
+          <h3>Figures and Demos</h3>
+          <p class="muted">Use the rendering utilities to export 2D overlays, 3D point-cloud figures, grids, and thumbnails.</p>
+          <a href="rendering.md">Open rendering guide</a>
+        </div>
+      </div>
+    </section>
+
+    <section id="citation">
+      <h2>Citation</h2>
+      <pre><code>@article{uniafford2026,
+  title   = {UniAfford: Token-Routed Multitask Learning for Generalizable 2D-3D Affordance Perception},
+  author  = {Author One and Author Two and Author Three},
+  journal = {Coming soon},
+  year    = {2026}
+}</code></pre>
+    </section>
+  </main>
+
+  <footer>
+    2D-3D UniAfford · Academic homepage branch. Replace placeholders before public release.
+  </footer>
+</body>
+</html>

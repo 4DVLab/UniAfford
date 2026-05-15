@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="460" viewBox="0 0 760 460">
+  <rect width="760" height="460" rx="24" fill="#ffffff"/>
+  <rect x="1" y="1" width="758" height="458" rx="24" fill="none" stroke="#e5e9f2" stroke-width="2"/>
+  <text x="380" y="52" fill="#121827" font-family="Inter, Arial" font-size="28" font-weight="800" text-anchor="middle">Result Chart Placeholder</text>
+  <line x1="110" y1="360" x2="660" y2="360" stroke="#dfe5f1" stroke-width="3"/>
+  <line x1="110" y1="100" x2="110" y2="360" stroke="#dfe5f1" stroke-width="3"/>
+  <g font-family="Inter, Arial" font-size="14" fill="#5d6b82">
+    <text x="95" y="365" text-anchor="end">0</text>
+    <text x="95" y="285" text-anchor="end">25</text>
+    <text x="95" y="205" text-anchor="end">50</text>
+    <text x="95" y="125" text-anchor="end">75</text>
+  </g>
+  <rect x="175" y="215" width="80" height="145" rx="10" fill="#cbd8f7"/>
+  <rect x="295" y="165" width="80" height="195" rx="10" fill="#315fce"/>
+  <rect x="445" y="238" width="80" height="122" rx="10" fill="#b9e4e2"/>
+  <rect x="565" y="188" width="80" height="172" rx="10" fill="#15a4b8"/>
+  <g font-family="Inter, Arial" font-size="15" font-weight="700">
+    <text x="275" y="398" fill="#5d6b82" text-anchor="middle">2D</text>
+    <text x="545" y="398" fill="#5d6b82" text-anchor="middle">3D</text>
+  </g>
+  <g font-family="Inter, Arial" font-size="13" fill="#5d6b82">
+    <text x="215" y="210" text-anchor="middle">Base</text>
+    <text x="335" y="160" text-anchor="middle">UniAfford</text>
+    <text x="485" y="233" text-anchor="middle">Base</text>
+    <text x="605" y="183" text-anchor="middle">UniAfford</text>
+  </g>
+</svg>
