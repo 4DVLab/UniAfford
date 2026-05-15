@@ -10,8 +10,11 @@
   <a href=""><img src="https://img.shields.io/badge/🤗%20Weights-coming%20soon-yellow.svg" alt="Model Weights"></a>
   <a href=""><img src="https://img.shields.io/badge/🤗%20Dataset-coming%20soon-yellow.svg" alt="Dataset"></a>
 </p>
+**UniAfford** is a unified 2D–3D affordance perception framework built upon Multimodal Large Language Models (MLLMs). It supports affordance perception from image-only, point-cloud-only, or joint multimodal inputs, aiming to achieve generalizable cross-modal affordance perception.
 
-2D–3D UniAfford is a research codebase for multimodal affordance learning and inference across language, images, and point clouds. It integrates an MLLM, a 2D segmentation branch, and a 3D point-cloud branch.
+We propose **Token Router for Tasks**, a multitask training paradigm that dynamically routes contextual hidden states from a shared MLLM into task-specific branches, enabling dense affordance supervision to directly shape shared semantic representations without relying on predefined textual task tokens.
+
+To support unified cross-modal learning, we further construct **UniAfford-Data**, a large-scale affordance dataset organized under a unified object–affordance taxonomy, containing pixel-level 2D annotations, point-level 3D annotations, and language instructions.
 
 ## Resources
 
@@ -107,7 +110,7 @@ See [docs/rendering.md](docs/rendering.md) for rendering details.
 
 ## License and Acknowledgements
 
-This project is released under the Apache License 2.0. See [LICENSE](LICENSE). Some files are adapted from or built on Segment Anything, PointCept, and the Qwen-VL / LLaMA training ecosystem; original copyright and license headers are preserved in the corresponding files.
+We sincerely thank the authors of [LISA](https://github.com/JIA-Lab-research/LISA), [SONATA](https://xywu.me/sonata/), Qwen3-VL, IAGNet, GREAT, [Affordance-R1](https://github.com/hq-King/Affordance-R1), DAG, and other open-source projects for their inspiring work and valuable contributions to this project.
 
 ## Citation
 

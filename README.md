@@ -1,4 +1,4 @@
-# 2D–3D UniAfford
+# UniAfford: Token-Routed Multitask Learning for Generalizable 2D-3D Affordance Perception
 
 <p align="center">
   <a href="README.md">中文</a> |
@@ -10,9 +10,11 @@
   <a href=""><img src="https://img.shields.io/badge/🤗%20Weights-coming%20soon-yellow.svg" alt="Model Weights"></a>
   <a href=""><img src="https://img.shields.io/badge/🤗%20Dataset-coming%20soon-yellow.svg" alt="Dataset"></a>
 </p>
-**UniAfford: Token-Routed Multitask Learning for Generalizable 2D-3D Affordance Perception** 论文对应实现的官方代码，
+**UniAfford** 是一个基于多模态大语言模型（MLLM）的统一二维和三维可供性感知框架，支持图像、点云或者两者同时输入的二维可供性感知，旨在实现具备泛化能力的跨模态 affordance perception。
 
-多模态（语言、图像、点云）联合 affordance 学习与推理的研究代码库，集成 MLLM、2D 分割与 3D 点云分支。
+我们提出了 **Token Router for Tasks** 多任务训练范式，通过将共享 MLLM 的上下文隐状态动态路由至不同任务分支，使密集可供性监督能够直接塑造共享语义表示，而无需依赖预定义的文本任务 token。
+
+为支持统一跨模态学习，我们进一步构建了 **UniAfford-Data**，一个基于统一 object–affordance taxonomy 的大规模可供性数据集，包含二维像素级标注、三维点级标注以及语言指令。
 
 ## 资源
 
