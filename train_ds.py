@@ -22,7 +22,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.tensorboard import SummaryWriter
 from peft import get_peft_model
-from transformers import AutoProcessor, get_cosine_schedule_with_warmup
+from transformers import get_cosine_schedule_with_warmup
 from tqdm import tqdm
 
 from configs import TrainingConfig
@@ -32,8 +32,10 @@ from utils.dataset import (
     JointAffordanceTorchDataset,
     JointAffordanceTrainDataset,
     joint_affordance_collate_fn,
+    build_functional_tokens_from_samples,
+    build_functional_tokens_from_sample_ids,
 )
-from utils.common import dict_to_cuda, setup_logger, get_current_lr
+from utils.common import dict_to_cuda, setup_logger, FUNCTIONAL_TOKENS
 from utils import calculator as calc
 from utils.metrics import (
     build_torchmetrics_bundle,
@@ -49,7 +51,7 @@ from utils.threshold_search import (
     finalize_threshold_search,
 )
 from utils.debug import log_param_dtype_stats, count_model_params
-from utils.model_io import build_portable_assets, build_portable_checkpoint_payload
+from utils.model_io import build_portable_assets, load_checkpoint_payload, save_portable_checkpoint
 from utils.trainability_summary import log_trainability_summary
 
 
@@ -85,10 +87,22 @@ def parse_args():
     parser.add_argument("--epochs", type=int, default=None, help="训练总 epoch 数")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
     parser.add_argument(
+        "--train_json_path",
+        type=str,
+        default=None,
+        help="训练集分割 JSON 路径；不传时使用 dataset_dir/train.json，并默认从 JSON 同目录加载原数据",
+    )
+    parser.add_argument(
+        "--val_json_path",
+        type=str,
+        default=None,
+        help="验证集分割 JSON 路径；不传时使用 dataset_dir/val.json，并默认从 JSON 同目录加载原数据",
+    )
+    parser.add_argument(
         "--val_split_file",
         type=str,
         default=None,
-        help="验证集分割 JSON 路径；不传时使用 dataset_dir/val.json。仅指定该文件时，默认从文件所在目录加载验证集原数据",
+        help="兼容旧参数：等价于 --val_json_path",
     )
     parser.add_argument(
         "--val_dataset_dir",
@@ -97,8 +111,18 @@ def parse_args():
         help="验证集原数据根目录；不传时由 val_split_file 所在目录推导，未指定 val_split_file 时跟随 dataset_dir",
     )
     parser.add_argument("--log_dir", type=str, default=None, help="日志与权重输出目录")
+    parser.add_argument("--update_epoch", type=int, default=5, help="每隔多少个 epoch 保存 latest checkpoint")
+    parser.add_argument("--fixed_save_interval", type=int, default=100, help="固定长周期保存 checkpoint 的间隔，用于保存收敛状态。")
+    parser.add_argument("--lazy_load", dest="lazy_load", action="store_true", help="启用懒加载（默认启用）", default=True)
+    parser.add_argument("--resume", action="store_true", help="从 checkpoint 断点续训", default=False)
+    parser.add_argument("--resume_ckpt", type=str, default=None, help="断点续训 checkpoint 路径；支持单文件 .pth 或 HF 分片目录，为空则默认 latest_ds.pth")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
-    return parser.parse_known_args()[0]
+    args, _ = parser.parse_known_args()
+    if args.resume_ckpt is not None:
+        args.resume = True
+    assert args.point_decoder_backbone_mode in (None, "independent"), "建议使用独立权重的3D decoder backbone模式"
+    assert args.point_decoder_decode_mode in (None, "similarity"), "请使用相似度解码的3D decoder decode模式，prompt解码效果很差"
+    return args
 
 
 def apply_point_decoder_backbone_mode(model_config, mode: str):
@@ -170,6 +194,54 @@ def create_param_groups(model, config, logger):
     return groups
 
 
+def get_current_lr(scheduler, optimizer):
+    """返回当前学习率字典，兼容分层/非分层学习率。"""
+    if optimizer is None or not hasattr(optimizer, "param_groups"):
+        return {}
+    if scheduler is not None and hasattr(scheduler, "get_last_lr"):
+        lr_list = scheduler.get_last_lr()
+    else:
+        lr_list = [group.get("lr", 0.0) for group in optimizer.param_groups]
+    lr_dict = {}
+    for idx, group in enumerate(optimizer.param_groups):
+        group_name = group.get("name")
+        if not group_name:
+            group_name = "lr" if len(optimizer.param_groups) == 1 else f"group_{idx}"
+        lr_dict[group_name] = float(lr_list[idx] if idx < len(lr_list) else group.get("lr", 0.0))
+    return lr_dict
+
+
+def _to_serializable_metrics(metrics: Dict) -> Dict:
+    """将指标字典转成可 JSON/ckpt 持久化的标量字典。"""
+    out = {}
+    for k, v in (metrics or {}).items():
+        if isinstance(v, torch.Tensor):
+            if v.numel() == 1:
+                out[k] = float(v.detach().cpu().item())
+            else:
+                out[k] = [float(x) for x in v.detach().cpu().view(-1).tolist()]
+        elif isinstance(v, (int, float, str, bool)) or v is None:
+            out[k] = v
+        else:
+            try:
+                out[k] = float(v)
+            except Exception:
+                out[k] = str(v)
+    return out
+
+
+def _move_optimizer_state_to_device(optimizer, device: torch.device):
+    """将 optimizer state 中的张量迁移到目标设备，避免 resume 后设备不一致。"""
+    if optimizer is None or not hasattr(optimizer, "state"):
+        return
+    for state in optimizer.state.values():
+        if not isinstance(state, dict):
+            continue
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                state[k] = v.to(device=device, non_blocking=True)
+
+
 def train_one_epoch(
     train_loader, model_engine, optimizer, scheduler, config,
     epoch, global_step, writer, logger, local_rank,
@@ -204,12 +276,12 @@ def train_one_epoch(
 
         # 统一计算损失（Focal+Dice for 2D, BCE+Dice for 3D, CE for LLM）
         loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
-        loss = loss_dict["loss"] / max(1, config.grad_accumulation_steps)
+        loss = loss_dict["loss"]
 
         model_engine.backward(loss)
         model_engine.step()
-        model_engine.zero_grad()
-        global_step += 1
+        if not hasattr(model_engine, "is_gradient_accumulation_boundary") or model_engine.is_gradient_accumulation_boundary():
+            global_step += 1
 
         # 一站式更新全部指标
         update_torchmetrics(
@@ -222,14 +294,17 @@ def train_one_epoch(
 
         # 定期打印批次进度
         if (batch_idx + 1) % config.print_freq == 0 or (batch_idx + 1) == len(train_loader):
-            lr = get_current_lr(scheduler, optimizer)
+            lr_dict = get_current_lr(scheduler, optimizer)
+            lr_text = ", ".join([f"{k}={v:.2e}" for k, v in lr_dict.items()])
+            ignored_cnt = int(output_dict.get("ce_ignored_token_count", 0) or 0)
             logger.info(
                 f"  [{batch_idx + 1}/{len(train_loader)}] "
                 f"loss={loss_dict['loss'].item():.6f} "
                 f"(ce={loss_dict['ce_loss'].item():.6f}, "
                 f"img={loss_dict['img_loss'].item():.6f}, "
-                f"pc={loss_dict['pc_loss'].item():.6f})"
-                + (f" lr={lr:.2e}" if lr else "")
+                f"pc={loss_dict['pc_loss'].item():.6f}, "
+                f"ce_ignore_aff_tok={ignored_cnt})"
+                + (f" lr=({lr_text})" if lr_text else "")
             )
             if local_rank == 0 and writer is not None:
                 batch_log = {k: loss_dict[k].item() for k in loss_dict}
@@ -241,23 +316,26 @@ def train_one_epoch(
                         gt_threshold=getattr(config, "gt_threshold_2d", 0.5),
                     )
                 )
-                if lr is not None:
-                    batch_log["lr"] = lr
+                batch_log["ce_ignored_token_count"] = float(ignored_cnt)
+                for k, v in lr_dict.items():
+                    batch_log[f"lr/{k}"] = v
+                if lr_dict:
+                    batch_log["lr"] = next(iter(lr_dict.values()))
                 log_scalar_dict(writer, "train_batch", batch_log, global_step)
             if local_rank == 0 and hasattr(loader, "set_postfix"):
                 postfix = {"loss": f"{loss_dict['loss'].item():.4f}"}
-                if lr is not None:
-                    postfix["lr"] = f"{lr:.2e}"
+                if lr_dict:
+                    postfix["lr"] = f"{next(iter(lr_dict.values())):.2e}"
                 loader.set_postfix(postfix, refresh=False)
 
     # Epoch 结束：汇总
     train_results = compute_and_reset_torchmetrics(metrics)
-    lr = get_current_lr(scheduler, optimizer)
-    log_epoch_summary(logger, epoch + 1, config.epochs, "train", train_results, lr)
+    lr_dict = get_current_lr(scheduler, optimizer)
+    log_epoch_summary(logger, epoch + 1, config.epochs, "train", train_results, lr_dict)
     if local_rank == 0 and writer is not None:
         log_scalar_dict(writer, "train_epoch", train_results, epoch + 1)
-        if lr is not None:
-            log_scalar_dict(writer, "train_epoch", {"lr": lr}, epoch + 1)
+        for k, v in lr_dict.items():
+            log_scalar_dict(writer, "train_epoch", {f"lr/{k}": v}, epoch + 1)
 
     return global_step, train_results
 
@@ -293,7 +371,7 @@ def validate_one_epoch(
 
     for val_dict in val_loader:
         val_dict = dict_to_cuda(val_dict, device=model_engine.device)
-        val_output = model_engine(**val_dict)
+        val_output = model_engine(**val_dict, return_hidden_states=False, return_mllm_output=False)
         loss_dict = calc.compute_losses(val_output, val_dict, **loss_kwargs)
         update_torchmetrics(
             metrics, loss_dict, val_output, val_dict, config.val_batch_size,
@@ -340,6 +418,8 @@ def _save_model_state_to_cpu(
     client_state: Dict,
     local_rank: int,
     logger,
+    optimizer=None,
+    scheduler=None,
     training_cfg=None,
     asset_bundle: Dict | None = None,
     zero_stage: int = 3,
@@ -374,13 +454,17 @@ def _save_model_state_to_cpu(
             state_cpu[name] = tensor.detach().cpu().clone()
 
     if local_rank == 0:
-        ckpt = build_portable_checkpoint_payload(
+        save_portable_checkpoint(
+            save_path,
             model_state_dict=state_cpu,
             meta=client_state,
             training_cfg=training_cfg,
             asset_bundle=asset_bundle,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            lr_dict=get_current_lr(scheduler, optimizer),
+            logger=logger,
         )
-        torch.save(ckpt, save_path)
         logger.info(f"完整推理权重已保存到 CPU 再落盘: {save_path}")
     if dist.is_initialized():
         dist.barrier()
@@ -423,13 +507,15 @@ def main():
         training_configs.dataset_dir = args.dataset_dir
     if args.log_dir:
         training_configs.log_dir = args.log_dir
-    train_dataset_root = os.path.abspath(training_configs.dataset_dir)
-    train_split_file = "train.json"
-    val_dataset_root = os.path.abspath(args.val_dataset_dir) if args.val_dataset_dir else None
+    if args.update_epoch is not None:
+        training_configs.update_epoch = max(1, int(args.update_epoch))
+    train_json_path = args.train_json_path or os.path.join(training_configs.dataset_dir, "train.json")
+    val_json_path = args.val_json_path or args.val_split_file or os.path.join(training_configs.dataset_dir, "val.json")
 
     local_rank = args.local_rank
     torch.cuda.set_device(local_rank)
     deepspeed.init_distributed()
+    cpu_obj_group = dist.new_group(backend="gloo")
 
     # 日志系统
     logger = setup_logger(training_configs.log_dir, local_rank)
@@ -438,12 +524,62 @@ def main():
     logger.info("=" * 80)
 
     writer = None
+
+    # ---------- 加载数据集 ----------
+    logger.info("加载数据集...")
+    if args.lazy_load:
+        train_samples = JointDataset(split_file_path=train_json_path, lazy_load=True)
+        val_samples = JointDataset(split_file_path=val_json_path, lazy_load=True)
+
+        token_obj = [None]
+        if local_rank == 0:
+            logger.info(f"训练集路径: root={train_samples.dataset_root}, split={train_samples.split_file}")
+            logger.info(f"验证集路径: root={val_samples.dataset_root}, split={val_samples.split_file}")
+            merged_ids = {"ins": {}, "img": {}, "pc": {}}
+            for mod_key in ("ins", "img", "pc"):
+                for ds in (train_samples, val_samples):
+                    for obj, aff_map in ds.sample_ids.get(mod_key, {}).items():
+                        merged_ids[mod_key].setdefault(obj, {})
+                        for aff, ids in aff_map.items():
+                            merged_ids[mod_key][obj].setdefault(aff, [])
+                            merged_ids[mod_key][obj][aff].extend(list(ids))
+            token_obj[0] = build_functional_tokens_from_sample_ids(merged_ids)
+            logger.info(f"训练集 {len(train_samples)} 条, 验证集 {len(val_samples)} 条")
+        dist.barrier()
+        dist.broadcast_object_list(token_obj, src=0, group=cpu_obj_group)
+        pair_token_map = token_obj[0] or {"img": {}, "pc": {}}
+    else:
+        data_objects = [None, None, None]
+        if local_rank == 0:
+            train_data = JointDataset(split_file_path=train_json_path, lazy_load=False).load_all_data()
+            val_data = JointDataset(
+                dataset_root=os.path.abspath(args.val_dataset_dir) if args.val_dataset_dir else None,
+                split_file_path=val_json_path,
+                lazy_load=False,
+            ).load_all_data()
+            logger.info(f"训练集路径: root={train_data.dataset_root}, split={train_data.split_file}")
+            logger.info(f"验证集路径: root={val_data.dataset_root}, split={val_data.split_file}")
+            train_payload = train_data.samples
+            val_payload = val_data.samples
+            pair_token_map = build_functional_tokens_from_samples(train_payload + val_payload)
+            data_objects = [train_payload, val_payload, pair_token_map]
+            logger.info(f"训练集 {len(train_payload)} 条, 验证集 {len(val_payload)} 条")
+        dist.barrier()
+        dist.broadcast_object_list(data_objects, src=0, group=cpu_obj_group)
+        train_samples, val_samples, pair_token_map = data_objects
+
+    functional_tokens = {
+        "img": dict(FUNCTIONAL_TOKENS.get("img", {})),
+        "pc": dict(FUNCTIONAL_TOKENS.get("pc", {})),
+    }
+    functional_tokens["img"].update(pair_token_map.get("img", {}))
+    functional_tokens["pc"].update(pair_token_map.get("pc", {}))
+    model_config.mllm.functional_tokens = functional_tokens
     if local_rank == 0:
-        tb_dir = os.path.join(training_configs.log_dir, "tensorboard")
-        os.makedirs(tb_dir, exist_ok=True)
-        writer = SummaryWriter(log_dir=tb_dir)
-        writer.add_text("config/training", str(training_configs.to_dict()))
-        writer.add_text("config/model", str(model_config.to_dict()))
+        logger.info(
+            f"已注册 obj-aff 专用 token: img={len(pair_token_map.get('img', {}))}, "
+            f"pc={len(pair_token_map.get('pc', {}))}"
+        )
 
     # ---------- 初始化模型 ----------
     logger.info("正在初始化模型...")
@@ -457,10 +593,13 @@ def main():
             f"prefix={load_info['matched_prefix']} | loaded={load_info['loaded_tensors']} | "
             f"missing={len(load_info['missing_keys'])} | unexpected={len(load_info['unexpected_keys'])}"
         )
-    processor = AutoProcessor.from_pretrained(model_config.mllm.qwen_model_name_or_path)
+    FUNCTIONAL_TOKENS.clear()
+    FUNCTIONAL_TOKENS.update(model.mllm.functional_token_ids)
+
+    processor = model.processor
     data_collator = partial(
         joint_affordance_collate_fn,
-        tokenizer=processor.tokenizer,
+        tokenizer=model.tokenizer,
         output_image_size=training_configs.image_size,
         output_point_nums=training_configs.num_points,
         mllm_precision=model_config.mllm.compute_dtype,
@@ -485,27 +624,27 @@ def main():
     if local_rank == 0:
         log_trainability_summary(model, logger, output_path=os.path.join(training_configs.log_dir, f"params_summary_{time.strftime('%Y%m%d_%H%M%S')}.json"))
 
-    # ---------- 加载数据集（rank 0 读取后广播） ----------
-    logger.info("加载数据集...")
-    data_objects = [None, None]
-    if local_rank == 0:
-        train_data = JointDataset(dataset_root=train_dataset_root, split_file=train_split_file).load_all_data()
-        if args.val_split_file:
-            val_data = JointDataset(
-                dataset_root=val_dataset_root,
-                split_file_path=args.val_split_file,
-            ).load_all_data()
-        else:
-            val_data = JointDataset(
-                dataset_root=val_dataset_root or train_dataset_root,
-                split_file="val.json",
-            ).load_all_data()
-        logger.info(f"训练集路径: root={train_data.dataset_root}, split={train_data.split_file}")
-        logger.info(f"验证集路径: root={val_data.dataset_root}, split={val_data.split_file}")
-        data_objects = [train_data.samples, val_data.samples]
-        logger.info(f"训练集 {len(data_objects[0])} 条, 验证集 {len(data_objects[1])} 条")
-    dist.broadcast_object_list(data_objects, src=0)
-    train_samples, val_samples = data_objects
+    # ---------- 断点续训：先恢复模型权重（DeepSpeed 包装前） ----------
+    ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints_ds")
+    os.makedirs(ckpt_dir, exist_ok=True)
+    resume_payload = None
+    resume_path = args.resume_ckpt
+    if args.resume or args.resume_ckpt:
+        if resume_path is None:
+            resume_path = os.path.join(ckpt_dir, "latest_ds.pth")
+        if not os.path.isabs(resume_path):
+            resume_path = os.path.abspath(resume_path)
+        if not os.path.exists(resume_path):
+            raise FileNotFoundError(f"断点续训失败，checkpoint 不存在: {resume_path}")
+        resume_payload = load_checkpoint_payload(resume_path, map_location="cpu")
+        state_dict = resume_payload.get("model_state_dict")
+        if state_dict is None:
+            raise KeyError(f"checkpoint 缺少 model_state_dict: {resume_path}")
+        miss, unexp = model.load_state_dict(state_dict, strict=False)
+        if local_rank == 0:
+            logger.info(
+                f"已加载断点模型: {resume_path} | missing={len(miss)} unexpected={len(unexp)}"
+            )
 
     # 构建 Dataset
     train_ds_cls = JointAffordanceTrainDataset if training_configs.samples_per_epoch else JointAffordanceTorchDataset
@@ -562,6 +701,8 @@ def main():
             model=model, model_parameters=params_to_train, training_data=train_dataset,
             collate_fn=data_collator, config=training_configs.deepspeed.to_dict(),
         )
+    optimizer = getattr(model_engine, "optimizer", optimizer)
+    scheduler = getattr(model_engine, "lr_scheduler", scheduler)
 
     # 验证 DataLoader（在循环外创建，避免每个 epoch 重复创建）
     val_loader = torch.utils.data.DataLoader(
@@ -573,18 +714,74 @@ def main():
         logger, stage="after_deepspeed",
     )
 
+    global_step = 0
+    best_metric = float("inf")
+    best_epoch = -1
+    start_epoch = 0
+    last_val_metrics: Dict = {}
+    update_epoch = max(1, int(getattr(training_configs, "update_epoch", 1)))
+    config_json_path = os.path.join(ckpt_dir, "training_config.json")
+
+    # ---------- 断点续训：恢复优化器/调度器与训练进度 ----------
+    if resume_payload is not None:
+        opt_state = resume_payload.get("optimizer_state_dict")
+        if opt_state is not None and optimizer is not None:
+            try:
+                optimizer.load_state_dict(opt_state)
+                _move_optimizer_state_to_device(optimizer, model_engine.device)
+            except Exception as exc:
+                if local_rank == 0:
+                    logger.warning(f"DeepSpeed optimizer state 加载失败，将仅恢复模型权重: {exc}")
+        sch_state = resume_payload.get("scheduler_state_dict")
+        if sch_state is not None and scheduler is not None:
+            try:
+                scheduler.load_state_dict(sch_state)
+            except Exception as exc:
+                if local_rank == 0:
+                    logger.warning(f"scheduler state 加载失败，将重新开始学习率调度: {exc}")
+        global_step = int(resume_payload.get("global_step", 0) or 0)
+        best_epoch = int(resume_payload.get("best_epoch", -1) or -1)
+        best_metric = float(resume_payload.get("best_val_loss", float("inf")))
+        start_epoch = int(resume_payload.get("epoch", 0) or 0)
+        last_val_metrics = _to_serializable_metrics(resume_payload.get("val_metrics", {}))
+        if local_rank == 0:
+            logger.info(
+                f"断点续训状态: start_epoch={start_epoch + 1}, global_step={global_step}, "
+                f"best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
+            )
+            if opt_state is None or sch_state is None:
+                logger.warning(
+                    "resume checkpoint 缺少 optimizer/scheduler 状态，"
+                    "学习率曲线与优化器动量无法完全无缝衔接。建议使用新版本 latest_ds.pth 续训。"
+                )
+
+    if local_rank == 0:
+        tb_dir = os.path.join(training_configs.log_dir, "tensorboard")
+        os.makedirs(tb_dir, exist_ok=True)
+        writer = SummaryWriter(log_dir=tb_dir, purge_step=global_step)
+        writer.add_text("config/training", str(training_configs.to_dict()))
+        writer.add_text("config/model", str(model_config.to_dict()))
+        if resume_payload is not None:
+            writer.add_text("resume/info", f"resume_from={resume_path}, global_step={global_step}, start_epoch={start_epoch + 1}")
+        training_configs.save_json(config_json_path, include_deepspeed=True)
+        logger.info(f"配置已导出: {config_json_path}")
+        logger.info(
+            f"Checkpoint 保存策略: 直接保存完整 .pth（best/latest/fixed），latest 每 {update_epoch} epoch，固定存档每 {args.fixed_save_interval} epoch"
+        )
+
     # ---------- 提取损失计算参数（避免每次调用重复写） ----------
     loss_kwargs = dict(
         device=model_engine.device,
-        # 2D: Focal + Dice
         focal_loss_weight=getattr(training_configs, "focal_loss_weight", 2.0),
         dice_loss_weight=getattr(training_configs, "dice_loss_weight", 0.5),
         focal_alpha=getattr(training_configs, "focal_alpha", 0.25),
         focal_gamma=getattr(training_configs, "focal_gamma", 2.0),
-        # 3D: BCE + Dice
         bce_loss_weight=getattr(training_configs, "bce_loss_weight", 2.0),
-        # LLM CE
         ce_loss_weight=getattr(training_configs, "ce_loss_weight", 1.0),
+        route_loss_weight=getattr(training_configs, "route_loss_weight", 1.0),
+        route_exist_loss_weight=getattr(training_configs, "route_exist_loss_weight", 0.25),
+        route_sparse_loss_weight=getattr(training_configs, "route_sparse_loss_weight", 0.05),
+        route_target_present_count=getattr(training_configs, "route_target_present_count", 1.0),
     )
 
     logger.info(f"损失配置: {loss_kwargs}")
@@ -594,17 +791,26 @@ def main():
     logger.info("开始训练循环")
     logger.info("=" * 80)
 
-    global_step = 0
-    best_metric = float("inf")  # 以 val_loss 越小越好
-    best_epoch = -1
-    ckpt_dir = os.path.join(training_configs.log_dir, "checkpoints")
-    os.makedirs(ckpt_dir, exist_ok=True)
-    config_json_path = os.path.join(ckpt_dir, "training_config.json")
-    if local_rank == 0:
-        training_configs.save_json(config_json_path, include_deepspeed=True)
-        logger.info(f"配置已导出: {config_json_path}")
+    def _save_full_checkpoint(filename: str, meta: Dict):
+        zero_stage = getattr(training_configs.deepspeed, "zero_stage", 3)
+        saved = _save_model_state_to_cpu(
+            model_engine,
+            os.path.join(ckpt_dir, filename),
+            meta,
+            local_rank,
+            logger,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            training_cfg=training_configs,
+            asset_bundle=portable_asset_bundle,
+            zero_stage=zero_stage,
+        )
+        if not saved:
+            logger.warning(f"保存 portable checkpoint 失败: {filename}，回退到 DeepSpeed ZeRO checkpoint")
+            tag = os.path.splitext(filename)[0]
+            model_engine.save_checkpoint(ckpt_dir, tag=tag, client_state=meta, save_latest=False)
 
-    for epoch in range(training_configs.epochs):
+    for epoch in range(start_epoch, training_configs.epochs):
         logger.info(f"----- Epoch [{epoch + 1}/{training_configs.epochs}] -----")
         if hasattr(train_dataset, "set_epoch"):
             train_dataset.set_epoch(epoch)
@@ -641,79 +847,79 @@ def main():
                     f"mask_threshold_3d={training_configs.mask_threshold_3d:.4f}, "
                     f"path={config_json_path}"
                 )
-        # 验证阶段 torchmetrics 会暂存 pred/target，结束后释放；此处统一释放碎片显存，为保存 checkpoint 腾出空间
+        last_val_metrics = _to_serializable_metrics(val_results)
         torch.cuda.empty_cache()
 
-        # Checkpoint：以 val_loss 为监控指标，保存 best
-        # 优先「卸载到 CPU 再保存」避免 ZeRO-3 在 GPU 上全量汇聚导致 OOM；否则回退到 save_checkpoint
-        monitor = val_results.get("loss", train_results.get("loss", float("inf")))
-        if monitor < best_metric:
+        monitor = float(val_results.get("loss", train_results.get("loss", float("inf"))))
+        current_epoch = epoch + 1
+        is_best = monitor < best_metric
+        if is_best:
             best_metric = monitor
-            best_epoch = epoch + 1
-            client_state = {
-                "epoch": epoch + 1,
+            best_epoch = current_epoch
+
+        should_save_latest = (current_epoch % update_epoch == 0) or (current_epoch == training_configs.epochs)
+        should_save_fixed = (current_epoch % args.fixed_save_interval == 0)
+
+        save_flags = [False, False, False]  # [best, latest, fixed]
+        if local_rank == 0:
+            save_flags = [bool(is_best), bool(should_save_latest), bool(should_save_fixed)]
+        dist.broadcast_object_list(save_flags, src=0, group=cpu_obj_group)
+        is_best_save, is_latest_save, is_fixed_save = save_flags
+
+        did_save = False
+        if is_best_save or is_latest_save or is_fixed_save:
+            common_meta = {
+                "epoch": current_epoch,
+                "global_step": global_step,
                 "best_epoch": best_epoch,
-                "best_val_loss": best_metric,
+                "best_val_loss": float(best_metric),
+                "val_loss": float(monitor),
+                "val_metrics": last_val_metrics,
             }
-            zero_stage = getattr(training_configs.deepspeed, "zero_stage", 3)
-            best_cpu_path = os.path.join(ckpt_dir, "best_cpu.pth")
-            saved_to_cpu = _save_model_state_to_cpu(
-                model_engine,
-                best_cpu_path,
-                client_state,
-                local_rank,
-                logger,
-                training_cfg=training_configs,
-                asset_bundle=portable_asset_bundle,
-                zero_stage=zero_stage,
-            )
-            if not saved_to_cpu:
-                logger.warning("Failed to save best checkpoint to CPU, falling back to ZeRO format")
-                model_engine.save_checkpoint(
-                    ckpt_dir, tag="best",
-                    client_state=client_state,
-                    save_latest=False,
-                )
+            if is_best_save:
+                _save_full_checkpoint("best_ds.pth", common_meta)
                 if local_rank == 0:
-                    logger.info(f"Best checkpoint (ZeRO 格式) 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
-            if local_rank == 0:
-                if writer is not None:
-                    log_scalar_dict(writer, "checkpoint",
-                                    {"best_val_loss": best_metric, "best_epoch": float(best_epoch)},
-                                    epoch + 1)
+                    logger.info(f"Best checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
+                    if writer is not None:
+                        log_scalar_dict(
+                            writer,
+                            "checkpoint",
+                            {"best_val_loss": best_metric, "best_epoch": float(best_epoch)},
+                            current_epoch,
+                        )
+                did_save = True
+            if is_latest_save:
+                _save_full_checkpoint("latest_ds.pth", common_meta)
+                if local_rank == 0:
+                    logger.info(
+                        f"Latest checkpoint 已保存: "
+                        f"epoch={current_epoch}, best_epoch={best_epoch}, best_val_loss={best_metric:.6f}"
+                    )
+                did_save = True
+            if is_fixed_save:
+                fixed_name = f"epoch_{current_epoch:04d}_ds.pth"
+                _save_full_checkpoint(fixed_name, common_meta)
+                if local_rank == 0:
+                    logger.info(f"固定周期 checkpoint 已保存: {os.path.join(ckpt_dir, fixed_name)}")
+                did_save = True
+        if did_save:
+            dist.barrier()
 
     # ---------- 训练结束：保存最新模型（用于断点续训）----------
     final_epoch = training_configs.epochs
-    if dist.is_initialized():
-        dist.barrier()
-    torch.cuda.empty_cache()
-    model_engine.save_checkpoint(
-        ckpt_dir, tag="latest",
-        client_state={
+    _save_full_checkpoint(
+        "latest_ds.pth",
+        {
             "epoch": final_epoch,
             "best_epoch": best_epoch,
-            "best_val_loss": best_metric,
+            "best_val_loss": float(best_metric),
             "global_step": global_step,
+            "val_metrics": last_val_metrics,
         },
     )
+    dist.barrier()
     if local_rank == 0:
-        logger.info(f"Latest checkpoint 已保存: epoch={final_epoch}, path={ckpt_dir}/latest")
-    latest_cpu_path = os.path.join(ckpt_dir, "latest_cpu.pth")
-    _save_model_state_to_cpu(
-        model_engine,
-        latest_cpu_path,
-        client_state={
-            "epoch": final_epoch,
-            "best_epoch": best_epoch,
-            "best_val_loss": best_metric,
-            "global_step": global_step,
-        },
-        local_rank=local_rank,
-        logger=logger,
-        training_cfg=training_configs,
-        asset_bundle=portable_asset_bundle,
-        zero_stage=zero_stage,
-    )
+        logger.info("训练结束：已额外导出完整 latest 权重 latest_ds.pth")
 
     logger.info("=" * 80)
     logger.info(

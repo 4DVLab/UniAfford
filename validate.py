@@ -28,7 +28,11 @@ from utils.dataset import (
     joint_affordance_collate_fn,
 )
 from utils.common import dict_to_cuda, resolve_dtype
-from utils.model_io import load_portable_model
+from utils.model_io import (
+    load_checkpoint_payload,
+    load_portable_model,
+    resolve_training_config_from_payload,
+)
 from utils import calculator as calc
 from utils.metrics import (
     build_torchmetrics_bundle,
@@ -49,7 +53,7 @@ from collections import defaultdict
 def parse_args():
     parser = argparse.ArgumentParser(description="验证 JointAffordance 模型（新版）")
     parser.add_argument("--checkpoint_path", type=str, required=True,
-                        help="训练好的模型 checkpoint 路径（包含 model_state_dict 或直接为 state_dict）")
+                        help="训练好的模型 checkpoint 路径；支持单文件 .pth 或 HF 分片目录")
     parser.add_argument("--config_json", type=str, default=None,
                         help="训练配置 JSON 路径（默认自动在 checkpoint 同目录查找 training_config.json）")
     parser.add_argument("--dataset_dir", type=str, default=None,
@@ -458,12 +462,16 @@ def main():
 
     # 训练 & 推理配置
     cfg_json_path = _resolve_config_json_path(args.checkpoint_path, args.config_json)
+    ckpt_payload = load_checkpoint_payload(args.checkpoint_path, map_location="cpu")
     if cfg_json_path is not None and os.path.exists(cfg_json_path):
         training_cfg = TrainingConfig.from_json(cfg_json_path)
         print(f"已加载训练配置: {cfg_json_path}")
     else:
-        training_cfg = TrainingConfig()
-        print("未找到训练配置 JSON，使用 TrainingConfig 默认值。")
+        training_cfg = resolve_training_config_from_payload(ckpt_payload)
+        if isinstance(ckpt_payload.get("training_config"), dict):
+            print("已从 checkpoint 元信息加载训练配置。")
+        else:
+            print("未找到训练配置 JSON 或 checkpoint 内嵌配置，使用 TrainingConfig 默认值。")
     # 覆盖优先级：命令行参数（非 None） > InferenceConfig.defaults > training_config.json。
     infer_cfg = InferenceConfig(
         precision=args.precision,
@@ -513,6 +521,7 @@ def main():
         map_location="cpu",
         device=device,
         strict=False,
+        ckpt_payload=ckpt_payload,
     )
     model_cfg = training_cfg.model_config
     model.eval()

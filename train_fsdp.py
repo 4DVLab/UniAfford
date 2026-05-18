@@ -25,6 +25,7 @@ from torch.distributed.fsdp import (
     FullyShardedDataParallel as FSDP,
     StateDictType,
     FullStateDictConfig,
+    FullOptimStateDictConfig,
 )
 from peft import get_peft_model
 from transformers import get_cosine_schedule_with_warmup
@@ -56,7 +57,7 @@ from utils.threshold_search import (
     finalize_threshold_search,
 )
 from utils.debug import log_param_dtype_stats, count_model_params, _collect_batch_runtime_stats
-from utils.model_io import build_portable_assets, build_portable_checkpoint_payload
+from utils.model_io import build_portable_assets, load_checkpoint_payload, save_portable_checkpoint
 from utils.trainability_summary import log_trainability_summary
 
 
@@ -92,7 +93,7 @@ def parse_args():
     parser.add_argument("--fixed_save_interval", type=int, default=100, help="固定长周期保存 checkpoint 的间隔，用于保存收敛状态。")
     parser.add_argument("--lazy_load", dest="lazy_load", action="store_true", help="启用懒加载（默认启用）", default=True)
     parser.add_argument("--resume", action="store_true", help="从 checkpoint 断点续训", default=False)
-    parser.add_argument("--resume_ckpt", type=str, default=None, help="断点续训 checkpoint 路径；为空则默认 latest_fsdp.pth")
+    parser.add_argument("--resume_ckpt", type=str, default=None, help="断点续训 checkpoint 路径；支持单文件 .pth 或 HF 分片目录，为空则默认 latest_fsdp.pth")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
 
     args, _ = parser.parse_known_args()
@@ -583,7 +584,7 @@ def main():
             resume_path = os.path.abspath(resume_path)
         if not os.path.exists(resume_path):
             raise FileNotFoundError(f"断点续训失败，checkpoint 不存在: {resume_path}")
-        resume_payload = torch.load(resume_path, map_location="cpu")
+        resume_payload = load_checkpoint_payload(resume_path, map_location="cpu")
         state_dict = resume_payload.get("model_state_dict")
         if state_dict is None:
             raise KeyError(f"checkpoint 缺少 model_state_dict: {resume_path}")
@@ -714,7 +715,15 @@ def main():
     if resume_payload is not None:
         opt_state = resume_payload.get("optimizer_state_dict")
         if opt_state is not None:
-            optimizer.load_state_dict(opt_state)
+            try:
+                opt_state_to_load = FSDP.optim_state_dict_to_load(model_fsdp, optimizer, opt_state)
+            except Exception as exc:
+                if local_rank == 0:
+                    logger.warning(
+                        f"FSDP optimizer state 转换失败，将按旧格式直接加载: {exc}"
+                    )
+                opt_state_to_load = opt_state
+            optimizer.load_state_dict(opt_state_to_load)
             _move_optimizer_state_to_device(optimizer, device)
         sch_state = resume_payload.get("scheduler_state_dict")
         if sch_state is not None:
@@ -755,20 +764,29 @@ def main():
         """
         标准 FSDP 完整权重保存：
         - 所有 rank 参与 state_dict 聚合（rank0_only=True）
+        - 同步保存 FSDP full optimizer state 与 scheduler state，支持无缝 resume
         - 仅 rank0 落盘 .pth，可直接用于评估/推理加载
         """
         with FSDP.state_dict_type(
-            model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+            model_fsdp,
+            StateDictType.FULL_STATE_DICT,
+            FullStateDictConfig(offload_to_cpu=True, rank0_only=True),
+            FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True),
         ):
             full_state = model_fsdp.state_dict()
+            optim_state = FSDP.optim_state_dict(model_fsdp, optimizer)
         if local_rank == 0:
-            payload = build_portable_checkpoint_payload(
+            save_portable_checkpoint(
+                os.path.join(ckpt_dir, filename),
                 model_state_dict=full_state,
                 meta=meta,
                 training_cfg=training_configs,
                 asset_bundle=portable_asset_bundle,
+                optimizer_state_dict=optim_state,
+                scheduler=scheduler,
+                lr_dict=get_current_lr(scheduler, optimizer),
+                logger=logger,
             )
-            torch.save(payload, os.path.join(ckpt_dir, filename))
 
     for epoch in range(start_epoch, training_configs.epochs):
         logger.info(f"----- Epoch [{epoch + 1}/{training_configs.epochs}] -----")
@@ -858,26 +876,18 @@ def main():
             dist.barrier()
 
     # 训练结束后可选导出一次完整 latest（与训练中 latest 保持一致，可用于最终覆盖）
+    _save_full_checkpoint(
+        "latest_fsdp.pth",
+        {
+            "epoch": training_configs.epochs,
+            "global_step": global_step,
+            "best_epoch": best_epoch,
+            "best_val_loss": float(best_metric),
+            "val_metrics": last_val_metrics,
+        },
+    )
+    dist.barrier()
     if local_rank == 0:
-        with FSDP.state_dict_type(
-            model_fsdp, StateDictType.FULL_STATE_DICT, FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-        ):
-            final_state = model_fsdp.state_dict()
-        torch.save(
-            build_portable_checkpoint_payload(
-                model_state_dict=final_state,
-                meta={
-                    "epoch": training_configs.epochs,
-                    "global_step": global_step,
-                    "best_epoch": best_epoch,
-                    "best_val_loss": best_metric,
-                    "val_metrics": last_val_metrics,
-                },
-                training_cfg=training_configs,
-                asset_bundle=portable_asset_bundle,
-            ),
-            os.path.join(ckpt_dir, "latest_fsdp.pth"),
-        )
         logger.info("训练结束：已额外导出完整 latest 权重 latest_fsdp.pth")
 
     logger.info("=" * 80)
