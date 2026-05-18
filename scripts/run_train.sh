@@ -24,7 +24,7 @@ export TORCHINDUCTOR_NO_PARALLEL_COMPILE=1
 # ================================ 训练参数 ================================
 
 COMMON_ARGS=(
-  --log_dir ../runs/joint-aff-debug/
+  --log_dir ../runs/UniAfford-debug/
   --dataset_dir ../datasets/merged1-2-3/
 
   --qwen_model ../pretrained/Qwen/Qwen3-VL-2B-Instruct
@@ -34,7 +34,7 @@ COMMON_ARGS=(
   --batch_size 1
   --epochs 150
 
-  # --resume_ckpt ../runs/joint-aff-exp/latest_fsdp.pth  # 断点续训，不继承lr\optimizer状态
+  # --resume_ckpt ../runs/UniAfford-exp/latest_fsdp.pth  # 断点续训，不继承lr\optimizer状态
 )
 
 # ================================ 选择 fsdp?ds ================================

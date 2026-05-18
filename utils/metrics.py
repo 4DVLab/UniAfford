@@ -149,7 +149,9 @@ def update_torchmetrics(
             num_thresholds=20,
             gt_threshold=gt_threshold_3d,
         )
-        metrics["iou_3d"].update(iou_3d.item(), weight=bs)
+        iou_3d_valid = ((target_3d.flatten(1) >= gt_threshold_3d).sum(dim=1) > 0).sum().item()
+        if iou_3d_valid > 0 and torch.isfinite(iou_3d):
+            metrics["iou_3d"].update(iou_3d.item(), weight=iou_3d_valid)
 
         mae_3d = calc.pc_MAE(preds_3d, target_3d)
         metrics["mae_3d"].update(mae_3d.item(), weight=bs)
@@ -258,11 +260,12 @@ def compute_sample_metrics(
         if aligned_logits_3d is not None:
             pred_3d = aligned_logits_3d.sigmoid()
             gt_3d = aligned_gt_3d.float()
-            record["iou_3d"] = round(calc.pc_aIOU(
+            iou_3d = calc.pc_aIOU(
                 pred_3d, gt_3d,
                 num_thresholds=20,
                 gt_threshold=gt_threshold_3d,
-            ).item(), 6)
+            )
+            record["iou_3d"] = round(iou_3d.item(), 6) if torch.isfinite(iou_3d) else None
             record["mae_3d"] = round(calc.pc_MAE(pred_3d, gt_3d).item(), 6)
             record["sim_3d"] = round(calc.pc_SIM(pred_3d, gt_3d)[0].item(), 6)
             try:

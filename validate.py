@@ -319,9 +319,10 @@ def _parse_metric_val(v) -> Optional[float]:
     if v is None or v == "":
         return None
     try:
-        return float(v)
+        value = float(v)
     except (TypeError, ValueError):
         return None
+    return value if np.isfinite(value) else None
 
 
 def _aggregate_by_label(sample_records: List[Dict]) -> Dict:

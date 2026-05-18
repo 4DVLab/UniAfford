@@ -645,7 +645,7 @@ def pc_aIOU(
     Args:
         num_thresholds: 阈值数量
     Returns:
-        aiou: [Batch] 个样本的平均 aIoU
+        aiou: batch 内非全负 GT 样本的平均 aIoU；若全部为全负 GT，则返回 nan
     """
     batch_size = pred_mask.shape[0]
     pred_flat = pred_mask.flatten(1)  # [Batch, N]
@@ -658,6 +658,12 @@ def pc_aIOU(
     for b in range(batch_size):
         pred_b = pred_flat[b]  # [N]
         gt_b = gt_flat[b]  # [N]
+
+        # GREAT skips samples whose GT has no positive point by assigning nan
+        # and using nanmean during final aggregation.
+        if gt_b.sum() == 0:
+            aiou_list.append(pred_b.new_tensor(float("nan")))
+            continue
         
         iou_list = []
         for threshold in thresholds:
@@ -670,7 +676,7 @@ def pc_aIOU(
         aiou = torch.stack(iou_list).mean()
         aiou_list.append(aiou)
     
-    return torch.stack(aiou_list).mean()
+    return torch.nanmean(torch.stack(aiou_list))
 
 
 def pc_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-12) -> torch.Tensor:
