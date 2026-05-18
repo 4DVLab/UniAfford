@@ -114,10 +114,12 @@ def update_threshold_search_stats(
             gt_threshold = float(getattr(config, "gt_threshold_3d", 0.5))
             batch_size = preds.shape[0]
             for idx, threshold in enumerate(thresholds):
-                pred_bool = preds.flatten(1) >= float(threshold.item())
-                gt_bool = target.flatten(1) >= gt_threshold
-                inter = (pred_bool & gt_bool).sum(dim=1).float()
-                union = (pred_bool | gt_bool).sum(dim=1).float()
+                inter, union = calc.pc_I_and_U(
+                    preds,
+                    target,
+                    threshold=float(threshold.item()),
+                    gt_threshold=gt_threshold,
+                )
                 iou = inter / (union + 1e-8)
                 stats["sum_iou_3d"][idx] += iou.sum()
                 stats["sum_inter_3d"][idx] += inter.sum()

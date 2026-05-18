@@ -121,21 +121,6 @@ def img_DICE_loss(
     return loss.mean()
 
 
-def sigmoid_CE_loss(
-    inputs: torch.Tensor,
-    targets: torch.Tensor,
-) -> torch.Tensor:
-    """
-    批量计算 Sigmoid 交叉熵损失（标准 BCE）。
-    输入为 logits（F.binary_cross_entropy_with_logits 内部自动 sigmoid）。
-    Returns:
-        loss: 标量，所有样本的平均损失
-    """
-    loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    loss = loss.flatten(1).mean(dim=1)
-    return loss.mean()
-
-
 def sigmoid_focal_loss(
     inputs: torch.Tensor,
     targets: torch.Tensor,
@@ -208,6 +193,21 @@ def img_loss(
 
 
 """ -------------------------------------- pc Loss ------------------------------------- """
+def sigmoid_CE_loss(
+    inputs: torch.Tensor,
+    targets: torch.Tensor,
+) -> torch.Tensor:
+    """
+    批量计算 Sigmoid 交叉熵损失（标准 BCE）。
+    输入为 logits（F.binary_cross_entropy_with_logits 内部自动 sigmoid）。
+    Returns:
+        loss: 标量，所有样本的平均损失
+    """
+    loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
+    loss = loss.flatten(1).mean(dim=1)
+    return loss.mean()
+
+
 def MSE_loss(pred_heatmap: torch.Tensor, target_heatmap: torch.Tensor) -> torch.Tensor:
     """
     批量计算热力图MSE损失
@@ -702,6 +702,35 @@ def pc_SIM(pred_mask: torch.Tensor, gt_mask: torch.Tensor, eps: float = 1e-12) -
     return sim
 
 
+def pc_I_and_U(
+    pred_mask: torch.Tensor,
+    gt_mask: torch.Tensor,
+    threshold: float = 0.5,
+    gt_threshold: float = 0.5,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    批量计算点云预测的交集和并集（用于累积后计算 cIoU）。
+    
+    Args:
+        pred_mask: [Batch, N] 预测掩码，值域 [0, 1]
+        gt_mask: [Batch, N] 真实掩码，值域 {0, 1}
+        threshold: 二值化阈值
+        gt_threshold: GT 二值化阈值
+
+    Returns:
+        intersection: [Batch]
+        union: [Batch]
+    """
+    pred_flat = pred_mask.flatten(1)  # [Batch, N]
+    gt_flat = gt_mask.flatten(1) >= gt_threshold  # [Batch, N]
+    pred_bool = pred_flat >= threshold  # [Batch, N]
+
+    intersection = (pred_bool & gt_flat).sum(dim=1).float()  # [Batch]
+    union = (pred_bool | gt_flat).sum(dim=1).float()  # [Batch]
+
+    return intersection, union
+
+
 def pc_IoU(
     pred_mask: torch.Tensor,
     gt_mask: torch.Tensor,
@@ -715,18 +744,17 @@ def pc_IoU(
         pred_mask: [Batch, N] 预测掩码，值域 [0, 1]
         gt_mask: [Batch, N] 真实掩码，值域 {0, 1}
         threshold: 二值化阈值
+        gt_threshold: GT 二值化阈值
         
     Returns:
         iou: [Batch] 每个样本的IoU
     """
-    pred_flat = pred_mask.flatten(1)  # [Batch, N]
-    gt_flat = gt_mask.flatten(1) >= gt_threshold  # [Batch, N]
-    
-    pred_bool = pred_flat >= threshold  # [Batch, N]
-    
-    intersection = (pred_bool & gt_flat).sum(dim=1).float()  # [Batch]
-    union = (pred_bool | gt_flat).sum(dim=1).float()  # [Batch]
-    
+    intersection, union = pc_I_and_U(
+        pred_mask,
+        gt_mask,
+        threshold=threshold,
+        gt_threshold=gt_threshold,
+    )
     iou = intersection / (union + 1e-8)  # [Batch]
     return iou
 
