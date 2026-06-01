@@ -88,6 +88,10 @@ def parse_args():
                         help="日志名/实验名（用于输出目录命名）")
     parser.add_argument("--lazy_load", dest="lazy_load", action="store_true",
                         help="启用数据懒加载（默认启用）", default=True)
+    parser.add_argument("--save_tsne", action="store_true",
+                        help="记录 task token hidden/vocab embedding，并在验证结束后尝试生成 t-SNE 可视化")
+    parser.add_argument("--tsne_max_points", type=int, default=4000,
+                        help="t-SNE 最多采样点数，避免验证集过大导致内存和耗时过高")
     return parser.parse_args()
 
 
@@ -568,6 +572,17 @@ def main():
         print(f"预测结果将保存到: {infer_cfg.output_dir}")
 
     sample_records: List[Dict] = []
+    tsne_vectors: List[np.ndarray] = []
+    tsne_records: List[Dict] = []
+    if args.save_tsne:
+        from utils.tsne_visualize import _append_task_vocab_embeddings, _collect_tsne_batch, _save_tsne_artifacts
+        _append_task_vocab_embeddings(
+            tsne_vectors,
+            tsne_records,
+            model,
+            tokenizer,
+            max_points=max(1, int(args.tsne_max_points)),
+        )
     threshold_stats = None
     if getattr(training_cfg, "auto_select_mask_threshold", True):
         threshold_stats = init_threshold_search_stats(
@@ -581,7 +596,7 @@ def main():
     with torch.no_grad():
         for batch_idx, input_dict in enumerate(tqdm(val_loader, desc="验证中")):
             input_dict = dict_to_cuda(input_dict, device=device)
-            output_dict = model(**input_dict)
+            output_dict = model(**input_dict, return_hidden_states=args.save_tsne)
 
             # 计算损失 + 更新指标（包括 2D IoU/KLD/SIM/NSS 与 3D IoU/MAE/AUC/SIM）
             loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
@@ -592,6 +607,17 @@ def main():
             )
             if threshold_stats is not None:
                 update_threshold_search_stats(threshold_stats, output_dict, input_dict, training_cfg)
+            if args.save_tsne:
+                _collect_tsne_batch(
+                    tsne_vectors,
+                    tsne_records,
+                    output_dict,
+                    input_dict,
+                    model,
+                    tokenizer,
+                    max_points=max(1, int(args.tsne_max_points)),
+                    ignore_index=IGNORE_INDEX,
+                )
 
             pred_token_ids_batch = output_dict.get("token_ids")
             if pred_token_ids_batch is not None:
@@ -735,8 +761,10 @@ def main():
             print("阈值搜索出现并列或无区分结果；对应分支没有可靠的参考最佳阈值。")
 
     # ---- 保存评估结果（人类可读格式）----
-    out_dir = infer_cfg.output_dir if infer_cfg.save_predictions else "."
+    out_dir = infer_cfg.output_dir if (infer_cfg.save_predictions or args.save_tsne) else "."
     os.makedirs(out_dir, exist_ok=True)
+    if args.save_tsne:
+        _save_tsne_artifacts(tsne_vectors, tsne_records, out_dir)
 
     # 1) 逐样本 CSV（按 sample_id 升序）
     sample_records.sort(key=lambda r: r["sample_id"])
