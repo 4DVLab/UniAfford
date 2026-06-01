@@ -776,6 +776,7 @@ class MLLMBackbone(nn.Module):
             pad_token_id = int(pad_token_id) if pad_token_id is not None else 0
             unfinished = torch.ones((generated_ids.shape[0],), dtype=torch.bool, device=input_ids.device)
 
+        past_key_values = None
         while generated_ids.shape[1] < target_length and bool(unfinished.any().item()):
             next_pos = int(generated_ids.shape[1])
             position_ids = self._compute_multimodal_position_ids(
@@ -783,17 +784,27 @@ class MLLMBackbone(nn.Module):
                 attention_mask=attention_mask,
                 image_grid_thw=image_grid_thw,
             )
+            step_inputs_embeds = inputs_embeds if past_key_values is None else inputs_embeds[:, -1:, :]
+            if position_ids is not None and past_key_values is not None:
+                position_ids = position_ids[:, :, -1:]
             model_inputs = {
-                "inputs_embeds": self._sanitize_image_placeholder_embeddings(generated_ids, inputs_embeds),
+                "inputs_embeds": self._sanitize_image_placeholder_embeddings(
+                    generated_ids if past_key_values is None else generated_ids[:, -1:],
+                    step_inputs_embeds,
+                ),
                 "attention_mask": attention_mask,
                 "position_ids": position_ids,
-                "pixel_values": pixel_values,
-                "image_grid_thw": image_grid_thw,
+                "past_key_values": past_key_values,
+                "pixel_values": pixel_values if past_key_values is None else None,
+                "image_grid_thw": image_grid_thw if past_key_values is None else None,
+                "use_cache": True,
+                "logits_to_keep": 1,
                 "output_hidden_states": True,
                 "return_dict": True,
             }
             model_inputs = {k: v for k, v in model_inputs.items() if v is not None}
             outputs = self.model(**model_inputs)
+            past_key_values = getattr(outputs, "past_key_values", None)
             hidden_states = self._extract_qwen_hidden_states(outputs, model_inputs)
             logits = getattr(outputs, "logits", None)
             if logits is None:
