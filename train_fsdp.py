@@ -69,14 +69,7 @@ def parse_args():
     parser.add_argument("--qwen_model", type=str, default=None, help="Qwen 模型路径或名称")
     parser.add_argument("--vision_pretrained", type=str, default=None, help="SAM 权重路径")
     parser.add_argument("--point_backbone_pretrained", type=str, default=None, help="SONATA point backbone 预训练权重路径")
-    parser.add_argument(
-        "--point_decoder_backbone_mode", type=str, default='independent', choices=["shared", "independent"],
-        help="3D decoder backbone 模式：shared 为与 encoder 共用基座，independent 为独立随机初始化 backbone",
-    )
-    parser.add_argument(
-        "--point_decoder_decode_mode", type=str, default='similarity', choices=["prompt", "similarity"],
-        help="3D decoder 后端对齐方式：prompt 为 prompt-based 解码，similarity 为逐点相似度对齐",
-    )
+    
     parser.add_argument("--batch_size", type=int, default=None, help="每卡训练 batch size（同时覆写 val_batch_size）")
     parser.add_argument("--epochs", type=int, default=None, help="训练总 epoch 数")
     parser.add_argument("--dataset_dir", type=str, default=None, help="数据集路径")
@@ -95,7 +88,16 @@ def parse_args():
     parser.add_argument("--resume", action="store_true", help="从 checkpoint 断点续训", default=False)
     parser.add_argument("--resume_ckpt", type=str, default=None, help="断点续训 checkpoint 路径；支持单文件 .pth 或 HF 分片目录，为空则默认 latest_fsdp.pth")
     parser.add_argument("--local_rank", type=int, default=ENV_LOCAL_RANK)
-
+    
+    # 模式调试参数，需要手动关闭断言后使用
+    parser.add_argument(
+        "--point_decoder_backbone_mode", type=str, default='independent', choices=["shared", "independent"],
+        help="3D decoder backbone 模式：shared 为与 encoder 共用基座，independent 为独立随机初始化 backbone",
+    )
+    parser.add_argument(
+        "--point_decoder_decode_mode", type=str, default='similarity', choices=["prompt", "similarity"],
+        help="3D decoder 后端对齐方式：prompt 为 prompt-based 解码，similarity 为逐点相似度对齐",
+    )
     args, _ = parser.parse_known_args()
     if args.resume_ckpt is not None:
         args.resume = True
