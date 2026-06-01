@@ -784,20 +784,27 @@ class MLLMBackbone(nn.Module):
             if isinstance(past_key_values, torch.Tensor):
                 return past_key_values.detach()
             if isinstance(past_key_values, tuple):
-                return tuple(self._detach_past_key_values(item) for item in past_key_values)
+                return tuple(_detach_past_key_values(item) for item in past_key_values)
             if isinstance(past_key_values, list):
-                return [self._detach_past_key_values(item) for item in past_key_values]
+                return [_detach_past_key_values(item) for item in past_key_values]
             if isinstance(past_key_values, dict):
-                return {key: self._detach_past_key_values(value) for key, value in past_key_values.items()}
+                return {key: _detach_past_key_values(value) for key, value in past_key_values.items()}
             if hasattr(past_key_values, "detach"):
                 return past_key_values.detach()
             return past_key_values
 
         def _qwen_core_forward(model_inputs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Any]:
             """调用 Qwen backbone 获取最后层 hidden state，再手动过 lm_head 得到 logits。"""
-            qwen_core = getattr(self.model, "model", None)
-            if qwen_core is None:
-                raise RuntimeError("当前 Qwen 模型缺少 .model backbone，无法执行 core forward。")
+            
+            # 训练路径约定 self.model 是 PEFT/LoRA 包装后的 CausalLM。
+            base_model = self.model.get_base_model()
+            qwen_core = base_model.model
+            
+            assert any("lora_" in name for name, _ in qwen_core.named_parameters())
+            lm_head = base_model.get_output_embeddings()
+            if qwen_core is None or lm_head is None:
+                raise RuntimeError("LoRA 包装模型缺少 base_model.model 或 output embeddings。")
+
             core_inputs = {
                 k: v
                 for k, v in model_inputs.items()
@@ -832,7 +839,7 @@ class MLLMBackbone(nn.Module):
                     f"expected_seq_len={model_inputs['inputs_embeds'].shape[1]}, "
                     f"expected_hidden={self.hidden_size}"
                 )
-            logits = self.model.lm_head(hidden_states[:, -1:, :])
+            logits = lm_head(hidden_states[:, -1:, :])
             return hidden_states, logits, getattr(core_outputs, "past_key_values", None)
 
         past_key_values = None
