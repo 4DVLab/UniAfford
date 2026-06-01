@@ -300,47 +300,49 @@ def pc_loss(
 
 def _build_route_targets(
     labels: torch.Tensor,
-    img_placeholder_id: int,
-    pc_placeholder_id: int,
+    placeholder_id_to_task_id: Dict[int, int],
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
     由语言监督标签构造 router 的 token-level 监督：
     - 默认 text 类（0）
-    - label == <img_aff> -> img 类（1）
-    - label == <pc_aff>  -> pc 类（2）
+    - label 命中 placeholder_id_to_task_id 时使用对应任务类
     - label == IGNORE_INDEX 的位置不参与监督
     """
     targets = torch.zeros_like(labels, dtype=torch.long)
     valid_mask = labels.ne(IGNORE_INDEX)
-    targets = torch.where(labels.eq(int(img_placeholder_id)), torch.ones_like(targets), targets)
-    targets = torch.where(labels.eq(int(pc_placeholder_id)), torch.full_like(targets, 2), targets)
+    for placeholder_id, task_id in placeholder_id_to_task_id.items():
+        targets = torch.where(
+            labels.eq(int(placeholder_id)),
+            torch.full_like(targets, int(task_id)),
+            targets,
+        )
     return targets, valid_mask
 
 
 def route_supervision_loss(
     route_logits: Optional[torch.Tensor],
     labels: Optional[torch.Tensor],
-    img_placeholder_id: Optional[int],
-    pc_placeholder_id: Optional[int],
+    placeholder_id_to_task_id: Optional[Dict[int, int]],
     device: torch.device,
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """
     L_route: token-level 路由监督损失（CE）。
     """
     zero = torch.tensor(0.0, device=device)
-    if (
-        route_logits is None
-        or labels is None
-        or img_placeholder_id is None
-        or pc_placeholder_id is None
-    ):
+    if route_logits is None or labels is None or not placeholder_id_to_task_id:
         return zero, None, None
 
     bsz, seq_len, num_routes = route_logits.shape
-    if num_routes != 3:
+    if num_routes < 1:
         return zero, None, None
     if labels.dim() != 2:
         return zero, None, None
+
+    placeholder_id_to_task_id = {
+        int(placeholder_id): int(task_id)
+        for placeholder_id, task_id in placeholder_id_to_task_id.items()
+        if int(task_id) < num_routes
+    }
 
     # 与 Causal LM 对齐：hidden_states[t] / logits[t] 预测 labels[t+1]
     # 因此路由监督也应基于 shift 后的 labels（而非同位 labels）。
@@ -349,7 +351,7 @@ def route_supervision_loss(
     pred_len = min(seq_len, labels.shape[1] - 1)
     route_logits = route_logits[:, :pred_len, :]
     labels_shift = labels[:, 1 : 1 + pred_len]
-    targets, valid_mask = _build_route_targets(labels_shift, img_placeholder_id, pc_placeholder_id)
+    targets, valid_mask = _build_route_targets(labels_shift, placeholder_id_to_task_id)
     if not valid_mask.any():
         return zero, targets, valid_mask
 
@@ -539,13 +541,11 @@ def compute_losses(
     # ---------- Router 损失 ----------
     route_logits = output_dict.get("route_logits")
     labels = output_dict.get("labels", input_dict.get("labels"))
-    img_placeholder_id = output_dict.get("img_placeholder_id")
-    pc_placeholder_id = output_dict.get("pc_placeholder_id")
+    placeholder_id_to_task_id = output_dict.get("placeholder_id_to_task_id")
     route_ce, route_targets, route_valid = route_supervision_loss(
         route_logits=route_logits,
         labels=labels,
-        img_placeholder_id=img_placeholder_id,
-        pc_placeholder_id=pc_placeholder_id,
+        placeholder_id_to_task_id=placeholder_id_to_task_id,
         device=device,
     )
 

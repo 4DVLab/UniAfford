@@ -123,6 +123,15 @@ class MLLMConfigs(Configs):
         "serialized_processor_files": None,
         "serialized_model_config_files": None,
         "serialized_model_class_name": None,
+        # 统一的任务/placeholder 注册表；新增任务时在这里追加 "task": "<token>"。
+        "task_placeholders": {
+            "text": "<text>",
+            "img": "<img_aff>",
+            "pc": "<pc_aff>",
+            # "latent": "<latent>",
+        },
+        # 推理默认启用一阶段自回归 hidden-state feedback。
+        "use_autoregressive_latent_feedback": True,
     }
 
     def __init__(self, config_dict: Optional[Dict] = None, **overrides):

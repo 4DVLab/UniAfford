@@ -71,18 +71,15 @@ class JointAffordanceModel(nn.Module):
         self.router = HeadRouter(
             hidden_size=hidden_size,
             tokenizer=self.tokenizer,
-            img_placeholder_token="<img_aff>",
-            pc_placeholder_token="<pc_aff>",
+            task_placeholder_tokens=self.mllm.task_placeholder_tokens,
         )
         # 只有在执行路由设计相关的“消融”操作时，才应将此开关设置为“fixed_anchor”状态。
         self.routing_design_ablation = None
         assert self.routing_design_ablation is None, "手动注释这行以启用 fixed-anchor 的路由模式"
 
-        # 兼容现有训练/日志代码使用的字段名
-        self.img_placeholder_token = self.router.img_placeholder_token
-        self.pc_placeholder_token = self.router.pc_placeholder_token
-        self.img_placeholder_id = self.router.img_placeholder_id
-        self.pc_placeholder_id = self.router.pc_placeholder_id
+        self.task_placeholder_tokens = self.router.task_placeholder_tokens
+        self.task_placeholder_ids = self.router.task_placeholder_ids
+        self.placeholder_id_to_task_id = self.router.placeholder_id_to_task_id
 
 
     @property
@@ -91,17 +88,18 @@ class JointAffordanceModel(nn.Module):
     @property
     def processor(self): return self.mllm.processor
 
-    def _compute_text_ce_without_aff_placeholders(
+    def _compute_text_ce_without_task_tokens(
         self,
         logits: Optional[torch.Tensor],
         labels: Optional[torch.Tensor],
+        route_out: Optional[Dict[str, torch.Tensor]] = None,
         ignore_index: int = -100,
     ) -> Tuple[Optional[torch.Tensor], int]:
         """
         自定义 CE：
         - 仍使用标准 next-token CE（shift 对齐）
-        - 但忽略标签中 <img_aff>/<pc_aff> 的位置，不监督 MLLM 必须生成这两个占位 token
-        - 这些位置由 router + 下游解码器损失来学习
+        - 忽略标签中 <img_aff>/<pc_aff>/<latent> 等非 text 任务 token
+        - 若提供 route_out，则进一步只保留 router 判为 text 类的位置
         """
         if logits is None or labels is None:
             return None, 0
@@ -113,10 +111,25 @@ class JointAffordanceModel(nn.Module):
         shift_logits = logits[:, :-1, :].contiguous()  # [B, L-1, V]
         shift_labels = labels[:, 1:].contiguous()      # [B, L-1]
         valid = shift_labels.ne(ignore_index)
-        aff_placeholder_mask = shift_labels.eq(self.img_placeholder_id) | shift_labels.eq(self.pc_placeholder_id)
-        # 忽略路由占位 token 标签位：不让 CE 直接监督它们
-        ignored_tokens = int((valid & aff_placeholder_mask).sum().item())
-        valid = valid & (~aff_placeholder_mask)
+        placeholder_mask = torch.zeros_like(shift_labels, dtype=torch.bool)
+        non_text_mask = torch.zeros_like(shift_labels, dtype=torch.bool)
+        for task_name, placeholder_id in self.task_placeholder_ids.items():
+            cur_mask = shift_labels.eq(int(placeholder_id))
+            placeholder_mask = placeholder_mask | cur_mask
+            if task_name != "text":
+                non_text_mask = non_text_mask | cur_mask
+
+        if route_out is not None and route_out.get("hard_route") is not None:
+            hard_route = route_out["hard_route"]
+            pred_len = min(valid.shape[1], hard_route.shape[1])
+            route_text = hard_route[:, :pred_len].eq(self.router.route_text_idx)
+            valid[:, :pred_len] = valid[:, :pred_len] & route_text
+            if pred_len < valid.shape[1]:
+                valid[:, pred_len:] = False
+
+        # placeholder token 只用于路由监督；普通文本 token 才走语言 CE。
+        ignored_tokens = int((valid & placeholder_mask).sum().item())
+        valid = valid & (~placeholder_mask) & (~non_text_mask)
         if not valid.any():
             return shift_logits.new_zeros(()), ignored_tokens
 
@@ -163,40 +176,62 @@ class JointAffordanceModel(nn.Module):
             )
 
         # ---- 1. MLLM 前向 ----
-        mllm_out = self.mllm(
-            input_ids=input_ids,
-            labels=labels,
-            attention_mask=attention_mask,
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw,
-            point_clouds=point_clouds,
-            pc_valid_lengths=pc_valid_lengths,
-            point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
-            point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
+        use_autoregressive_feedback = (
+            labels is None
+            and bool(getattr(self.config.mllm, "use_autoregressive_latent_feedback", False))
         )
-        hidden_states = mllm_out["hidden_states"]  # [B, L, C]
-        output_obj = mllm_out.get("output")
-        # 关键：当启用 pc prefix 时，使用与 logits 同长度的对齐标签，避免 CE 维度不一致
-        model_labels = mllm_out.get("aligned_labels", labels)
-        model_attention_mask = mllm_out.get("aligned_attention_mask", attention_mask)
+        if use_autoregressive_feedback:
+            mllm_out = self.mllm.autoregressive_forward_with_latents(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                point_clouds=point_clouds,
+                pc_valid_lengths=pc_valid_lengths,
+                point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
+                point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
+                router=self.router,
+                generation_config=kwargs.pop("generation_config", None),
+            )
+            hidden_states = mllm_out["step_hidden_states"]
+            output_obj = None
+            model_labels = None
+            model_attention_mask = torch.ones(
+                hidden_states.shape[:2],
+                dtype=torch.bool,
+                device=hidden_states.device,
+            )
+            logits_token_ids = (
+                mllm_out["step_logits"].argmax(dim=-1)
+                if mllm_out.get("step_logits") is not None
+                else None
+            )
+        else:
+            mllm_out = self.mllm(
+                input_ids=input_ids,
+                labels=labels,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                point_clouds=point_clouds,
+                pc_valid_lengths=pc_valid_lengths,
+                point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
+                point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
+            )
+            hidden_states = mllm_out["hidden_states"]  # [B, L, C]
+            output_obj = mllm_out.get("output")
+            # 关键：当启用 pc prefix 时，使用与 logits 同长度的对齐标签，避免 CE 维度不一致
+            model_labels = mllm_out.get("aligned_labels", labels)
+            model_attention_mask = mllm_out.get("aligned_attention_mask", attention_mask)
+            logits_token_ids = None
+            if output_obj is not None:
+                # 从 logits 中取 token_ids（用于可视化与占位 token 回写，不参与路由决策）
+                if getattr(output_obj, "logits", None) is not None:
+                    logits_token_ids = output_obj.logits.argmax(dim=-1)
         B,L,C = hidden_states.shape
 
-        logits_token_ids = None
         ce_loss = None
         ce_ignored_token_count = 0
-        if output_obj is not None:
-            # 从 logits 中取 token_ids（用于可视化与占位 token 回写，不参与路由决策）
-            if getattr(output_obj, "logits", None) is not None:
-                logits_token_ids = output_obj.logits.argmax(dim=-1)
-                # CE 改为“忽略 <img_aff>/<pc_aff> 标签位”的版本
-                ce_loss, ce_ignored_token_count = self._compute_text_ce_without_aff_placeholders(
-                    logits=output_obj.logits,
-                    labels=model_labels,
-                    ignore_index=-100,
-                )
-            # 兜底：无 logits 时沿用底座返回 loss
-            if ce_loss is None and getattr(output_obj, "loss", None) is not None:
-                ce_loss = output_obj.loss
         
         if hidden_states is not None:
             img_available = img_valid_mask if img_valid_mask is not None else None
@@ -213,6 +248,17 @@ class JointAffordanceModel(nn.Module):
                 route_out = self.router.fixed_anchor_forward(**route_kwargs)
             else:
                 route_out = self.router(**route_kwargs)
+
+            if output_obj is not None and getattr(output_obj, "logits", None) is not None:
+                ce_loss, ce_ignored_token_count = self._compute_text_ce_without_task_tokens(
+                    logits=output_obj.logits,
+                    labels=model_labels,
+                    route_out=route_out,
+                    ignore_index=-100,
+                )
+            # 兜底：无 logits 时沿用底座返回 loss
+            if ce_loss is None and output_obj is not None and getattr(output_obj, "loss", None) is not None:
+                ce_loss = output_obj.loss
 
             # ---- 3. 2D 图像分割 ----
             image_embeddings = self.image_decoder.get_visual_embs(images)
@@ -278,9 +324,9 @@ class JointAffordanceModel(nn.Module):
             "pc_any_prob": route_out["pc_any_prob"],
             "img_expected_count": route_out["img_expected_count"],
             "pc_expected_count": route_out["pc_expected_count"],
-            "img_placeholder_id": self.router.img_placeholder_id,
-            "pc_placeholder_id": self.router.pc_placeholder_id,
-            # batch 级统计：CE 中被忽略的 <img_aff>/<pc_aff> 标签 token 数
+            "task_placeholder_ids": self.router.task_placeholder_ids,
+            "placeholder_id_to_task_id": self.router.placeholder_id_to_task_id,
+            # batch 级统计：CE 中被忽略的非 text 任务 token 数
             "ce_ignored_token_count": ce_ignored_token_count,
         }
 
@@ -292,6 +338,33 @@ class JointAffordanceModel(nn.Module):
             output_dict["output"] = mllm_out.get("output")
 
         return output_dict
+
+    def generate_with_latent_feedback(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        image_grid_thw: Optional[torch.Tensor] = None,
+        point_clouds: Optional[torch.Tensor] = None,
+        pc_valid_lengths: Optional[torch.Tensor] = None,
+        generation_config: Optional[object] = None,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        """
+        一阶段自回归 latent feedback 包装入口。
+
+        非 text 路由位置直接把 route 前 hidden state 作为下一步 embedding，
+        避免经过离散 token 预测再查表。
+        """
+        return self.mllm.autoregressive_forward_with_latents(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            point_clouds=point_clouds,
+            pc_valid_lengths=pc_valid_lengths,
+            router=self.router,
+            generation_config=generation_config,
+        )
 
 
 __all__ = [

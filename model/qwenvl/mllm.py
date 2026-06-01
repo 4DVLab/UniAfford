@@ -1,4 +1,5 @@
-from typing import Optional, Dict, Tuple
+from typing import Optional, Dict, Tuple, Any
+from collections import OrderedDict
 from pathlib import Path
 import tempfile
 from transformers import AutoConfig, AutoProcessor
@@ -35,13 +36,29 @@ class MLLMBackbone(nn.Module):
         self.processor.tokenizer.padding_side = "right"
         self.tokenizer = self.processor.tokenizer
 
-        self.functional_tokens, token_modality = self._normalize_functional_tokens(
-            self.config.functional_tokens
-        )
+        self.task_placeholder_tokens = self._build_task_placeholder_tokens(config)
+        self.functional_tokens, token_modality = self._normalize_functional_tokens(self.config.functional_tokens)
+        self._merge_task_placeholders(self.functional_tokens, token_modality)
         self.functional_token_ids = self._ensure_special_tokens(
             self.functional_tokens, token_modality
         )
         self._ensure_pointcloud_tokens()
+        self.task_placeholder_ids = self._resolve_task_placeholder_ids(self.task_placeholder_tokens)
+        self.task_id_by_name = {name: idx for idx, name in enumerate(self.task_placeholder_tokens.keys())}
+        self.task_name_by_id = {idx: name for name, idx in self.task_id_by_name.items()}
+        self.placeholder_id_to_task_id = {
+            token_id: self.task_id_by_name[name]
+            for name, token_id in self.task_placeholder_ids.items()
+        }
+        self.non_text_placeholder_ids = {
+            token_id
+            for name, token_id in self.task_placeholder_ids.items()
+            if name != "text"
+        }
+        self.text_token = self.task_placeholder_tokens.get("text", "<text>")
+        self.text_token_id = self.task_placeholder_ids.get("text")
+        self.latent_token = self.task_placeholder_tokens.get("latent")
+        self.latent_token_id = self.task_placeholder_ids.get("latent")
 
         # 特殊 token 注入后，词表大小可能变化，这里以模型实际词表为准回写配置。
         self.vocab_size = int(self.model.get_input_embeddings().num_embeddings)
@@ -159,29 +176,57 @@ class MLLMBackbone(nn.Module):
 
     def _normalize_functional_tokens(self, candidate_tokens: dict) -> Tuple[Dict[str, str], Dict[str, str]]:
         """
-        兼容两种输入：
-        1) 扁平映射：token_name -> token_str
-        2) 分模态映射：{"img": {...}, "pc": {...}}（内部可含正反向，函数只提取 name->token_str）
+        只接受显式分任务映射：{"task": {token_name: token_str}}。
+        任务归属由外层 key 决定，不再从 token_name 字符串推断。
         """
         flat: Dict[str, str] = {}
         token_modality: Dict[str, str] = {}
 
-        if isinstance(candidate_tokens, dict) and "img" in candidate_tokens and "pc" in candidate_tokens:
-            for modality in ("img", "pc"):
-                sub = candidate_tokens.get(modality, {})
-                if not isinstance(sub, dict):
-                    continue
-                for token_name, token in sub.items():
-                    if isinstance(token_name, str) and isinstance(token, str) and token.startswith("<") and token.endswith(">"):
-                        flat[token_name] = token
-                        token_modality[token_name] = modality
-        else:
-            for token_name, token in candidate_tokens.items():
+        if not isinstance(candidate_tokens, dict):
+            return flat, token_modality
+        for task_name, sub in candidate_tokens.items():
+            if not isinstance(sub, dict):
+                raise ValueError("functional_tokens 必须使用 {'task': {'token_name': '<token>'}} 结构。")
+            for token_name, token in sub.items():
                 if isinstance(token_name, str) and isinstance(token, str) and token.startswith("<") and token.endswith(">"):
                     flat[token_name] = token
-                    token_modality[token_name] = "img" if token_name.lower().startswith("img_") or token_name == "img_aff_token" else "pc"
+                    token_modality[token_name] = task_name
 
         return flat, token_modality
+
+    def _build_task_placeholder_tokens(self, config: MLLMConfigs) -> "OrderedDict[str, str]":
+        raw = getattr(config, "task_placeholders", None)
+        if raw is None:
+            raise ValueError("MLLMConfigs.task_placeholders 不能为空，需显式声明任务 placeholder。")
+
+        ordered: "OrderedDict[str, str]" = OrderedDict()
+        if "text" not in raw:
+            ordered["text"] = "<text>"
+        for task_name, token in raw.items():
+            if not isinstance(task_name, str) or not task_name:
+                raise ValueError(f"任务 placeholder 名称必须是非空字符串，当前为: {task_name}")
+            if not isinstance(token, str) or not token.startswith("<") or not token.endswith(">"):
+                raise ValueError(f"{task_name} placeholder 必须是形如 <...> 的 token，当前为: {token}")
+            ordered[task_name] = token
+        if "text" in raw:
+            ordered.move_to_end("text", last=False)
+        return ordered
+
+    def _merge_task_placeholders(
+        self,
+        functional_tokens: Dict[str, str],
+        token_modality: Dict[str, str],
+    ) -> None:
+        for task_name, token in self.task_placeholder_tokens.items():
+            token_name = f"{task_name}_token"
+            functional_tokens[token_name] = token
+            token_modality[token_name] = task_name
+
+    def _resolve_task_placeholder_ids(self, task_placeholders: Dict[str, str]) -> Dict[str, int]:
+        ids: Dict[str, int] = {}
+        for task_name, token in task_placeholders.items():
+            ids[task_name] = self._resolve_token_id(token)
+        return ids
 
     def _ensure_special_tokens(self, candidate_tokens: Dict[str, str], token_modality: Dict[str, str]):
         """
@@ -212,14 +257,18 @@ class MLLMBackbone(nn.Module):
         #   "img": {token_name: token_id, token_id: token_name},
         #   "pc":  {token_name: token_id, token_id: token_name},
         # }
-        functional_token_ids = {"img": {}, "pc": {}}
+        functional_token_ids = {task_name: {} for task_name in self.task_placeholder_tokens.keys()}
         id_to_token_info = dict()
         for token_name, token in candidate_tokens.items():
             token_id = self.tokenizer.convert_tokens_to_ids(token)
             if token_id is None or (unk_id is not None and token_id == unk_id):
                 raise ValueError(f"功能 token 注册失败: name={token_name}, token={token}")
             tid = int(token_id)
-            modality = token_modality.get(token_name, "img" if token_name.lower().startswith("img_") or token_name == "img_aff_token" else "pc")
+            if token_name not in token_modality:
+                raise ValueError(f"功能 token 缺少显式任务归属: {token_name}")
+            modality = token_modality[token_name]
+            if modality not in functional_token_ids:
+                raise ValueError(f"功能 token 任务未在 task_placeholders 中声明: {modality}")
             functional_token_ids[modality][token_name] = tid
             functional_token_ids[modality][tid] = token_name
             id_to_token_info[tid] = {"name": token_name, "token": token, "modality": modality}
@@ -280,6 +329,105 @@ class MLLMBackbone(nn.Module):
         if tid is None or (unk_id is not None and int(tid) == int(unk_id)):
             raise ValueError(f"token 未注册: {token}")
         return int(tid)
+
+    def _resolve_optional_token_id(self, token: Optional[str]) -> Optional[int]:
+        if not token:
+            return None
+        tid = self.tokenizer.convert_tokens_to_ids(token)
+        unk_id = getattr(self.tokenizer, "unk_token_id", None)
+        if tid is None or (unk_id is not None and int(tid) == int(unk_id)):
+            return None
+        return int(tid)
+
+    def _validate_qwen_hidden_states(
+        self,
+        hidden_states: Any,
+        *,
+        source: str,
+        expected_batch: Optional[int] = None,
+        expected_seq_len: Optional[int] = None,
+    ) -> Optional[torch.Tensor]:
+        if not isinstance(hidden_states, torch.Tensor):
+            return None
+        if hidden_states.dim() != 3:
+            return None
+        if hidden_states.shape[-1] != int(self.hidden_size):
+            return None
+        if expected_batch is not None and hidden_states.shape[0] != expected_batch:
+            return None
+        if expected_seq_len is not None and hidden_states.shape[1] != expected_seq_len:
+            return None
+        return hidden_states
+
+    def _extract_qwen_hidden_states(
+        self,
+        outputs: Any,
+        model_inputs: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        expected_batch = model_inputs["inputs_embeds"].shape[0]
+        expected_seq_len = model_inputs["inputs_embeds"].shape[1]
+
+        hidden_stack = getattr(outputs, "hidden_states", None)
+        if hidden_stack is not None and len(hidden_stack) > 0:
+            hidden_states = self._validate_qwen_hidden_states(
+                hidden_stack[-1],
+                source="outputs.hidden_states[-1]",
+                expected_batch=expected_batch,
+                expected_seq_len=expected_seq_len,
+            )
+            if hidden_states is not None:
+                return hidden_states
+
+        for source, candidate in (
+            ("outputs.last_hidden_state", getattr(outputs, "last_hidden_state", None)),
+            ("outputs[0]", outputs[0] if isinstance(outputs, (tuple, list)) and len(outputs) > 0 else None),
+        ):
+            hidden_states = self._validate_qwen_hidden_states(
+                candidate,
+                source=source,
+                expected_batch=expected_batch,
+                expected_seq_len=expected_seq_len,
+            )
+            if hidden_states is not None:
+                return hidden_states
+
+        fallback = self._fallback_qwen_core_hidden_states(model_inputs)
+        if fallback is not None:
+            return fallback
+
+        logits = getattr(outputs, "logits", None)
+        logits_shape = None if logits is None else tuple(logits.shape)
+        raise RuntimeError(
+            "无法从 Qwen 输出中提取合法 hidden states；已拒绝使用可能是 logits 的 fallback。"
+            f" expected_hidden_size={self.hidden_size}, logits_shape={logits_shape}"
+        )
+
+    def _fallback_qwen_core_hidden_states(
+        self,
+        model_inputs: Dict[str, torch.Tensor],
+    ) -> Optional[torch.Tensor]:
+        qwen_core = getattr(self.model, "model", None)
+        if qwen_core is None:
+            return None
+        core_inputs = {
+            k: v
+            for k, v in model_inputs.items()
+            if k not in {"labels", "return_dict"}
+        }
+        core_inputs["output_hidden_states"] = True
+        core_inputs["return_dict"] = True
+        try:
+            core_outputs = qwen_core(**core_inputs)
+        except Exception:
+            return None
+        hidden_stack = getattr(core_outputs, "hidden_states", None)
+        candidate = hidden_stack[-1] if hidden_stack is not None and len(hidden_stack) > 0 else getattr(core_outputs, "last_hidden_state", None)
+        return self._validate_qwen_hidden_states(
+            candidate,
+            source="qwen_core.hidden_states[-1]",
+            expected_batch=model_inputs["inputs_embeds"].shape[0],
+            expected_seq_len=model_inputs["inputs_embeds"].shape[1],
+        )
 
     def _inject_pointcloud_embeddings(
         self,
@@ -536,22 +684,141 @@ class MLLMBackbone(nn.Module):
         model_inputs["output_hidden_states"] = True
         model_inputs["return_dict"] = True
         outputs = self.model(**model_inputs)
-
-        # TODO: check outputs
-        if outputs.hidden_states is not None:
-            hidden_states = outputs.hidden_states[-1]
-        elif outputs.last_hidden_state is not None:
-            hidden_states = outputs.last_hidden_state
-        else:
-            hidden_states = outputs[0]
-        
-        # 确保输出为 [B, L, C]
-        if hidden_states.dim() == 2:
-            hidden_states = hidden_states.unsqueeze(0)
+        hidden_states = self._extract_qwen_hidden_states(outputs, model_inputs)
         return {
             "hidden_states": hidden_states,
             "output": outputs,
             "aligned_labels": final_labels,
             "aligned_attention_mask": final_attention_mask,
+        }
+
+    def autoregressive_forward_with_latents(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        image_grid_thw: Optional[torch.Tensor] = None,
+        point_clouds: Optional[torch.Tensor] = None,
+        pc_valid_lengths: Optional[torch.Tensor] = None,
+        point_token_embeds: Optional[torch.Tensor] = None,
+        point_token_mask: Optional[torch.Tensor] = None,
+        router: Optional[nn.Module] = None,
+        generation_config: Optional[Any] = None,
+    ) -> dict:
+        """
+        一阶段自回归 latent feedback 入口。
+
+        text 路径沿用 LM logits -> token id -> embedding；非 text 路径直接把路由前
+        hidden state 作为下一步输入 embedding，避免 softmax/argmax/lookup 的离散化。
+        生成长度和停止条件沿用 Qwen 的 generation_config（max_length/eos_token_id）。
+        """
+        if input_ids is None:
+            raise ValueError("autoregressive_forward_with_latents 需要 input_ids。")
+
+        if attention_mask is None:
+            if self.tokenizer.pad_token_id is not None:
+                attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
+            else:
+                attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+
+        inputs_embeds = self.model.get_input_embeddings()(input_ids)
+        attention_mask = attention_mask.clone()
+        generated_ids, inputs_embeds, attention_mask, _ = self._inject_pointcloud_embeddings(
+            input_ids=input_ids,
+            token_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            labels=None,
+            point_clouds=point_clouds,
+            pc_valid_lengths=pc_valid_lengths,
+            point_token_embeds=point_token_embeds,
+            point_token_mask=point_token_mask,
+        )
+        hidden_history = []
+        logits_history = []
+        route_history = []
+        generation_config = generation_config or getattr(self.model, "generation_config", None)
+        max_length = int(getattr(generation_config, "max_length", getattr(self.config, "model_max_length", 512)))
+        eos_token_id = getattr(generation_config, "eos_token_id", getattr(self.tokenizer, "eos_token_id", None))
+        pad_token_id = getattr(generation_config, "pad_token_id", getattr(self.tokenizer, "pad_token_id", None))
+        if isinstance(eos_token_id, int):
+            eos_token_ids = torch.tensor([eos_token_id], device=input_ids.device, dtype=input_ids.dtype)
+        elif eos_token_id is None:
+            eos_token_ids = None
+        else:
+            eos_token_ids = torch.tensor(list(eos_token_id), device=input_ids.device, dtype=input_ids.dtype)
+        pad_token_id = int(pad_token_id) if pad_token_id is not None else 0
+        unfinished = torch.ones((generated_ids.shape[0],), dtype=torch.bool, device=input_ids.device)
+
+        while generated_ids.shape[1] < max_length and bool(unfinished.any().item()):
+            position_ids = self._compute_multimodal_position_ids(
+                input_ids=generated_ids,
+                attention_mask=attention_mask,
+                image_grid_thw=image_grid_thw,
+            )
+            model_inputs = {
+                "inputs_embeds": self._sanitize_image_placeholder_embeddings(generated_ids, inputs_embeds),
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "pixel_values": pixel_values,
+                "image_grid_thw": image_grid_thw,
+                "output_hidden_states": True,
+                "return_dict": True,
+            }
+            model_inputs = {k: v for k, v in model_inputs.items() if v is not None}
+            outputs = self.model(**model_inputs)
+            hidden_states = self._extract_qwen_hidden_states(outputs, model_inputs)
+            logits = getattr(outputs, "logits", None)
+            if logits is None:
+                raise RuntimeError("Qwen 自回归 latent feedback 需要 logits 以继续 text 路径。")
+
+            step_hidden = hidden_states[:, -1, :]
+            step_logits = logits[:, -1, :]
+            if router is None:
+                hard_route = torch.full(
+                    (input_ids.shape[0],),
+                    0,
+                    dtype=torch.long,
+                    device=input_ids.device,
+                )
+            else:
+                _, _, routed = router.route_hidden_states(step_hidden.unsqueeze(1))
+                hard_route = routed[:, 0]
+
+            text_mask = hard_route.eq(getattr(router, "route_text_idx", 0) if router is not None else 0)
+            next_token_ids = step_logits.argmax(dim=-1)
+            text_next_embeds = self.model.get_input_embeddings()(next_token_ids)
+            latent_next_embeds = step_hidden.to(dtype=text_next_embeds.dtype)
+            next_embeds = torch.where(text_mask.view(-1, 1), text_next_embeds, latent_next_embeds)
+            next_ids = next_token_ids.clone()
+            if router is not None:
+                for task_name, route_idx in router.task_id_by_name.items():
+                    if task_name == "text":
+                        continue
+                    placeholder_id = router.task_placeholder_ids[task_name]
+                    task_mask = hard_route.eq(route_idx)
+                    next_ids = torch.where(
+                        task_mask,
+                        torch.full_like(next_token_ids, int(placeholder_id)),
+                        next_ids,
+                    )
+
+            inputs_embeds = torch.cat([inputs_embeds, next_embeds.unsqueeze(1)], dim=1)
+            attention_mask = torch.cat([attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=1)
+            next_ids = torch.where(unfinished, next_ids, torch.full_like(next_ids, pad_token_id))
+            generated_ids = torch.cat([generated_ids, next_ids.unsqueeze(1)], dim=1)
+            hidden_history.append(step_hidden)
+            logits_history.append(step_logits)
+            route_history.append(hard_route)
+            if eos_token_ids is not None:
+                is_eos = next_ids.unsqueeze(-1).eq(eos_token_ids.view(1, -1)).any(dim=-1)
+                unfinished = unfinished & (~is_eos)
+
+        return {
+            "input_ids": generated_ids,
+            "inputs_embeds": inputs_embeds,
+            "attention_mask": attention_mask,
+            "step_hidden_states": torch.stack(hidden_history, dim=1) if hidden_history else None,
+            "step_logits": torch.stack(logits_history, dim=1) if logits_history else None,
+            "step_routes": torch.stack(route_history, dim=1) if route_history else None,
         }
 

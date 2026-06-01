@@ -1,4 +1,5 @@
 from typing import Optional, List, Tuple, Dict, Any
+from collections import OrderedDict
 
 import torch
 import torch.nn as nn
@@ -7,7 +8,7 @@ import torch.nn.functional as F
 
 class HeadRouter(nn.Module):
     """
-    token 级三路路由器（text/img/pc）。
+    token 级路由器（text/img/pc，可选 latent）。
 
     当前 router 的目标不是做 MoE 专家负载均衡，而是做 token 语义角色判别：
     - text: 普通文本 token
@@ -23,14 +24,22 @@ class HeadRouter(nn.Module):
         self,
         hidden_size: int,
         tokenizer,
-        img_placeholder_token: str = "<img_aff>",
-        pc_placeholder_token: str = "<pc_aff>",
+        task_placeholder_tokens: Dict[str, str],
     ):
         super().__init__()
+        task_placeholder_tokens = OrderedDict(task_placeholder_tokens)
+        if "text" not in task_placeholder_tokens:
+            raise ValueError("task_placeholder_tokens 必须包含 text 任务。")
+        task_placeholder_tokens.move_to_end("text", last=False)
+
+        self.task_placeholder_tokens = task_placeholder_tokens
+        self.task_id_by_name = {name: idx for idx, name in enumerate(self.task_placeholder_tokens.keys())}
+        self.task_name_by_id = {idx: name for name, idx in self.task_id_by_name.items()}
+        self.num_routes = len(self.task_placeholder_tokens)
         self.route_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
             nn.GELU(),
-            nn.Linear(hidden_size, 3),
+            nn.Linear(hidden_size, self.num_routes),
         )
         self.img_branch_head = nn.Sequential(
             nn.Linear(hidden_size, hidden_size),
@@ -43,15 +52,19 @@ class HeadRouter(nn.Module):
             nn.Linear(hidden_size, hidden_size),
         )
 
-        self.route_text_idx = 0
-        self.route_img_idx = 1
-        self.route_pc_idx = 2
+        self.route_text_idx = self.task_id_by_name["text"]
+        self.route_img_idx = self.task_id_by_name.get("img")
+        self.route_pc_idx = self.task_id_by_name.get("pc")
+        self.route_latent_idx = self.task_id_by_name.get("latent")
 
-        self.img_placeholder_token = img_placeholder_token
-        self.pc_placeholder_token = pc_placeholder_token
-        self.img_placeholder_id = self._resolve_token_id(tokenizer, self.img_placeholder_token)
-        self.pc_placeholder_id = self._resolve_token_id(tokenizer, self.pc_placeholder_token)
-
+        self.task_placeholder_ids = {
+            task_name: self._resolve_token_id(tokenizer, token)
+            for task_name, token in self.task_placeholder_tokens.items()
+        }
+        self.placeholder_id_to_task_id = {
+            token_id: self.task_id_by_name[task_name]
+            for task_name, token_id in self.task_placeholder_ids.items()
+        }
     @staticmethod
     def _resolve_token_id(tokenizer, token: str) -> int:
         """
@@ -178,21 +191,21 @@ class HeadRouter(nn.Module):
             pc_available: [B]，样本是否可用 3D 分支；不可用则屏蔽 pc 类。
 
         Returns:
-            route_logits: [B, L, 3]，三类路由 logits。
-            route_probs: [B, L, 3]，softmax 概率。
+            route_logits: [B, L, num_routes]，路由 logits。
+            route_probs: [B, L, num_routes]，softmax 概率。
             hard_route: [B, L]，argmax 离散路由索引。
         """
-        route_logits = self.route_head(hidden_states)  # [B, L, 3]
+        route_logits = self.route_head(hidden_states)  # [B, L, num_routes]
 
         # 屏蔽样本不可用模态，防止路由误激活无监督分支
-        if img_available is not None:
+        if img_available is not None and self.route_img_idx is not None:
             img_mask = img_available.bool().view(-1, 1)
             route_logits[:, :, self.route_img_idx] = torch.where(
                 img_mask,
                 route_logits[:, :, self.route_img_idx],
                 torch.full_like(route_logits[:, :, self.route_img_idx], -1e4),
             )
-        if pc_available is not None:
+        if pc_available is not None and self.route_pc_idx is not None:
             pc_mask = pc_available.bool().view(-1, 1)
             route_logits[:, :, self.route_pc_idx] = torch.where(
                 pc_mask,
@@ -251,8 +264,8 @@ class HeadRouter(nn.Module):
         这里保留每个命中 token 的独立向量，供下游 decoder 自行决定如何聚合或交互。
         默认只采样有效 answer token（route_mask），避免把 prefix/padding 位置误当成 query。
         """
-        img_sel = hard_route.eq(self.route_img_idx)
-        pc_sel = hard_route.eq(self.route_pc_idx)
+        img_sel = hard_route.eq(self.route_img_idx) if self.route_img_idx is not None else torch.zeros_like(hard_route, dtype=torch.bool)
+        pc_sel = hard_route.eq(self.route_pc_idx) if self.route_pc_idx is not None else torch.zeros_like(hard_route, dtype=torch.bool)
         if attention_mask is not None:
             valid = attention_mask.bool()
             img_sel = img_sel & valid
@@ -302,8 +315,16 @@ class HeadRouter(nn.Module):
             )
 
         valid_f = valid_mask.to(route_probs.dtype)
-        img_probs = route_probs[:, :, self.route_img_idx] * valid_f
-        pc_probs = route_probs[:, :, self.route_pc_idx] * valid_f
+        img_probs = (
+            route_probs[:, :, self.route_img_idx] * valid_f
+            if self.route_img_idx is not None
+            else route_probs.new_zeros(route_probs.shape[:2])
+        )
+        pc_probs = (
+            route_probs[:, :, self.route_pc_idx] * valid_f
+            if self.route_pc_idx is not None
+            else route_probs.new_zeros(route_probs.shape[:2])
+        )
 
         # noisy-or: 至少存在一个 token 命中对应分支的连续近似概率
         img_any_prob = 1.0 - torch.exp(torch.sum(torch.log1p(-img_probs.clamp(max=1 - 1e-6)), dim=1))
@@ -332,17 +353,25 @@ class HeadRouter(nn.Module):
 
         - 命中 img 的位置替换为 <img_aff>
         - 命中 pc 的位置替换为 <pc_aff>
+        - 启用 latent 时，命中 latent 的位置替换为 <latent>
         """
         if base_token_ids is None:
             return None
         routed = base_token_ids.clone()
-        img_sel = hard_route.eq(self.route_img_idx)
-        pc_sel = hard_route.eq(self.route_pc_idx)
+        task_select_masks = {
+            task_name: hard_route.eq(route_idx)
+            for task_name, route_idx in self.task_id_by_name.items()
+            if task_name != "text"
+        }
         if route_mask is not None:
-            img_sel = img_sel & route_mask
-            pc_sel = pc_sel & route_mask
-        routed = torch.where(img_sel, torch.full_like(routed, self.img_placeholder_id), routed)
-        routed = torch.where(pc_sel, torch.full_like(routed, self.pc_placeholder_id), routed)
+            task_select_masks = {
+                task_name: select_mask & route_mask
+                for task_name, select_mask in task_select_masks.items()
+            }
+        for task_name, select_mask in task_select_masks.items():
+            placeholder_id = self.task_placeholder_ids.get(task_name)
+            if placeholder_id is not None:
+                routed = torch.where(select_mask, torch.full_like(routed, placeholder_id), routed)
         return routed
 
     def build_aff_token_pairs(
@@ -367,10 +396,9 @@ class HeadRouter(nn.Module):
                 if route_mask is not None and not bool(route_mask[i, pos].item()):
                     continue
                 rid = int(hard_route[i, pos].item())
-                if rid == self.route_img_idx:
-                    pairs[i].append((self.img_placeholder_token, token_hidden_states[i, pos, :]))
-                elif rid == self.route_pc_idx:
-                    pairs[i].append((self.pc_placeholder_token, token_hidden_states[i, pos, :]))
+                task_name = self.task_name_by_id.get(rid)
+                if task_name is not None and task_name != "text":
+                    pairs[i].append((self.task_placeholder_tokens[task_name], token_hidden_states[i, pos, :]))
         return pairs
 
     @staticmethod
@@ -434,30 +462,36 @@ class HeadRouter(nn.Module):
         if labels is not None and labels.dim() == 2 and labels.shape[1] > 1:
             pred_len = min(seq_len, labels.shape[1] - 1)
             shifted_labels = labels[:, 1 : 1 + pred_len]
-            img_sel = shifted_labels.eq(self.img_placeholder_id)
-            pc_sel = shifted_labels.eq(self.pc_placeholder_id)
+            task_select_masks = {
+                task_name: shifted_labels.eq(token_id)
+                for task_name, token_id in self.task_placeholder_ids.items()
+                if task_name != "text"
+            }
             if route_mask is not None:
                 valid = route_mask[:, :pred_len].bool()
-                img_sel = img_sel & valid
-                pc_sel = pc_sel & valid
+                task_select_masks = {
+                    task_name: select_mask & valid
+                    for task_name, select_mask in task_select_masks.items()
+                }
             if attention_mask is not None:
                 valid = attention_mask[:, :pred_len].bool()
-                img_sel = img_sel & valid
-                pc_sel = pc_sel & valid
-            if img_available is not None:
-                img_sel = img_sel & img_available.bool().view(-1, 1)
-            if pc_available is not None:
-                pc_sel = pc_sel & pc_available.bool().view(-1, 1)
-            hard_route[:, :pred_len] = torch.where(
-                img_sel,
-                torch.full_like(hard_route[:, :pred_len], self.route_img_idx),
-                hard_route[:, :pred_len],
-            )
-            hard_route[:, :pred_len] = torch.where(
-                pc_sel,
-                torch.full_like(hard_route[:, :pred_len], self.route_pc_idx),
-                hard_route[:, :pred_len],
-            )
+                task_select_masks = {
+                    task_name: select_mask & valid
+                    for task_name, select_mask in task_select_masks.items()
+                }
+            if img_available is not None and "img" in task_select_masks:
+                task_select_masks["img"] = task_select_masks["img"] & img_available.bool().view(-1, 1)
+            if pc_available is not None and "pc" in task_select_masks:
+                task_select_masks["pc"] = task_select_masks["pc"] & pc_available.bool().view(-1, 1)
+            for task_name, select_mask in task_select_masks.items():
+                route_idx = self.task_id_by_name.get(task_name)
+                if route_idx is None:
+                    continue
+                hard_route[:, :pred_len] = torch.where(
+                    select_mask,
+                    torch.full_like(hard_route[:, :pred_len], route_idx),
+                    hard_route[:, :pred_len],
+                )
 
         img_token_emb = self.img_branch_head(hidden_states)
         pc_token_emb = self.pc_branch_head(hidden_states)
@@ -498,6 +532,8 @@ class HeadRouter(nn.Module):
             "pc_any_prob": None,
             "img_expected_count": None,
             "pc_expected_count": None,
+            "task_placeholder_ids": self.task_placeholder_ids,
+            "placeholder_id_to_task_id": self.placeholder_id_to_task_id,
         }
 
     def forward(
@@ -575,5 +611,7 @@ class HeadRouter(nn.Module):
             "pc_query_mask": pc_query_mask,
             "routed_token_ids": routed_token_ids,
             "aff_token_pairs": aff_token_pairs,
+            "task_placeholder_ids": self.task_placeholder_ids,
+            "placeholder_id_to_task_id": self.placeholder_id_to_task_id,
             **structure_signals,
         }

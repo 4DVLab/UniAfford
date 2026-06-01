@@ -30,19 +30,26 @@ DEFAULT_PC_PATCH_TOKEN = "<|point_pad|>"
 DEFAULT_PC_START_TOKEN = "<|pc_start|>"
 DEFAULT_PC_END_TOKEN = "<|pc_end|>"
 
-# 用于下游分割任务的功能性 token。
+# 用于下游任务/路由的功能性 token。
 # 结构：
 # {
+#   "text": {token_name -> token_id(运行后) / token_str(初始化)},
 #   "img": {token_name -> token_id(运行后) / token_str(初始化)},
 #   "pc":  {token_name -> token_id(运行后) / token_str(初始化)},
 # }
 # 运行时会补全反向映射：token_id -> token_name。
 FUNCTIONAL_TOKENS = {
+    "text": {
+        "text_token": "<text>",
+    },
     "img": {
         "img_aff_token": "<img_aff>",  # default fallback
     },
     "pc": {
         "pc_aff_token": "<pc_aff>",    # default fallback
+    },
+    "latent": {
+        "latent_token": "<latent>",
     },
 }
 
