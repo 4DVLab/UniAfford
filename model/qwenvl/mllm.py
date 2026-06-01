@@ -826,7 +826,9 @@ class MLLMBackbone(nn.Module):
             text_mask = hard_route.eq(getattr(router, "route_text_idx", 0) if router is not None else 0)
             next_token_ids = step_logits.argmax(dim=-1)
             text_next_embeds = self.model.get_input_embeddings()(next_token_ids)
-            latent_next_embeds = step_hidden.to(dtype=text_next_embeds.dtype)
+            # 与标准 LLM 自回归一致：下一步输入不反传回“生成该输入”的上一步状态。
+            latent_source = step_hidden.detach()
+            latent_next_embeds = latent_source.to(dtype=text_next_embeds.dtype)
             next_embeds = torch.where(text_mask.view(-1, 1), text_next_embeds, latent_next_embeds)
             next_ids = next_token_ids.clone()
             if router is not None:
