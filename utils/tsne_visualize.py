@@ -1,3 +1,10 @@
+import os
+import csv
+from typing import List, Dict, Tuple
+import numpy as np
+import torch
+
+
 def _append_task_vocab_embeddings(
     tsne_vectors: List[np.ndarray],
     tsne_records: List[Dict],
