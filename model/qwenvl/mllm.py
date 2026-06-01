@@ -806,6 +806,8 @@ class MLLMBackbone(nn.Module):
             core_inputs["return_dict"] = True
             core_outputs = qwen_core(**core_inputs)
             hidden_states = getattr(core_outputs, "last_hidden_state", None)
+            if hidden_states is None and isinstance(core_outputs, (tuple, list)) and len(core_outputs) > 0:
+                hidden_states = core_outputs[0]
             hidden_states = self._validate_qwen_hidden_states(
                 hidden_states,
                 source="qwen_core.last_hidden_state",
@@ -813,7 +815,23 @@ class MLLMBackbone(nn.Module):
                 expected_seq_len=model_inputs["inputs_embeds"].shape[1],
             )
             if hidden_states is None:
-                raise RuntimeError("Qwen core forward 未返回合法 last_hidden_state。")
+                raw_hidden = getattr(core_outputs, "last_hidden_state", None)
+                raw_shape = tuple(raw_hidden.shape) if isinstance(raw_hidden, torch.Tensor) else None
+                tuple_shape = (
+                    tuple(core_outputs[0].shape)
+                    if isinstance(core_outputs, (tuple, list))
+                    and len(core_outputs) > 0
+                    and isinstance(core_outputs[0], torch.Tensor)
+                    else None
+                )
+                raise RuntimeError(
+                    "Qwen core forward 未返回合法 last_hidden_state。"
+                    f" output_type={type(core_outputs).__name__}, "
+                    f"last_hidden_shape={raw_shape}, tuple0_shape={tuple_shape}, "
+                    f"expected_batch={model_inputs['inputs_embeds'].shape[0]}, "
+                    f"expected_seq_len={model_inputs['inputs_embeds'].shape[1]}, "
+                    f"expected_hidden={self.hidden_size}"
+                )
             logits = self.model.lm_head(hidden_states[:, -1:, :])
             return hidden_states, logits, getattr(core_outputs, "past_key_values", None)
 
