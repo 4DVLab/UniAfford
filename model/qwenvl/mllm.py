@@ -776,6 +776,47 @@ class MLLMBackbone(nn.Module):
             pad_token_id = int(pad_token_id) if pad_token_id is not None else 0
             unfinished = torch.ones((generated_ids.shape[0],), dtype=torch.bool, device=input_ids.device)
 
+        
+        def _detach_past_key_values(past_key_values: Any) -> Any:
+            """递归 detach KV cache，避免训练时 cache 挂住历史 step 的计算图。"""
+            if past_key_values is None:
+                return None
+            if isinstance(past_key_values, torch.Tensor):
+                return past_key_values.detach()
+            if isinstance(past_key_values, tuple):
+                return tuple(self._detach_past_key_values(item) for item in past_key_values)
+            if isinstance(past_key_values, list):
+                return [self._detach_past_key_values(item) for item in past_key_values]
+            if isinstance(past_key_values, dict):
+                return {key: self._detach_past_key_values(value) for key, value in past_key_values.items()}
+            if hasattr(past_key_values, "detach"):
+                return past_key_values.detach()
+            return past_key_values
+
+        def _qwen_core_forward(model_inputs: Dict[str, torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor, Any]:
+            """调用 Qwen backbone 获取最后层 hidden state，再手动过 lm_head 得到 logits。"""
+            qwen_core = getattr(self.model, "model", None)
+            if qwen_core is None:
+                raise RuntimeError("当前 Qwen 模型缺少 .model backbone，无法执行 core forward。")
+            core_inputs = {
+                k: v
+                for k, v in model_inputs.items()
+                if k not in {"labels", "logits_to_keep"}
+            }
+            core_inputs["return_dict"] = True
+            core_outputs = qwen_core(**core_inputs)
+            hidden_states = getattr(core_outputs, "last_hidden_state", None)
+            hidden_states = self._validate_qwen_hidden_states(
+                hidden_states,
+                source="qwen_core.last_hidden_state",
+                expected_batch=model_inputs["inputs_embeds"].shape[0],
+                expected_seq_len=model_inputs["inputs_embeds"].shape[1],
+            )
+            if hidden_states is None:
+                raise RuntimeError("Qwen core forward 未返回合法 last_hidden_state。")
+            logits = self.model.lm_head(hidden_states[:, -1:, :])
+            return hidden_states, logits, getattr(core_outputs, "past_key_values", None)
+
         past_key_values = None
         while generated_ids.shape[1] < target_length and bool(unfinished.any().item()):
             next_pos = int(generated_ids.shape[1])
@@ -798,17 +839,11 @@ class MLLMBackbone(nn.Module):
                 "pixel_values": pixel_values if past_key_values is None else None,
                 "image_grid_thw": image_grid_thw if past_key_values is None else None,
                 "use_cache": True,
-                "logits_to_keep": 1,
-                "output_hidden_states": True,
                 "return_dict": True,
             }
             model_inputs = {k: v for k, v in model_inputs.items() if v is not None}
-            outputs = self.model(**model_inputs)
-            past_key_values = getattr(outputs, "past_key_values", None)
-            hidden_states = self._extract_qwen_hidden_states(outputs, model_inputs)
-            logits = getattr(outputs, "logits", None)
-            if logits is None:
-                raise RuntimeError("Qwen 自回归 latent feedback 需要 logits 以继续 text 路径。")
+            hidden_states, logits, past_key_values = _qwen_core_forward(model_inputs)
+            past_key_values = _detach_past_key_values(past_key_values)
 
             step_hidden = hidden_states[:, -1, :]
             step_logits = logits[:, -1, :]
