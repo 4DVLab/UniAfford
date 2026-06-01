@@ -702,14 +702,15 @@ class MLLMBackbone(nn.Module):
         pc_valid_lengths: Optional[torch.Tensor] = None,
         point_token_embeds: Optional[torch.Tensor] = None,
         point_token_mask: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
         router: Optional[nn.Module] = None,
         generation_config: Optional[Any] = None,
     ) -> dict:
         """
         一阶段自回归 latent feedback 入口。
 
-        text 路径沿用 LM logits -> token id -> embedding；非 text 路径直接把路由前
-        hidden state 作为下一步输入 embedding，避免 softmax/argmax/lookup 的离散化。
+        router 判为 text 的位置沿用 LM logits -> token id -> embedding；其它任务位置直接把
+        route 前 hidden state 作为下一步输入 embedding。
         生成长度和停止条件沿用 Qwen 的 generation_config（max_length/eos_token_id）。
         """
         if input_ids is None:
@@ -723,11 +724,11 @@ class MLLMBackbone(nn.Module):
 
         inputs_embeds = self.model.get_input_embeddings()(input_ids)
         attention_mask = attention_mask.clone()
-        generated_ids, inputs_embeds, attention_mask, _ = self._inject_pointcloud_embeddings(
+        generated_ids, inputs_embeds, attention_mask, aligned_labels = self._inject_pointcloud_embeddings(
             input_ids=input_ids,
             token_embeds=inputs_embeds,
             attention_mask=attention_mask,
-            labels=None,
+            labels=labels,
             point_clouds=point_clouds,
             pc_valid_lengths=pc_valid_lengths,
             point_token_embeds=point_token_embeds,
@@ -736,20 +737,47 @@ class MLLMBackbone(nn.Module):
         hidden_history = []
         logits_history = []
         route_history = []
-        generation_config = generation_config or getattr(self.model, "generation_config", None)
-        max_length = int(getattr(generation_config, "max_length", getattr(self.config, "model_max_length", 512)))
-        eos_token_id = getattr(generation_config, "eos_token_id", getattr(self.tokenizer, "eos_token_id", None))
-        pad_token_id = getattr(generation_config, "pad_token_id", getattr(self.tokenizer, "pad_token_id", None))
-        if isinstance(eos_token_id, int):
-            eos_token_ids = torch.tensor([eos_token_id], device=input_ids.device, dtype=input_ids.dtype)
-        elif eos_token_id is None:
-            eos_token_ids = None
-        else:
-            eos_token_ids = torch.tensor(list(eos_token_id), device=input_ids.device, dtype=input_ids.dtype)
-        pad_token_id = int(pad_token_id) if pad_token_id is not None else 0
-        unfinished = torch.ones((generated_ids.shape[0],), dtype=torch.bool, device=input_ids.device)
 
-        while generated_ids.shape[1] < max_length and bool(unfinished.any().item()):
+        full_ids = generated_ids
+        full_embeds = inputs_embeds
+        full_attention = attention_mask
+        if aligned_labels is not None:
+            supervised = aligned_labels.ne(IGNORE_INDEX)
+            has_supervision = supervised.any(dim=1)
+            if bool(has_supervision.any().item()):
+                first_supervised = torch.where(
+                    has_supervision,
+                    supervised.float().argmax(dim=1).to(dtype=torch.long),
+                    torch.full_like(has_supervision.to(dtype=torch.long), aligned_labels.shape[1] - 1),
+                )
+                prefix_len = int(first_supervised.max().item())
+            else:
+                prefix_len = max(1, int(full_ids.shape[1]) - 1)
+            prefix_len = max(1, min(prefix_len, int(full_ids.shape[1]) - 1))
+            generated_ids = full_ids[:, :prefix_len]
+            inputs_embeds = full_embeds[:, :prefix_len]
+            attention_mask = full_attention[:, :prefix_len]
+            target_length = int(aligned_labels.shape[1])
+            eos_token_ids = None
+            pad_token_id = 0
+            unfinished = torch.ones((generated_ids.shape[0],), dtype=torch.bool, device=input_ids.device)
+        else:
+            generation_config = generation_config or getattr(self.model, "generation_config", None)
+            target_length = int(getattr(generation_config, "max_length", getattr(self.config, "model_max_length", 512)))
+            target_length = max(target_length, int(generated_ids.shape[1]) + 1)
+            eos_token_id = getattr(generation_config, "eos_token_id", getattr(self.tokenizer, "eos_token_id", None))
+            pad_token_id = getattr(generation_config, "pad_token_id", getattr(self.tokenizer, "pad_token_id", None))
+            if isinstance(eos_token_id, int):
+                eos_token_ids = torch.tensor([eos_token_id], device=input_ids.device, dtype=input_ids.dtype)
+            elif eos_token_id is None:
+                eos_token_ids = None
+            else:
+                eos_token_ids = torch.tensor(list(eos_token_id), device=input_ids.device, dtype=input_ids.dtype)
+            pad_token_id = int(pad_token_id) if pad_token_id is not None else 0
+            unfinished = torch.ones((generated_ids.shape[0],), dtype=torch.bool, device=input_ids.device)
+
+        while generated_ids.shape[1] < target_length and bool(unfinished.any().item()):
+            next_pos = int(generated_ids.shape[1])
             position_ids = self._compute_multimodal_position_ids(
                 input_ids=generated_ids,
                 attention_mask=attention_mask,
@@ -794,17 +822,21 @@ class MLLMBackbone(nn.Module):
                 for task_name, route_idx in router.task_id_by_name.items():
                     if task_name == "text":
                         continue
-                    placeholder_id = router.task_placeholder_ids[task_name]
                     task_mask = hard_route.eq(route_idx)
-                    next_ids = torch.where(
-                        task_mask,
-                        torch.full_like(next_token_ids, int(placeholder_id)),
-                        next_ids,
-                    )
+                    placeholder_id = int(router.task_placeholder_ids[task_name])
+                    next_ids = torch.where(task_mask, torch.full_like(next_ids, placeholder_id), next_ids)
 
-            inputs_embeds = torch.cat([inputs_embeds, next_embeds.unsqueeze(1)], dim=1)
-            attention_mask = torch.cat([attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=1)
+            next_attention = attention_mask.new_ones((attention_mask.shape[0], 1))
+            if aligned_labels is not None and next_pos < full_ids.shape[1]:
+                # 无监督位置属于 prompt/多模态占位，继续喂 teacher embedding；监督位置使用路由后的生成 embedding。
+                teacher_mask = aligned_labels[:, next_pos].eq(IGNORE_INDEX)
+                next_embeds = torch.where(teacher_mask.view(-1, 1), full_embeds[:, next_pos, :], next_embeds)
+                next_ids = torch.where(teacher_mask, full_ids[:, next_pos], next_ids)
+                next_attention = full_attention[:, next_pos].view(-1, 1)
+
             next_ids = torch.where(unfinished, next_ids, torch.full_like(next_ids, pad_token_id))
+            inputs_embeds = torch.cat([inputs_embeds, next_embeds.unsqueeze(1)], dim=1)
+            attention_mask = torch.cat([attention_mask, next_attention], dim=1)
             generated_ids = torch.cat([generated_ids, next_ids.unsqueeze(1)], dim=1)
             hidden_history.append(step_hidden)
             logits_history.append(step_logits)
@@ -813,6 +845,16 @@ class MLLMBackbone(nn.Module):
                 is_eos = next_ids.unsqueeze(-1).eq(eos_token_ids.view(1, -1)).any(dim=-1)
                 unfinished = unfinished & (~is_eos)
 
+        if aligned_labels is not None:
+            step_labels = aligned_labels[:, prefix_len : prefix_len + len(hidden_history)]
+            aligned_labels = torch.cat(
+                [
+                    aligned_labels.new_full((aligned_labels.shape[0], 1), IGNORE_INDEX),
+                    step_labels,
+                ],
+                dim=1,
+            )
+
         return {
             "input_ids": generated_ids,
             "inputs_embeds": inputs_embeds,
@@ -820,5 +862,5 @@ class MLLMBackbone(nn.Module):
             "step_hidden_states": torch.stack(hidden_history, dim=1) if hidden_history else None,
             "step_logits": torch.stack(logits_history, dim=1) if logits_history else None,
             "step_routes": torch.stack(route_history, dim=1) if route_history else None,
+            "aligned_labels": aligned_labels,
         }
-

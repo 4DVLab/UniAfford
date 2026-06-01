@@ -108,8 +108,11 @@ class JointAffordanceModel(nn.Module):
         if logits.shape[0] != labels.shape[0]:
             return None, 0
 
-        shift_logits = logits[:, :-1, :].contiguous()  # [B, L-1, V]
-        shift_labels = labels[:, 1:].contiguous()      # [B, L-1]
+        if labels.shape[1] <= 1:
+            return logits.new_zeros(()), 0
+        pred_len = min(logits.shape[1], labels.shape[1] - 1)
+        shift_logits = logits[:, :pred_len, :].contiguous()       # [B, P, V]
+        shift_labels = labels[:, 1 : 1 + pred_len].contiguous()   # [B, P]
         valid = shift_labels.ne(ignore_index)
         placeholder_mask = torch.zeros_like(shift_labels, dtype=torch.bool)
         non_text_mask = torch.zeros_like(shift_labels, dtype=torch.bool)
@@ -177,8 +180,7 @@ class JointAffordanceModel(nn.Module):
 
         # ---- 1. MLLM 前向 ----
         use_autoregressive_feedback = (
-            labels is None
-            and bool(getattr(self.config.mllm, "use_autoregressive_latent_feedback", False))
+            bool(getattr(self.config.mllm, "use_autoregressive_latent_feedback", False))
         )
         if use_autoregressive_feedback:
             mllm_out = self.mllm.autoregressive_forward_with_latents(
@@ -190,12 +192,13 @@ class JointAffordanceModel(nn.Module):
                 pc_valid_lengths=pc_valid_lengths,
                 point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
                 point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
+                labels=labels,
                 router=self.router,
                 generation_config=kwargs.pop("generation_config", None),
             )
             hidden_states = mllm_out["step_hidden_states"]
             output_obj = None
-            model_labels = None
+            model_labels = mllm_out.get("aligned_labels")
             model_attention_mask = torch.ones(
                 hidden_states.shape[:2],
                 dtype=torch.bool,
@@ -206,6 +209,7 @@ class JointAffordanceModel(nn.Module):
                 if mllm_out.get("step_logits") is not None
                 else None
             )
+            output_logits = mllm_out.get("step_logits")
         else:
             mllm_out = self.mllm(
                 input_ids=input_ids,
@@ -224,10 +228,12 @@ class JointAffordanceModel(nn.Module):
             model_labels = mllm_out.get("aligned_labels", labels)
             model_attention_mask = mllm_out.get("aligned_attention_mask", attention_mask)
             logits_token_ids = None
+            output_logits = None
             if output_obj is not None:
                 # 从 logits 中取 token_ids（用于可视化与占位 token 回写，不参与路由决策）
                 if getattr(output_obj, "logits", None) is not None:
                     logits_token_ids = output_obj.logits.argmax(dim=-1)
+                    output_logits = output_obj.logits
         B,L,C = hidden_states.shape
 
         ce_loss = None
@@ -249,9 +255,9 @@ class JointAffordanceModel(nn.Module):
             else:
                 route_out = self.router(**route_kwargs)
 
-            if output_obj is not None and getattr(output_obj, "logits", None) is not None:
+            if output_logits is not None and model_labels is not None:
                 ce_loss, ce_ignored_token_count = self._compute_text_ce_without_task_tokens(
-                    logits=output_obj.logits,
+                    logits=output_logits,
                     labels=model_labels,
                     route_out=route_out,
                     ignore_index=-100,
@@ -338,33 +344,6 @@ class JointAffordanceModel(nn.Module):
             output_dict["output"] = mllm_out.get("output")
 
         return output_dict
-
-    def generate_with_latent_feedback(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: Optional[torch.Tensor] = None,
-        pixel_values: Optional[torch.Tensor] = None,
-        image_grid_thw: Optional[torch.Tensor] = None,
-        point_clouds: Optional[torch.Tensor] = None,
-        pc_valid_lengths: Optional[torch.Tensor] = None,
-        generation_config: Optional[object] = None,
-    ) -> Dict[str, Optional[torch.Tensor]]:
-        """
-        一阶段自回归 latent feedback 包装入口。
-
-        非 text 路由位置直接把 route 前 hidden state 作为下一步 embedding，
-        避免经过离散 token 预测再查表。
-        """
-        return self.mllm.autoregressive_forward_with_latents(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            pixel_values=pixel_values,
-            image_grid_thw=image_grid_thw,
-            point_clouds=point_clouds,
-            pc_valid_lengths=pc_valid_lengths,
-            router=self.router,
-            generation_config=generation_config,
-        )
 
 
 __all__ = [
