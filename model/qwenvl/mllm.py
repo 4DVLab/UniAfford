@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 from configs import MLLMConfigs
 from model.pointcept import PointCloudEncoder
+from model.qwenvl.latent_generation_patch import attach_generation_router, patch_router_generation_feedback
 from utils.common import (
     IGNORE_INDEX,
     DEFAULT_PC_TOKEN,
@@ -59,6 +60,9 @@ class MLLMBackbone(nn.Module):
         self.text_token_id = self.task_placeholder_ids.get("text")
         self.latent_token = self.task_placeholder_tokens.get("latent")
         self.latent_token_id = self.task_placeholder_ids.get("latent")
+        # generate() 的 router feedback patch 依赖 special token/placeholder id 已经注册完成。
+        # 此时 HeadRouter 还没有创建，所以这里只安装 _sample 替换逻辑，router 会稍后再挂载。
+        self._maybe_patch_generation_router_feedback()
 
         # 特殊 token 注入后，词表大小可能变化，这里以模型实际词表为准回写配置。
         self.vocab_size = int(self.model.get_input_embeddings().num_embeddings)
@@ -95,6 +99,30 @@ class MLLMBackbone(nn.Module):
         self.pc_patch_token_id = self._resolve_token_id(DEFAULT_PC_PATCH_TOKEN)
 
         self.to(dtype=self.config.compute_dtype)
+
+    def _maybe_patch_generation_router_feedback(self) -> None:
+        """
+        可选启用 generate() 路径的 router feedback patch。
+
+        此处只替换当前 Qwen 实例的 _sample，不改全局 Transformers；
+        router 会在 JointAffordanceModel 创建 HeadRouter 后通过 set_generation_feedback_router 挂载。
+        如果开关未启用，generate() 完全保持 Qwen/Transformers 原始行为。
+        """
+        enabled = bool(getattr(self.config, "use_generation_router_feedback_patch", False))
+        if not enabled:
+            return
+        patch_router_generation_feedback(self.model)
+
+    def set_generation_feedback_router(self, router: nn.Module) -> None:
+        """
+        把外层 HeadRouter 挂到 patched Qwen 实例上，供 generate() 每步路由使用。
+
+        这里不把 router 注册成 Qwen 子模块；latent_generation_patch 内部会用 object.__setattr__
+        只保存运行时引用，避免影响 Qwen 权重保存、加载和 state_dict 结构。
+        """
+        enabled = bool(getattr(self.config, "use_generation_router_feedback_patch", False))
+        if enabled:
+            attach_generation_router(self.model, router)
 
     def _sync_point_encoder_config(self):
         point_encoder = getattr(self, "point_encoder", None)
@@ -692,231 +720,7 @@ class MLLMBackbone(nn.Module):
             "aligned_attention_mask": final_attention_mask,
         }
 
-    @staticmethod
-    def _detach_past_key_values(past_key_values: Any) -> Any:
-        """递归 detach KV cache，避免训练时历史 step 的图一直被 cache 挂住。"""
-        if past_key_values is None:
-            return None
-        if isinstance(past_key_values, torch.Tensor):
-            return past_key_values.detach()
-        if isinstance(past_key_values, tuple):
-            return tuple(MLLMBackbone._detach_past_key_values(item) for item in past_key_values)
-        if isinstance(past_key_values, list):
-            return [MLLMBackbone._detach_past_key_values(item) for item in past_key_values]
-        if isinstance(past_key_values, dict):
-            return {key: MLLMBackbone._detach_past_key_values(value) for key, value in past_key_values.items()}
-        if hasattr(past_key_values, "detach"):
-            return past_key_values.detach()
-        return past_key_values
-
-    def _init_latent_feedback_loop(
-        self,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
-        labels: Optional[torch.Tensor],
-        point_clouds: Optional[torch.Tensor],
-        pc_valid_lengths: Optional[torch.Tensor],
-        point_token_embeds: Optional[torch.Tensor],
-        point_token_mask: Optional[torch.Tensor],
-        generation_config: Optional[Any],
-    ) -> Dict[str, Any]:
-        inputs_embeds = self.model.get_input_embeddings()(input_ids)
-        generated_ids, inputs_embeds, attention_mask, aligned_labels = self._inject_pointcloud_embeddings(
-            input_ids=input_ids,
-            token_embeds=inputs_embeds,
-            attention_mask=attention_mask.clone(),
-            labels=labels,
-            point_clouds=point_clouds,
-            pc_valid_lengths=pc_valid_lengths,
-            point_token_embeds=point_token_embeds,
-            point_token_mask=point_token_mask,
-        )
-        inputs_embeds = self._sanitize_image_placeholder_embeddings(
-            input_ids=generated_ids,
-            inputs_embeds=inputs_embeds,
-        )
-
-        full_ids = generated_ids
-        full_embeds = inputs_embeds
-        full_attention = attention_mask
-        prefix_len = None
-        eos_token_ids = None
-        pad_token_id = 0
-
-        if aligned_labels is not None:
-            supervised = aligned_labels.ne(IGNORE_INDEX)
-            has_supervision = supervised.any(dim=1)
-            if bool(has_supervision.any().item()):
-                first_supervised = torch.where(
-                    has_supervision,
-                    supervised.float().argmax(dim=1).to(dtype=torch.long),
-                    torch.full_like(has_supervision.to(dtype=torch.long), aligned_labels.shape[1] - 1),
-                )
-                prefix_len = int(first_supervised.max().item())
-            else:
-                prefix_len = max(1, int(full_ids.shape[1]) - 1)
-            prefix_len = max(1, min(prefix_len, int(full_ids.shape[1]) - 1))
-            generated_ids = full_ids[:, :prefix_len]
-            inputs_embeds = full_embeds[:, :prefix_len]
-            attention_mask = full_attention[:, :prefix_len]
-            target_length = int(aligned_labels.shape[1])
-        else:
-            generation_config = generation_config or getattr(self.model, "generation_config", None)
-            target_length = int(getattr(generation_config, "max_length", getattr(self.config, "model_max_length", 512)))
-            target_length = max(target_length, int(generated_ids.shape[1]) + 1)
-            eos_token_id = getattr(generation_config, "eos_token_id", getattr(self.tokenizer, "eos_token_id", None))
-            pad_token_id = getattr(generation_config, "pad_token_id", getattr(self.tokenizer, "pad_token_id", None))
-            if isinstance(eos_token_id, int):
-                eos_token_ids = torch.tensor([eos_token_id], device=input_ids.device, dtype=input_ids.dtype)
-            elif eos_token_id is not None:
-                eos_token_ids = torch.tensor(list(eos_token_id), device=input_ids.device, dtype=input_ids.dtype)
-            pad_token_id = int(pad_token_id) if pad_token_id is not None else 0
-
-        return {
-            "generated_ids": generated_ids,
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "aligned_labels": aligned_labels,
-            "full_ids": full_ids,
-            "full_embeds": full_embeds,
-            "full_attention": full_attention,
-            "target_length": target_length,
-            "prefix_len": prefix_len,
-            "eos_token_ids": eos_token_ids,
-            "pad_token_id": pad_token_id,
-            "unfinished": torch.ones((generated_ids.shape[0],), dtype=torch.bool, device=input_ids.device),
-        }
-
-    def _build_latent_feedback_model_inputs(
-        self,
-        generated_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        image_grid_thw: Optional[torch.Tensor],
-        pixel_values: Optional[torch.Tensor],
-        past_key_values: Any,
-    ) -> Dict[str, Any]:
-        position_ids = self._compute_multimodal_position_ids(
-            input_ids=generated_ids,
-            attention_mask=attention_mask,
-            image_grid_thw=image_grid_thw,
-        )
-        step_input_ids = generated_ids if past_key_values is None else generated_ids[:, -1:]
-        step_inputs_embeds = inputs_embeds if past_key_values is None else inputs_embeds[:, -1:, :]
-        if position_ids is not None and past_key_values is not None:
-            position_ids = position_ids[:, :, -1:]
-
-        model_inputs = {
-            "inputs_embeds": self._sanitize_image_placeholder_embeddings(step_input_ids, step_inputs_embeds),
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-            "past_key_values": past_key_values,
-            "pixel_values": pixel_values if past_key_values is None else None,
-            "image_grid_thw": image_grid_thw if past_key_values is None else None,
-            "use_cache": True,
-            "output_hidden_states": True,
-            "return_dict": True,
-        }
-        return {k: v for k, v in model_inputs.items() if v is not None}
-
-    def _latent_feedback_step(
-        self,
-        generated_ids: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-        attention_mask: torch.Tensor,
-        image_grid_thw: Optional[torch.Tensor],
-        pixel_values: Optional[torch.Tensor],
-        past_key_values: Any,
-    ) -> Tuple[torch.Tensor, torch.Tensor, Any]:
-        model_inputs = self._build_latent_feedback_model_inputs(
-            generated_ids=generated_ids,
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
-            image_grid_thw=image_grid_thw,
-            pixel_values=pixel_values,
-            past_key_values=past_key_values,
-        )
-        outputs = self.model(**model_inputs)
-        hidden_states = self._extract_qwen_hidden_states(outputs, model_inputs)
-        logits = getattr(outputs, "logits", None)
-        if logits is None:
-            raise RuntimeError("latent feedback greedy loop 需要模型返回 logits。")
-        return hidden_states[:, -1, :], logits[:, -1, :], self._detach_past_key_values(getattr(outputs, "past_key_values", None))
-
-    def _select_next_latent_feedback_tokens(
-        self,
-        step_hidden: torch.Tensor,
-        step_logits: torch.Tensor,
-        router: Optional[nn.Module],
-        unfinished: torch.Tensor,
-        pad_token_id: int,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if router is None:
-            hard_route = torch.zeros((step_hidden.shape[0],), dtype=torch.long, device=step_hidden.device)
-        else:
-            _, _, routed = router.route_hidden_states(step_hidden.unsqueeze(1))
-            hard_route = routed[:, 0]
-
-        text_route_idx = getattr(router, "route_text_idx", 0) if router is not None else 0
-        text_mask = hard_route.eq(text_route_idx)
-        next_token_ids = step_logits.argmax(dim=-1)
-        text_next_embeds = self.model.get_input_embeddings()(next_token_ids)
-        latent_next_embeds = step_hidden.detach().to(dtype=text_next_embeds.dtype)
-        next_embeds = torch.where(text_mask.view(-1, 1), text_next_embeds, latent_next_embeds)
-
-        next_ids = next_token_ids.clone()
-        if router is not None:
-            for task_name, route_idx in router.task_id_by_name.items():
-                if task_name == "text":
-                    continue
-                placeholder_id = router.task_placeholder_ids.get(task_name)
-                if placeholder_id is None:
-                    continue
-                task_mask = hard_route.eq(route_idx)
-                next_ids = torch.where(task_mask, torch.full_like(next_ids, int(placeholder_id)), next_ids)
-
-        next_ids = torch.where(unfinished, next_ids, torch.full_like(next_ids, pad_token_id))
-        return next_ids, next_embeds, hard_route
-
-    def _apply_teacher_forcing_feedback(
-        self,
-        next_pos: int,
-        next_ids: torch.Tensor,
-        next_embeds: torch.Tensor,
-        aligned_labels: Optional[torch.Tensor],
-        full_ids: torch.Tensor,
-        full_embeds: torch.Tensor,
-        full_attention: torch.Tensor,
-        attention_mask: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        next_attention = attention_mask.new_ones((attention_mask.shape[0], 1))
-        if aligned_labels is None or next_pos >= full_ids.shape[1]:
-            return next_ids, next_embeds, next_attention
-
-        teacher_mask = aligned_labels[:, next_pos].eq(IGNORE_INDEX)
-        next_embeds = torch.where(teacher_mask.view(-1, 1), full_embeds[:, next_pos, :], next_embeds)
-        next_ids = torch.where(teacher_mask, full_ids[:, next_pos], next_ids)
-        next_attention = full_attention[:, next_pos].view(-1, 1)
-        return next_ids, next_embeds, next_attention
-
-    @staticmethod
-    def _finalize_latent_feedback_labels(
-        aligned_labels: Optional[torch.Tensor],
-        prefix_len: Optional[int],
-        num_steps: int,
-    ) -> Optional[torch.Tensor]:
-        if aligned_labels is None or prefix_len is None:
-            return aligned_labels
-        step_labels = aligned_labels[:, prefix_len : prefix_len + num_steps]
-        return torch.cat(
-            [
-                aligned_labels.new_full((aligned_labels.shape[0], 1), IGNORE_INDEX),
-                step_labels,
-            ],
-            dim=1,
-        )
-
-    def autoregressive_forward_with_latents(
+    def generate_with_router_feedback(
         self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
@@ -926,102 +730,87 @@ class MLLMBackbone(nn.Module):
         pc_valid_lengths: Optional[torch.Tensor] = None,
         point_token_embeds: Optional[torch.Tensor] = None,
         point_token_mask: Optional[torch.Tensor] = None,
-        labels: Optional[torch.Tensor] = None,
-        router: Optional[nn.Module] = None,
+        img_available: Optional[torch.Tensor] = None,
+        pc_available: Optional[torch.Tensor] = None,
+        max_new_tokens: Optional[int] = None,
         generation_config: Optional[Any] = None,
-    ) -> dict:
+        **generate_kwargs,
+    ) -> Dict[str, Any]:
         """
-        一阶段自回归 latent feedback 入口。
+        prompt-only generate 推理入口。
 
-        router 判为 text 的位置沿用 LM logits -> token id -> embedding；其它任务位置直接把
-        route 前 hidden state 作为下一步输入 embedding。
-        生成长度和停止条件沿用 Qwen 的 generation_config（max_length/eos_token_id）。
+        validate 推理不能把 GT answer 输入 MLLM，因此这里只接收截断后的 prompt。
+        生成前仍复用 forward 的多模态输入构造逻辑：文本 lookup、点云 token 注入、
+        image placeholder 校正。真正逐步生成时由 latent_generation_patch 中的
+        patched _sample 负责 router feedback，并把每步 hidden/route 记录到 trace。
         """
         if input_ids is None:
-            raise ValueError("autoregressive_forward_with_latents 需要 input_ids。")
+            raise ValueError("generate_with_router_feedback 需要 prompt-only input_ids。")
+        if not bool(getattr(self.config, "use_generation_router_feedback_patch", False)):
+            raise RuntimeError("generate_with_router_feedback 需要启用 use_generation_router_feedback_patch。")
 
+        if not getattr(self.model, "_ja_router_generation_patch_enabled", False):
+            patch_router_generation_feedback(self.model)
+
+        token_embeds = self.model.get_input_embeddings()(input_ids)
         if attention_mask is None:
             if self.tokenizer.pad_token_id is not None:
                 attention_mask = input_ids.ne(self.tokenizer.pad_token_id)
             else:
                 attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
 
-        loop_state = self._init_latent_feedback_loop(
+        prompt_ids, prompt_embeds, prompt_attention, _ = self._inject_pointcloud_embeddings(
             input_ids=input_ids,
+            token_embeds=token_embeds,
             attention_mask=attention_mask,
-            labels=labels,
+            labels=None,
             point_clouds=point_clouds,
             pc_valid_lengths=pc_valid_lengths,
             point_token_embeds=point_token_embeds,
             point_token_mask=point_token_mask,
-            generation_config=generation_config,
         )
-        generated_ids = loop_state["generated_ids"]
-        inputs_embeds = loop_state["inputs_embeds"]
-        attention_mask = loop_state["attention_mask"]
-        aligned_labels = loop_state["aligned_labels"]
-        full_ids = loop_state["full_ids"]
-        full_embeds = loop_state["full_embeds"]
-        full_attention = loop_state["full_attention"]
-        target_length = loop_state["target_length"]
-        prefix_len = loop_state["prefix_len"]
-        eos_token_ids = loop_state["eos_token_ids"]
-        pad_token_id = loop_state["pad_token_id"]
-        unfinished = loop_state["unfinished"]
-        hidden_history = []
-        logits_history = []
-        route_history = []
-        past_key_values = None
-        while generated_ids.shape[1] < target_length and bool(unfinished.any().item()):
-            next_pos = int(generated_ids.shape[1])
-            step_hidden, step_logits, past_key_values = self._latent_feedback_step(
-                generated_ids=generated_ids,
-                inputs_embeds=inputs_embeds,
-                attention_mask=attention_mask,
-                image_grid_thw=image_grid_thw,
-                pixel_values=pixel_values,
-                past_key_values=past_key_values,
-            )
-            next_ids, next_embeds, hard_route = self._select_next_latent_feedback_tokens(
-                step_hidden=step_hidden,
-                step_logits=step_logits,
-                router=router,
-                unfinished=unfinished,
-                pad_token_id=pad_token_id,
-            )
-            next_ids, next_embeds, next_attention = self._apply_teacher_forcing_feedback(
-                next_pos=next_pos,
-                next_ids=next_ids,
-                next_embeds=next_embeds,
-                aligned_labels=aligned_labels,
-                full_ids=full_ids,
-                full_embeds=full_embeds,
-                full_attention=full_attention,
-                attention_mask=attention_mask,
-            )
-
-            inputs_embeds = torch.cat([inputs_embeds, next_embeds.unsqueeze(1)], dim=1)
-            attention_mask = torch.cat([attention_mask, next_attention], dim=1)
-            generated_ids = torch.cat([generated_ids, next_ids.unsqueeze(1)], dim=1)
-            hidden_history.append(step_hidden)
-            logits_history.append(step_logits)
-            route_history.append(hard_route)
-            if eos_token_ids is not None:
-                is_eos = next_ids.unsqueeze(-1).eq(eos_token_ids.view(1, -1)).any(dim=-1)
-                unfinished = unfinished & (~is_eos)
-
-        aligned_labels = self._finalize_latent_feedback_labels(
-            aligned_labels=aligned_labels,
-            prefix_len=prefix_len,
-            num_steps=len(hidden_history),
+        prompt_embeds = self._sanitize_image_placeholder_embeddings(
+            input_ids=prompt_ids,
+            inputs_embeds=prompt_embeds,
         )
 
+        if max_new_tokens is None:
+            max_new_tokens = max(1, min(64, int(getattr(self.config, "model_max_length", 512)) - int(prompt_ids.shape[1])))
+
+        object.__setattr__(self.model, "_ja_generation_feedback_trace", None)
+        object.__setattr__(self.model, "_ja_generation_img_available", img_available)
+        object.__setattr__(self.model, "_ja_generation_pc_available", pc_available)
+        generate_args = dict(
+            input_ids=prompt_ids,
+            inputs_embeds=prompt_embeds,
+            attention_mask=prompt_attention,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            max_new_tokens=int(max_new_tokens),
+            return_dict_in_generate=True,
+        )
+        if generation_config is not None:
+            generate_args["generation_config"] = generation_config
+        generate_args.update(generate_kwargs)
+        generate_args = {k: v for k, v in generate_args.items() if v is not None}
+
+        outputs = self.model.generate(**generate_args)
+        trace = getattr(self.model, "_ja_generation_feedback_trace", None)
+        if not isinstance(trace, dict) or trace.get("step_hidden_states") is None:
+            raise RuntimeError("patched generate 未返回 router feedback trace，请确认 router 已挂载且 _sample patch 生效。")
+
+        sequences = getattr(outputs, "sequences", outputs)
+        trace["generated_ids"] = sequences
+        trace["prompt_input_ids"] = prompt_ids
+        trace["prompt_attention_mask"] = prompt_attention
         return {
-            "input_ids": generated_ids,
-            "inputs_embeds": inputs_embeds,
-            "attention_mask": attention_mask,
-            "step_hidden_states": torch.stack(hidden_history, dim=1) if hidden_history else None,
-            "step_logits": torch.stack(logits_history, dim=1) if logits_history else None,
-            "step_routes": torch.stack(route_history, dim=1) if route_history else None,
-            "aligned_labels": aligned_labels,
+            "output": outputs,
+            "trace": trace,
+            "generated_ids": sequences,
+            "generated_token_ids": trace.get("step_token_ids"),
+            "step_hidden_states": trace.get("step_hidden_states"),
+            "step_routes": trace.get("step_routes"),
+            "step_route_logits": trace.get("step_route_logits"),
+            "step_route_probs": trace.get("step_route_probs"),
+            "step_logits": trace.get("step_logits"),
         }

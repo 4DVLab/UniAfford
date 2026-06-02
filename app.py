@@ -292,7 +292,7 @@ class JointAffordanceDemoEngine:
         batch = dict_to_cuda(batch, device=self.device)
 
         with torch.inference_mode():
-            output = self.model(**batch)
+            output = self.model.generate_forward(**batch)
 
         image_vis = None
         pc_vis = None

@@ -130,8 +130,8 @@ class MLLMConfigs(Configs):
             "pc": "<pc_aff>",
             # "latent": "<latent>",
         },
-        # 推理默认启用一阶段自回归 hidden-state feedback。
-        "use_autoregressive_latent_feedback": True,
+        # 独立的 generate() router feedback patch：text 走 lookup，非 text 走 hidden-state 写回。
+        "use_generation_router_feedback_patch": True,
     }
 
     def __init__(self, config_dict: Optional[Dict] = None, **overrides):

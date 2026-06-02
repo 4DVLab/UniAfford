@@ -596,7 +596,8 @@ def main():
     with torch.no_grad():
         for batch_idx, input_dict in enumerate(tqdm(val_loader, desc="验证中")):
             input_dict = dict_to_cuda(input_dict, device=device)
-            output_dict = model(**input_dict, return_hidden_states=args.save_tsne)
+            # validate 推理必须只使用 prompt 进行 generate，GT answer 仅用于指标与文本对齐记录。
+            output_dict = model.generate_forward(**input_dict, return_hidden_states=args.save_tsne)
 
             # 计算损失 + 更新指标（包括 2D IoU/KLD/SIM/NSS 与 3D IoU/MAE/AUC/SIM）
             loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
@@ -619,7 +620,9 @@ def main():
                     ignore_index=IGNORE_INDEX,
                 )
 
-            pred_token_ids_batch = output_dict.get("token_ids")
+            pred_token_ids_batch = output_dict.get("generated_token_ids")
+            if pred_token_ids_batch is None:
+                pred_token_ids_batch = output_dict.get("token_ids")
             if pred_token_ids_batch is not None:
                 pred_token_ids_batch = pred_token_ids_batch.detach().cpu()
             aligned_labels_batch = output_dict.get("labels")
@@ -660,12 +663,23 @@ def main():
                 gt_ids = labels_i[supervised_pos].tolist()
                 record["gt_text"] = tokenizer.decode(gt_ids, skip_special_tokens=False)
 
-                # 预测文本：Causal LM 需要按监督位置左移一位对齐
-                # logits[t] 预测 token[t+1]，所以 label 位置 p 应取 pred 位置 p-1
+                # 预测文本：validate 现在使用 prompt-only generate，直接解码 generated_token_ids。
+                # 这里不再按 labels 左移取 forward logits，避免 GT answer 泄露后的 teacher-forcing 诊断值混入推理结果。
                 if pred_token_ids_batch is not None:
                     pred_ids_i = pred_token_ids_batch[i]
-                    valid_pos = supervised_pos[(supervised_pos > 0) & (supervised_pos - 1 < pred_ids_i.shape[0])]
-                    pred_answer_ids = pred_ids_i[valid_pos - 1].tolist()
+                    pred_answer_ids = pred_ids_i.tolist()
+                    pad_id = getattr(tokenizer, "pad_token_id", None)
+                    eos_id = getattr(tokenizer, "eos_token_id", None)
+                    if pad_id is not None:
+                        pred_answer_ids = [tid for tid in pred_answer_ids if int(tid) != int(pad_id)]
+                    if eos_id is not None:
+                        eos_ids = {int(eos_id)} if isinstance(eos_id, int) else {int(tid) for tid in eos_id}
+                        trimmed = []
+                        for tid in pred_answer_ids:
+                            trimmed.append(tid)
+                            if int(tid) in eos_ids:
+                                break
+                        pred_answer_ids = trimmed
                     record["pred_token_ids"] = json.dumps(pred_answer_ids)
                     record["pred_text"] = tokenizer.decode(pred_answer_ids, skip_special_tokens=False)
                 else:

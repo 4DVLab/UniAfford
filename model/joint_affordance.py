@@ -11,6 +11,7 @@ from model.pointcept import PointCloudHiddenStateDecoder
 from model.segment_anything import ImageHiddenStateDecoder
 from model.qwenvl import MLLMBackbone
 from model.HeadRouter import HeadRouter
+from utils.common import IGNORE_INDEX
 
 
 class JointAffordanceModel(nn.Module):
@@ -43,6 +44,95 @@ class JointAffordanceModel(nn.Module):
                 point_decoder_cfg.backbone_kwargs = dict(point_decoder.config.backbone_kwargs)
                 point_decoder_cfg.backbone_out_channels = int(point_decoder.config.backbone_out_channels)
 
+    def _build_prompt_only_inputs(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        labels: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        validate/generate 推理专用：从 full input_ids 中截掉 GT answer，只保留 prompt。
+
+        labels 只用于定位 answer 起点，不把 GT answer token 传入 MLLM。
+        """
+        if input_ids is None:
+            raise ValueError("generate 推理需要 input_ids。")
+        if attention_mask is None:
+            pad_id = getattr(self.tokenizer, "pad_token_id", None)
+            if pad_id is None:
+                attention_mask = torch.ones_like(input_ids, dtype=torch.bool)
+            else:
+                attention_mask = input_ids.ne(int(pad_id))
+
+        batch_size, seq_len = input_ids.shape
+        prompt_lens = []
+        for i in range(batch_size):
+            if labels is not None:
+                supervised = labels[i].ne(IGNORE_INDEX)
+                if bool(supervised.any().item()):
+                    prompt_len = int(supervised.float().argmax().item())
+                else:
+                    prompt_len = int(attention_mask[i].sum().item())
+            else:
+                prompt_len = int(attention_mask[i].sum().item())
+            prompt_lens.append(max(1, min(prompt_len, seq_len)))
+
+        max_prompt_len = max(prompt_lens)
+        pad_id = int(getattr(self.tokenizer, "pad_token_id", 0) or 0)
+        prompt_ids = input_ids.new_full((batch_size, max_prompt_len), pad_id)
+        prompt_attention = attention_mask.new_zeros((batch_size, max_prompt_len))
+        for i, prompt_len in enumerate(prompt_lens):
+            prompt_ids[i, :prompt_len] = input_ids[i, :prompt_len]
+            prompt_attention[i, :prompt_len] = attention_mask[i, :prompt_len]
+        return prompt_ids, prompt_attention
+
+    def _decode_with_route_out(
+        self,
+        route_out: Dict[str, torch.Tensor],
+        point_encoder_outputs: Optional[Dict[str, torch.Tensor]],
+        images: Optional[torch.Tensor],
+        img_valid_mask: Optional[torch.Tensor],
+        point_clouds: Optional[torch.Tensor],
+        pc_valid_lengths: Optional[torch.Tensor],
+    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """复用 routed query 执行 2D/3D decoder。"""
+        image_logits = None
+        if images is not None:
+            image_embeddings = self.image_decoder.get_visual_embs(images)
+            input_size = (images.shape[-2], images.shape[-1])
+            all_image_logits = self.image_decoder(
+                route_out["img_query_tokens"],
+                image_embeddings,
+                input_size,
+                input_size,
+                query_mask=route_out.get("img_query_mask"),
+            )
+            image_logits = self._apply_sample_mask(all_image_logits, img_valid_mask)
+
+        has_per_point_features = (
+            point_encoder_outputs is not None
+            and point_encoder_outputs.get("per_point_features") is not None
+            and point_encoder_outputs.get("per_point_mask") is not None
+        )
+        if point_clouds is not None and (has_per_point_features or not self.point_decoder_uses_shared_backbone):
+            all_point_logits = self.point_decoder(
+                point_clouds=point_clouds,
+                per_point_features=None if not has_per_point_features else point_encoder_outputs.get("per_point_features"),
+                per_point_mask=None if not has_per_point_features else point_encoder_outputs.get("per_point_mask"),
+                query_embeddings=route_out.get("pc_query_tokens"),
+                query_mask=route_out.get("pc_query_mask"),
+            )
+        else:
+            all_point_logits = None
+
+        if all_point_logits is None:
+            point_logits = None
+        elif pc_valid_lengths is not None:
+            point_logits = self._apply_sample_mask(all_point_logits, pc_valid_lengths > 0)
+        else:
+            point_logits = all_point_logits
+        return image_logits, point_logits
+
     def __init__(self, config: Optional[JointAffordanceConfig] = None):
         super().__init__()
         self.config = config or JointAffordanceConfig()
@@ -73,6 +163,10 @@ class JointAffordanceModel(nn.Module):
             tokenizer=self.tokenizer,
             task_placeholder_tokens=self.mllm.task_placeholder_tokens,
         )
+        # generate() patch 运行在 Qwen 实例内部，但路由器属于外层联合模型。
+        # 因此 HeadRouter 创建完成后，需要把它作为运行时引用挂到 MLLM/Qwen 上；
+        # 这样推理 generate() 的每一步才能用同一个 router 判断 text / 非 text 写回方式。
+        self.mllm.set_generation_feedback_router(self.router)
         # 只有在执行路由设计相关的“消融”操作时，才应将此开关设置为“fixed_anchor”状态。
         self.routing_design_ablation = None
         assert self.routing_design_ablation is None, "手动注释这行以启用 fixed-anchor 的路由模式"
@@ -145,6 +239,158 @@ class JointAffordanceModel(nn.Module):
         valid_f = valid.to(token_loss.dtype)
         return (token_loss * valid_f).sum() / valid_f.sum().clamp_min(1.0), ignored_tokens
 
+    def generate_forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        pixel_values: Optional[torch.Tensor] = None,
+        image_grid_thw: Optional[torch.Tensor] = None,
+        images: Optional[torch.Tensor] = None,
+        original_size_list: Optional[List] = None,
+        img_valid_mask: Optional[torch.Tensor] = None,
+        img_gt_tensor: Optional[torch.Tensor] = None,
+        point_clouds: Optional[torch.Tensor] = None,
+        pc_valid_lengths: Optional[torch.Tensor] = None,
+        pc_gt_tensor: Optional[torch.Tensor] = None,
+        obj_type: Optional[List[str]] = None,
+        aff_type: Optional[List[str]] = None,
+        return_hidden_states: bool = False,
+        return_mllm_output: bool = False,
+        max_new_tokens: Optional[int] = None,
+        **kwargs,
+    ) -> Dict[str, Optional[torch.Tensor]]:
+        """
+        validate 推理入口：只用 prompt 进行 generate，GT answer 仅用于评估。
+
+        生成过程由 patched Qwen _sample 记录每步 hidden/route；下游 decoder 使用
+        route 到 img/pc 的 generated hidden，而不是 teacher-forced GT answer hidden。
+        """
+        prompt_ids, prompt_attention = self._build_prompt_only_inputs(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+        )
+
+        point_encoder_outputs = None
+        if self.point_encoder is not None and point_clouds is not None:
+            point_encoder_outputs = self.point_encoder.encode_shared(
+                point_clouds=point_clouds,
+                pc_valid_lengths=pc_valid_lengths,
+            )
+
+        if max_new_tokens is None and labels is not None:
+            answer_counts = labels.ne(IGNORE_INDEX).sum(dim=1)
+            max_new_tokens = max(1, int(answer_counts.max().item()) + 8)
+
+        img_available = img_valid_mask if img_valid_mask is not None else None
+        pc_available = (pc_valid_lengths > 0) if pc_valid_lengths is not None else None
+        mllm_out = self.mllm.generate_with_router_feedback(
+            input_ids=prompt_ids,
+            attention_mask=prompt_attention,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            point_clouds=point_clouds,
+            pc_valid_lengths=pc_valid_lengths,
+            point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
+            point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
+            img_available=img_available,
+            pc_available=pc_available,
+            max_new_tokens=max_new_tokens,
+            generation_config=kwargs.pop("generation_config", None),
+        )
+
+        hidden_states = mllm_out["step_hidden_states"]
+        hard_route = mllm_out["step_routes"]
+        route_logits = mllm_out.get("step_route_logits")
+        route_probs = mllm_out.get("step_route_probs")
+        generated_token_ids = mllm_out.get("generated_token_ids")
+        generated_attention = torch.ones(
+            hidden_states.shape[:2],
+            dtype=torch.bool,
+            device=hidden_states.device,
+        )
+
+        img_token_emb = self.router.img_branch_head(hidden_states)
+        pc_token_emb = self.router.pc_branch_head(hidden_states)
+        img_query_tokens, img_query_mask, pc_query_tokens, pc_query_mask = self.router.build_branch_query_tokens(
+            img_token_emb=img_token_emb,
+            pc_token_emb=pc_token_emb,
+            hard_route=hard_route,
+            attention_mask=generated_attention,
+            route_mask=None,
+        )
+        routed_token_ids = self.router.build_routed_token_ids(
+            base_token_ids=generated_token_ids,
+            hard_route=hard_route,
+            route_mask=None,
+        )
+        aff_token_pairs = self.router.build_aff_token_pairs(
+            hard_route=hard_route,
+            token_hidden_states=hidden_states,
+            attention_mask=generated_attention,
+            route_mask=None,
+        )
+        if route_probs is not None:
+            structure_signals = self.router.build_structure_signals(
+                route_probs=route_probs,
+                attention_mask=generated_attention,
+                route_mask=None,
+            )
+        else:
+            structure_signals = {
+                "img_any_prob": None,
+                "pc_any_prob": None,
+                "img_expected_count": None,
+                "pc_expected_count": None,
+            }
+        route_out = {
+            "route_logits": route_logits,
+            "route_probs": route_probs,
+            "hard_route": hard_route,
+            "img_query_tokens": img_query_tokens,
+            "img_query_mask": img_query_mask,
+            "pc_query_tokens": pc_query_tokens,
+            "pc_query_mask": pc_query_mask,
+            "routed_token_ids": routed_token_ids,
+            "aff_token_pairs": aff_token_pairs,
+            **structure_signals,
+        }
+
+        image_logits, point_logits = self._decode_with_route_out(
+            route_out=route_out,
+            point_encoder_outputs=point_encoder_outputs,
+            images=images,
+            img_valid_mask=img_valid_mask,
+            point_clouds=point_clouds,
+            pc_valid_lengths=pc_valid_lengths,
+        )
+
+        zero_loss = hidden_states.new_zeros(())
+        output_dict = {
+            "hidden_states": hidden_states if return_hidden_states else None,
+            "image_logits": image_logits,
+            "point_logits": point_logits,
+            "token_ids": routed_token_ids,
+            "generated_token_ids": generated_token_ids,
+            "generated_ids": mllm_out.get("generated_ids"),
+            "labels": labels,
+            "attention_mask": attention_mask,
+            "ce_loss": zero_loss,
+            "output": mllm_out.get("output") if return_mllm_output else None,
+            "aff_token_pairs": aff_token_pairs,
+            "route_logits": route_logits,
+            "route_probs": route_probs,
+            "img_any_prob": route_out["img_any_prob"],
+            "pc_any_prob": route_out["pc_any_prob"],
+            "img_expected_count": route_out["img_expected_count"],
+            "pc_expected_count": route_out["pc_expected_count"],
+            "task_placeholder_ids": self.router.task_placeholder_ids,
+            "placeholder_id_to_task_id": self.router.placeholder_id_to_task_id,
+            "ce_ignored_token_count": 0,
+        }
+        return output_dict
+
     def forward(
         self,
         # Qwen 推理所需
@@ -179,61 +425,30 @@ class JointAffordanceModel(nn.Module):
             )
 
         # ---- 1. MLLM 前向 ----
-        use_autoregressive_feedback = (
-            bool(getattr(self.config.mllm, "use_autoregressive_latent_feedback", False))
+        # 训练/普通 forward 保持 teacher-forcing 并行前向；validate 的无泄露推理由 generate_forward 负责。
+        mllm_out = self.mllm(
+            input_ids=input_ids,
+            labels=labels,
+            attention_mask=attention_mask,
+            pixel_values=pixel_values,
+            image_grid_thw=image_grid_thw,
+            point_clouds=point_clouds,
+            pc_valid_lengths=pc_valid_lengths,
+            point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
+            point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
         )
-        if use_autoregressive_feedback:
-            mllm_out = self.mllm.autoregressive_forward_with_latents(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-                point_clouds=point_clouds,
-                pc_valid_lengths=pc_valid_lengths,
-                point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
-                point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
-                labels=labels,
-                router=self.router,
-                generation_config=kwargs.pop("generation_config", None),
-            )
-            hidden_states = mllm_out["step_hidden_states"]
-            output_obj = None
-            model_labels = mllm_out.get("aligned_labels")
-            model_attention_mask = torch.ones(
-                hidden_states.shape[:2],
-                dtype=torch.bool,
-                device=hidden_states.device,
-            )
-            logits_token_ids = (
-                mllm_out["step_logits"].argmax(dim=-1)
-                if mllm_out.get("step_logits") is not None
-                else None
-            )
-            output_logits = mllm_out.get("step_logits")
-        else:
-            mllm_out = self.mllm(
-                input_ids=input_ids,
-                labels=labels,
-                attention_mask=attention_mask,
-                pixel_values=pixel_values,
-                image_grid_thw=image_grid_thw,
-                point_clouds=point_clouds,
-                pc_valid_lengths=pc_valid_lengths,
-                point_token_embeds=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_tokens"),
-                point_token_mask=None if point_encoder_outputs is None else point_encoder_outputs.get("mllm_point_token_mask"),
-            )
-            hidden_states = mllm_out["hidden_states"]  # [B, L, C]
-            output_obj = mllm_out.get("output")
-            # 关键：当启用 pc prefix 时，使用与 logits 同长度的对齐标签，避免 CE 维度不一致
-            model_labels = mllm_out.get("aligned_labels", labels)
-            model_attention_mask = mllm_out.get("aligned_attention_mask", attention_mask)
-            logits_token_ids = None
-            output_logits = None
-            if output_obj is not None:
-                # 从 logits 中取 token_ids（用于可视化与占位 token 回写，不参与路由决策）
-                if getattr(output_obj, "logits", None) is not None:
-                    logits_token_ids = output_obj.logits.argmax(dim=-1)
-                    output_logits = output_obj.logits
+        hidden_states = mllm_out["hidden_states"]  # [B, L, C]
+        output_obj = mllm_out.get("output")
+        # 关键：当启用 pc prefix 时，使用与 logits 同长度的对齐标签，避免 CE 维度不一致
+        model_labels = mllm_out.get("aligned_labels", labels)
+        model_attention_mask = mllm_out.get("aligned_attention_mask", attention_mask)
+        logits_token_ids = None
+        output_logits = None
+        if output_obj is not None:
+            # 从 logits 中取 token_ids（用于可视化与占位 token 回写，不参与路由决策）
+            if getattr(output_obj, "logits", None) is not None:
+                logits_token_ids = output_obj.logits.argmax(dim=-1)
+                output_logits = output_obj.logits
         B,L,C = hidden_states.shape
 
         ce_loss = None
