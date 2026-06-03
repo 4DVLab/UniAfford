@@ -24,6 +24,7 @@ class MLLMBackbone(nn.Module):
         super().__init__()
         self.config = config
         self.model = self._build_qwen_model(config)
+        self._generation_feedback_router = None
         self.hidden_size = self.model.config.text_config.hidden_size
         self.vocab_size = self.model.config.text_config.vocab_size
 
@@ -120,6 +121,7 @@ class MLLMBackbone(nn.Module):
         这里不把 router 注册成 Qwen 子模块；latent_generation_patch 内部会用 object.__setattr__
         只保存运行时引用，避免影响 Qwen 权重保存、加载和 state_dict 结构。
         """
+        self._generation_feedback_router = router
         enabled = bool(getattr(self.config, "use_generation_router_feedback_patch", False))
         if enabled:
             attach_generation_router(self.model, router)
@@ -749,8 +751,16 @@ class MLLMBackbone(nn.Module):
         if not bool(getattr(self.config, "use_generation_router_feedback_patch", False)):
             raise RuntimeError("generate_with_router_feedback 需要启用 use_generation_router_feedback_patch。")
 
+        router = getattr(self, "_generation_feedback_router", None)
+        if router is None:
+            raise RuntimeError("generate_with_router_feedback 需要先通过 set_generation_feedback_router 挂载 router。")
+
+        # LoRA/PEFT 加载可能会在 JointAffordanceModel 初始化后替换 self.model。
+        # 因此 generate 前必须针对“当前”模型实例重新确认 patch 和 router 挂载状态。
         if not getattr(self.model, "_ja_router_generation_patch_enabled", False):
-            patch_router_generation_feedback(self.model)
+            patch_router_generation_feedback(self.model, router=router)
+        else:
+            attach_generation_router(self.model, router)
 
         token_embeds = self.model.get_input_embeddings()(input_ids)
         if attention_mask is None:
@@ -787,6 +797,7 @@ class MLLMBackbone(nn.Module):
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
             max_new_tokens=int(max_new_tokens),
+            num_beams=1,  # 确保能用上 latent patch
             return_dict_in_generate=True,
         )
         if generation_config is not None:
@@ -797,7 +808,20 @@ class MLLMBackbone(nn.Module):
         outputs = self.model.generate(**generate_args)
         trace = getattr(self.model, "_ja_generation_feedback_trace", None)
         if not isinstance(trace, dict) or trace.get("step_hidden_states") is None:
-            raise RuntimeError("patched generate 未返回 router feedback trace，请确认 router 已挂载且 _sample patch 生效。")
+            generation_cfg = getattr(outputs, "generation_config", None) or generation_config or getattr(self.model, "generation_config", None)
+            debug_info = {
+                "model_class": type(self.model).__name__,
+                "patch_enabled": bool(getattr(self.model, "_ja_router_generation_patch_enabled", False)),
+                "has_router": getattr(self.model, "_ja_generation_router", None) is not None,
+                "has_original_sample": hasattr(self.model, "_ja_original_sample"),
+                "trace_type": type(trace).__name__,
+                "num_beams": getattr(generation_cfg, "num_beams", None),
+                "do_sample": getattr(generation_cfg, "do_sample", None),
+            }
+            raise RuntimeError(
+                "patched generate 未返回 router feedback trace，请确认 router 已挂载且 _sample patch 生效。"
+                f" debug={debug_info}"
+            )
 
         sequences = getattr(outputs, "sequences", outputs)
         trace["generated_ids"] = sequences
