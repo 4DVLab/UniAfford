@@ -355,10 +355,19 @@ def route_supervision_loss(
     if not valid_mask.any():
         return zero, targets, valid_mask
 
+    # text token 数量通常远多于 <img_aff>/<pc_aff>，普通平均 CE 会让 task 类监督被淹没。
+    # 这里按当前 batch 的有效 target 做 class-balanced 权重，使 text/img/pc 在 router CE 中更接近等价地位。
+    valid_targets = targets[valid_mask]
+    class_counts = torch.bincount(valid_targets, minlength=num_routes).to(route_logits.dtype)
+    present = class_counts > 0
+    class_weight = torch.zeros((num_routes,), dtype=route_logits.dtype, device=route_logits.device)
+    class_weight[present] = valid_targets.numel() / (present.sum().to(route_logits.dtype) * class_counts[present])
+
     token_loss = F.cross_entropy(
         route_logits.reshape(-1, num_routes),
         targets.reshape(-1),
         reduction="none",
+        weight=class_weight,
     )
     valid_flat = valid_mask.reshape(-1).to(route_logits.dtype)
     loss = (token_loss * valid_flat).sum() / valid_flat.sum().clamp_min(1.0)
