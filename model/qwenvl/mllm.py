@@ -126,6 +126,56 @@ class MLLMBackbone(nn.Module):
         if enabled:
             attach_generation_router(self.model, router)
 
+    def _generation_feedback_model_candidates(self) -> list:
+        """
+        返回可能真正执行 GenerationMixin._sample 的模型对象。
+
+        PEFT/LoRA 场景下 self.model 可能是 PeftModelForCausalLM，它的 generate()
+        会委托给内部 base model；只 patch wrapper 不一定会命中实际 generation loop。
+        因此这里收集 wrapper、get_base_model()、base_model.model 等常见候选。
+        """
+        candidates = []
+        seen = set()
+
+        def add(candidate):
+            if candidate is None:
+                return
+            obj_id = id(candidate)
+            if obj_id in seen:
+                return
+            seen.add(obj_id)
+            candidates.append(candidate)
+
+        add(self.model)
+        get_base_model = getattr(self.model, "get_base_model", None)
+        if callable(get_base_model):
+            try:
+                add(get_base_model())
+            except Exception:
+                pass
+
+        base_model = getattr(self.model, "base_model", None)
+        add(base_model)
+        add(getattr(base_model, "model", None))
+        return candidates
+
+    def _ensure_generation_feedback_patch(self, router: nn.Module) -> list:
+        """对当前 wrapper/base-model 候选统一安装 patch 并挂载 router。"""
+        patched = []
+        for candidate in self._generation_feedback_model_candidates():
+            if not hasattr(candidate, "generate"):
+                continue
+            if hasattr(candidate, "_sample"):
+                if not getattr(candidate, "_ja_router_generation_patch_enabled", False):
+                    patch_router_generation_feedback(candidate, router=router)
+                else:
+                    attach_generation_router(candidate, router)
+                patched.append(candidate)
+            else:
+                # 某些 PEFT wrapper 没有 _sample，但仍保存 router，方便内部转发时可见。
+                attach_generation_router(candidate, router)
+        return patched
+
     def _sync_point_encoder_config(self):
         point_encoder = getattr(self, "point_encoder", None)
         backbone_cfg = getattr(self.config, "point_encoder_backbone", None)
@@ -756,11 +806,8 @@ class MLLMBackbone(nn.Module):
             raise RuntimeError("generate_with_router_feedback 需要先通过 set_generation_feedback_router 挂载 router。")
 
         # LoRA/PEFT 加载可能会在 JointAffordanceModel 初始化后替换 self.model。
-        # 因此 generate 前必须针对“当前”模型实例重新确认 patch 和 router 挂载状态。
-        if not getattr(self.model, "_ja_router_generation_patch_enabled", False):
-            patch_router_generation_feedback(self.model, router=router)
-        else:
-            attach_generation_router(self.model, router)
+        # 因此 generate 前必须针对 wrapper 和内部 base model 同时确认 patch 和 router 挂载状态。
+        generation_models = self._ensure_generation_feedback_patch(router)
 
         token_embeds = self.model.get_input_embeddings()(input_ids)
         if attention_mask is None:
@@ -787,9 +834,10 @@ class MLLMBackbone(nn.Module):
         if max_new_tokens is None:
             max_new_tokens = max(1, min(64, int(getattr(self.config, "model_max_length", 512)) - int(prompt_ids.shape[1])))
 
-        object.__setattr__(self.model, "_ja_generation_feedback_trace", None)
-        object.__setattr__(self.model, "_ja_generation_img_available", img_available)
-        object.__setattr__(self.model, "_ja_generation_pc_available", pc_available)
+        for generation_model in generation_models:
+            object.__setattr__(generation_model, "_ja_generation_feedback_trace", None)
+            object.__setattr__(generation_model, "_ja_generation_img_available", img_available)
+            object.__setattr__(generation_model, "_ja_generation_pc_available", pc_available)
         generate_args = dict(
             input_ids=prompt_ids,
             inputs_embeds=prompt_embeds,
@@ -806,7 +854,12 @@ class MLLMBackbone(nn.Module):
         generate_args = {k: v for k, v in generate_args.items() if v is not None}
 
         outputs = self.model.generate(**generate_args)
-        trace = getattr(self.model, "_ja_generation_feedback_trace", None)
+        trace = None
+        for generation_model in generation_models:
+            candidate_trace = getattr(generation_model, "_ja_generation_feedback_trace", None)
+            if isinstance(candidate_trace, dict) and candidate_trace.get("step_hidden_states") is not None:
+                trace = candidate_trace
+                break
         if not isinstance(trace, dict) or trace.get("step_hidden_states") is None:
             generation_cfg = getattr(outputs, "generation_config", None) or generation_config or getattr(self.model, "generation_config", None)
             debug_info = {
@@ -814,7 +867,11 @@ class MLLMBackbone(nn.Module):
                 "patch_enabled": bool(getattr(self.model, "_ja_router_generation_patch_enabled", False)),
                 "has_router": getattr(self.model, "_ja_generation_router", None) is not None,
                 "has_original_sample": hasattr(self.model, "_ja_original_sample"),
-                "trace_type": type(trace).__name__,
+                "patched_candidates": [type(candidate).__name__ for candidate in generation_models],
+                "candidate_trace_types": [
+                    type(getattr(candidate, "_ja_generation_feedback_trace", None)).__name__
+                    for candidate in generation_models
+                ],
                 "num_beams": getattr(generation_cfg, "num_beams", None),
                 "do_sample": getattr(generation_cfg, "do_sample", None),
             }
