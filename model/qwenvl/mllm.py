@@ -7,7 +7,6 @@ import torch
 import torch.nn as nn
 from configs import MLLMConfigs
 from model.pointcept import PointCloudEncoder
-from model.qwenvl.latent_generation_patch import attach_generation_router, patch_router_generation_feedback
 from utils.common import (
     IGNORE_INDEX,
     DEFAULT_PC_TOKEN,
@@ -24,7 +23,7 @@ class MLLMBackbone(nn.Module):
         super().__init__()
         self.config = config
         self.model = self._build_qwen_model(config)
-        self._generation_feedback_router = None
+        object.__setattr__(self, "_generation_feedback_router", None)
         self.hidden_size = self.model.config.text_config.hidden_size
         self.vocab_size = self.model.config.text_config.vocab_size
 
@@ -61,9 +60,6 @@ class MLLMBackbone(nn.Module):
         self.text_token_id = self.task_placeholder_ids.get("text")
         self.latent_token = self.task_placeholder_tokens.get("latent")
         self.latent_token_id = self.task_placeholder_ids.get("latent")
-        # generate() 的 router feedback patch 依赖 special token/placeholder id 已经注册完成。
-        # 此时 HeadRouter 还没有创建，所以这里只安装 _sample 替换逻辑，router 会稍后再挂载。
-        self._maybe_patch_generation_router_feedback()
 
         # 特殊 token 注入后，词表大小可能变化，这里以模型实际词表为准回写配置。
         self.vocab_size = int(self.model.get_input_embeddings().num_embeddings)
@@ -72,28 +68,28 @@ class MLLMBackbone(nn.Module):
             self.config.vocab_size = self.vocab_size
 
         self.point_encoder = None
-        if getattr(self.config, "enable_point_encoder", False):
-            point_encoder_ckpt = getattr(self.config, "point_encoder_pretrained", None)
-            point_encoder_cfg = getattr(self.config, "point_encoder_pretrained_config", None)
-            if getattr(self.config, "restore_from_checkpoint", False):
+        if self.config.enable_point_encoder:
+            point_encoder_ckpt = self.config.point_encoder_pretrained
+            point_encoder_cfg = self.config.point_encoder_pretrained_config
+            if self.config.restore_from_checkpoint:
                 self.point_encoder = PointCloudEncoder(
                     out_hidden_size=self.hidden_size,
                     compute_dtype=self.config.compute_dtype,
-                    backbone_config=getattr(self.config, "point_encoder_backbone", None),
+                    backbone_config=self.config.point_encoder_backbone,
                 )
             elif point_encoder_ckpt:
                 self.point_encoder = PointCloudEncoder.from_pretrained(
                     checkpoint_path=point_encoder_ckpt,
                     out_hidden_size=self.hidden_size,
                     compute_dtype=self.config.compute_dtype,
-                    backbone_config=getattr(self.config, "point_encoder_backbone", None),
+                    backbone_config=self.config.point_encoder_backbone,
                     pretrained_config_path=point_encoder_cfg,
                 )
             else:
                 self.point_encoder = PointCloudEncoder(
                     out_hidden_size=self.hidden_size,
                     compute_dtype=self.config.compute_dtype,
-                    backbone_config=getattr(self.config, "point_encoder_backbone", None),
+                    backbone_config=self.config.point_encoder_backbone,
                 )
             self._sync_point_encoder_config()
         self.pc_anchor_token_id = self._resolve_token_id(DEFAULT_PC_TOKEN)
@@ -101,80 +97,16 @@ class MLLMBackbone(nn.Module):
 
         self.to(dtype=self.config.compute_dtype)
 
-    def _maybe_patch_generation_router_feedback(self) -> None:
-        """
-        可选启用 generate() 路径的 router feedback patch。
-
-        此处只替换当前 Qwen 实例的 _sample，不改全局 Transformers；
-        router 会在 JointAffordanceModel 创建 HeadRouter 后通过 set_generation_feedback_router 挂载。
-        如果开关未启用，generate() 完全保持 Qwen/Transformers 原始行为。
-        """
-        enabled = bool(getattr(self.config, "use_generation_router_feedback_patch", False))
-        if not enabled:
-            return
-        patch_router_generation_feedback(self.model)
-
     def set_generation_feedback_router(self, router: nn.Module) -> None:
         """
-        把外层 HeadRouter 挂到 patched Qwen 实例上，供 generate() 每步路由使用。
+        把外层 HeadRouter 保存为运行时引用，供本地 greedy feedback generate 每步路由使用。
 
-        这里不把 router 注册成 Qwen 子模块；latent_generation_patch 内部会用 object.__setattr__
-        只保存运行时引用，避免影响 Qwen 权重保存、加载和 state_dict 结构。
+        这里不把 router 注册成 MLLM 子模块，避免影响权重保存、加载和 state_dict 结构。
         """
-        self._generation_feedback_router = router
-        enabled = bool(getattr(self.config, "use_generation_router_feedback_patch", False))
-        if enabled:
-            attach_generation_router(self.model, router)
-
-    def _generation_feedback_model_candidates(self) -> list:
-        """
-        返回可能真正执行 GenerationMixin._sample 的模型对象。
-
-        PEFT/LoRA 场景下 self.model 可能是 PeftModelForCausalLM，它的 generate()
-        会委托给内部 base model；只 patch wrapper 不一定会命中实际 generation loop。
-        因此这里收集 wrapper、get_base_model()、base_model.model 等常见候选。
-        """
-        candidates = []
-        seen = set()
-
-        def add(candidate):
-            if candidate is None:
-                return
-            obj_id = id(candidate)
-            if obj_id in seen:
-                return
-            seen.add(obj_id)
-            candidates.append(candidate)
-
-        add(self.model)
-        get_base_model = getattr(self.model, "get_base_model", None)
-        if callable(get_base_model):
-            try:
-                add(get_base_model())
-            except Exception:
-                pass
-
-        base_model = getattr(self.model, "base_model", None)
-        add(base_model)
-        add(getattr(base_model, "model", None))
-        return candidates
-
-    def _ensure_generation_feedback_patch(self, router: nn.Module) -> list:
-        """对当前 wrapper/base-model 候选统一安装 patch 并挂载 router。"""
-        patched = []
-        for candidate in self._generation_feedback_model_candidates():
-            if not hasattr(candidate, "generate"):
-                continue
-            if hasattr(candidate, "_sample"):
-                if not getattr(candidate, "_ja_router_generation_patch_enabled", False):
-                    patch_router_generation_feedback(candidate, router=router)
-                else:
-                    attach_generation_router(candidate, router)
-                patched.append(candidate)
-            else:
-                # 某些 PEFT wrapper 没有 _sample，但仍保存 router，方便内部转发时可见。
-                attach_generation_router(candidate, router)
-        return patched
+        # 这里只保存运行时引用，不能注册成 MLLM 子模块；否则 state_dict 会多出
+        # mllm._generation_feedback_router.*，与外层 JointAffordanceModel.router 重复。
+        self._modules.pop("_generation_feedback_router", None)
+        object.__setattr__(self, "_generation_feedback_router", router)
 
     def _local_router_feedback_greedy_generate(
         self,
@@ -192,7 +124,7 @@ class MLLMBackbone(nn.Module):
         """
         本地最小 greedy generation loop。
 
-        当前 PEFT/Transformers generate 路径不会进入实例级 _sample patch，因此这里直接复刻
+        当前使用本地 generate loop，不依赖 Transformers/PEFT generate 路径，因此这里直接复刻
         必要的增量 decode：每步取 last hidden 做 router，text 走 token lookup，非 text 写回 hidden。
         """
         generated_ids = prompt_ids
@@ -200,6 +132,8 @@ class MLLMBackbone(nn.Module):
         attention_mask = prompt_attention
         past_key_values = None
         unfinished = torch.ones((prompt_ids.shape[0],), dtype=torch.bool, device=prompt_ids.device)
+        emitted_img = torch.zeros_like(unfinished)
+        emitted_pc = torch.zeros_like(unfinished)
 
         generation_config = generation_config or getattr(self.model, "generation_config", None)
         eos_token_id = getattr(generation_config, "eos_token_id", getattr(self.tokenizer, "eos_token_id", None))
@@ -255,6 +189,24 @@ class MLLMBackbone(nn.Module):
                 img_available=img_available,
                 pc_available=pc_available,
             )
+            # 推理阶段强约束：每个样本每种下游任务 token 最多生成一次。
+            # 训练中用结构损失学习“约一个”，推理时用硬屏蔽避免重复 <img_aff>/<pc_aff> 污染 query。
+            if getattr(router, "route_img_idx", None) is not None:
+                img_done = emitted_img.view(-1, 1, 1)
+                route_logits[:, :, int(router.route_img_idx)] = torch.where(
+                    img_done.squeeze(-1),
+                    torch.full_like(route_logits[:, :, int(router.route_img_idx)], -1e4),
+                    route_logits[:, :, int(router.route_img_idx)],
+                )
+            if getattr(router, "route_pc_idx", None) is not None:
+                pc_done = emitted_pc.view(-1, 1, 1)
+                route_logits[:, :, int(router.route_pc_idx)] = torch.where(
+                    pc_done.squeeze(-1),
+                    torch.full_like(route_logits[:, :, int(router.route_pc_idx)], -1e4),
+                    route_logits[:, :, int(router.route_pc_idx)],
+                )
+            route_probs = torch.softmax(route_logits, dim=-1)
+            routed = route_logits.argmax(dim=-1)
             hard_route = routed[:, 0]
             text_route_idx = int(getattr(router, "route_text_idx", 0))
             text_mask = hard_route.eq(text_route_idx)
@@ -270,15 +222,25 @@ class MLLMBackbone(nn.Module):
                 task_mask = hard_route.eq(int(route_idx))
                 next_ids = torch.where(task_mask, torch.full_like(next_ids, int(placeholder_id)), next_ids)
 
+            if getattr(router, "route_img_idx", None) is not None:
+                emitted_img = emitted_img | hard_route.eq(int(router.route_img_idx))
+            if getattr(router, "route_pc_idx", None) is not None:
+                emitted_pc = emitted_pc | hard_route.eq(int(router.route_pc_idx))
+
             if eos_token_ids is not None:
                 next_ids = torch.where(unfinished, next_ids, torch.full_like(next_ids, pad_token_id))
 
-            text_next_embeds = self.model.get_input_embeddings()(text_token_ids).to(dtype=step_hidden.dtype)
-            hidden_next_embeds = step_hidden.detach().to(dtype=text_next_embeds.dtype)
-            next_embeds = torch.where(text_mask.view(-1, 1), text_next_embeds, hidden_next_embeds)
+            lookup_next_embeds = self.model.get_input_embeddings()(next_ids).to(dtype=step_hidden.dtype)
+            if self.config.use_router_latent_feedback:
+                text_next_embeds = self.model.get_input_embeddings()(text_token_ids).to(dtype=step_hidden.dtype)
+                hidden_next_embeds = step_hidden.detach().to(dtype=text_next_embeds.dtype)
+                next_embeds = torch.where(text_mask.view(-1, 1), text_next_embeds, hidden_next_embeds)
+            else:
+                # 关闭 latent feedback 时，所有 token 都走 MLLM 原生 lookup 路径；
+                # 非 text route 仍会在 generated_ids 中记录 <img_aff>/<pc_aff>，但下一步输入使用其 token embedding。
+                next_embeds = lookup_next_embeds
             if eos_token_ids is not None:
-                pad_embeds = self.model.get_input_embeddings()(next_ids).to(dtype=next_embeds.dtype)
-                next_embeds = torch.where(unfinished.view(-1, 1), next_embeds, pad_embeds)
+                next_embeds = torch.where(unfinished.view(-1, 1), next_embeds, lookup_next_embeds.to(dtype=next_embeds.dtype))
 
             step_hidden_history.append(step_hidden.detach())
             step_route_history.append(hard_route.detach())
@@ -313,7 +275,7 @@ class MLLMBackbone(nn.Module):
 
     def _sync_point_encoder_config(self):
         point_encoder = getattr(self, "point_encoder", None)
-        backbone_cfg = getattr(self.config, "point_encoder_backbone", None)
+        backbone_cfg = self.config.point_encoder_backbone
         if point_encoder is None or backbone_cfg is None:
             return
 
@@ -334,8 +296,8 @@ class MLLMBackbone(nn.Module):
             file_path.write_bytes(content)
 
     def _build_processor(self, config: MLLMConfigs):
-        serialized_files = getattr(config, "serialized_processor_files", None)
-        if getattr(config, "restore_from_checkpoint", False) and serialized_files:
+        serialized_files = config.serialized_processor_files
+        if config.restore_from_checkpoint and serialized_files:
             with tempfile.TemporaryDirectory(prefix="ja_processor_restore_") as tmpdir:
                 self._write_temp_assets(tmpdir, serialized_files)
                 return AutoProcessor.from_pretrained(tmpdir, local_files_only=True)
@@ -373,7 +335,7 @@ class MLLMBackbone(nn.Module):
         return Qwen2VLForConditionalGeneration
 
     def _build_qwen_from_serialized_config(self, config: MLLMConfigs):
-        serialized_files = getattr(config, "serialized_model_config_files", None)
+        serialized_files = config.serialized_model_config_files
         if not serialized_files:
             return None
 
@@ -384,8 +346,8 @@ class MLLMBackbone(nn.Module):
                 setattr(config_obj, "_attn_implementation", config.qwen_attn_implementation)
                 setattr(config_obj, "attn_implementation", config.qwen_attn_implementation)
             model_cls = self._resolve_qwen_model_class(
-                getattr(config, "serialized_model_class_name", None),
-                getattr(config, "qwen_model_name_or_path", ""),
+                config.serialized_model_class_name,
+                config.qwen_model_name_or_path,
             )
             return model_cls(config_obj)
 
@@ -410,7 +372,7 @@ class MLLMBackbone(nn.Module):
         return flat, token_modality
 
     def _build_task_placeholder_tokens(self, config: MLLMConfigs) -> "OrderedDict[str, str]":
-        raw = getattr(config, "task_placeholders", None)
+        raw = config.task_placeholders
         if raw is None:
             raise ValueError("MLLMConfigs.task_placeholders 不能为空，需显式声明任务 placeholder。")
 
@@ -493,14 +455,14 @@ class MLLMBackbone(nn.Module):
     def _build_qwen_model(self, config: MLLMConfigs):
         model_name = config.qwen_model_name_or_path
         dtype = config.compute_dtype
-        restore_mode = bool(getattr(config, "restore_from_checkpoint", False))
+        restore_mode = bool(config.restore_from_checkpoint)
 
         model = None
         if restore_mode:
             model = self._build_qwen_from_serialized_config(config)
         if model is None:
             model_cls = self._resolve_qwen_model_class(
-                getattr(config, "serialized_model_class_name", None),
+                config.serialized_model_class_name,
                 model_name,
             )
             model = model_cls.from_pretrained(
@@ -928,14 +890,11 @@ class MLLMBackbone(nn.Module):
 
         validate 推理不能把 GT answer 输入 MLLM，因此这里只接收截断后的 prompt。
         生成前仍复用 forward 的多模态输入构造逻辑：文本 lookup、点云 token 注入、
-        image placeholder 校正。真正逐步生成时由 latent_generation_patch 中的
-        patched _sample 负责 router feedback，并把每步 hidden/route 记录到 trace。
+        image placeholder 校正。真正逐步生成由 _local_router_feedback_greedy_generate 完成，
+        并记录每步 hidden/route 供下游 decoder 使用。
         """
         if input_ids is None:
             raise ValueError("generate_with_router_feedback 需要 prompt-only input_ids。")
-        if not bool(getattr(self.config, "use_generation_router_feedback_patch", False)):
-            raise RuntimeError("generate_with_router_feedback 需要启用 use_generation_router_feedback_patch。")
-
         router = getattr(self, "_generation_feedback_router", None)
         if router is None:
             raise RuntimeError("generate_with_router_feedback 需要先通过 set_generation_feedback_router 挂载 router。")
@@ -963,7 +922,7 @@ class MLLMBackbone(nn.Module):
         )
 
         if max_new_tokens is None:
-            max_new_tokens = max(1, min(64, int(getattr(self.config, "model_max_length", 512)) - int(prompt_ids.shape[1])))
+            max_new_tokens = max(1, min(64, int(self.config.model_max_length) - int(prompt_ids.shape[1])))
 
         local_out = self._local_router_feedback_greedy_generate(
             prompt_ids=prompt_ids,

@@ -371,7 +371,13 @@ def validate_one_epoch(
 
     for val_dict in val_loader:
         val_dict = dict_to_cuda(val_dict, device=model_engine.device)
-        val_output = model_engine(**val_dict, return_hidden_states=False, return_mllm_output=False)
+        # 训练内验证应与独立 validate.py 保持一致：只用 prompt generate，不把 GT answer 输入 MLLM。
+        val_output = model_engine(
+            **val_dict,
+            return_hidden_states=False,
+            return_mllm_output=False,
+            inference_generate=True,
+        )
         loss_dict = calc.compute_losses(val_output, val_dict, **loss_kwargs)
         update_torchmetrics(
             metrics, loss_dict, val_output, val_dict, config.val_batch_size,

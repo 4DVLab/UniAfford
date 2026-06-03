@@ -24,8 +24,23 @@ class JointAffordanceModel(nn.Module):
         view_shape = [sample_mask.shape[0]] + [1] * (logits.dim() - 1)
         return logits * sample_mask.bool().view(*view_shape).to(logits.dtype)
 
+    @staticmethod
+    def _apply_query_mask(logits: Optional[torch.Tensor], query_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+        """
+        将无效 query 的 decoder 输出置零。
+
+        HeadRouter 在没有选中 img/pc token 时会返回一个全零占位 query，并用 query_mask=False 标记。
+        这里保留 batch 张量形状，但不让该占位 query 产生有效预测。
+        """
+        if logits is None or query_mask is None or logits.dim() < 3:
+            return logits
+        if logits.shape[0] != query_mask.shape[0] or logits.shape[1] != query_mask.shape[1]:
+            return logits
+        view_shape = list(query_mask.shape) + [1] * (logits.dim() - 2)
+        return logits * query_mask.bool().view(*view_shape).to(logits.dtype)
+
     def _sync_point_decoder_config(self):
-        point_decoder_cfg = getattr(self.config, "point_decoder", None)
+        point_decoder_cfg = self.config.point_decoder
         if point_decoder_cfg is None:
             return
 
@@ -107,6 +122,7 @@ class JointAffordanceModel(nn.Module):
                 input_size,
                 query_mask=route_out.get("img_query_mask"),
             )
+            all_image_logits = self._apply_query_mask(all_image_logits, route_out.get("img_query_mask"))
             image_logits = self._apply_sample_mask(all_image_logits, img_valid_mask)
 
         has_per_point_features = (
@@ -128,8 +144,10 @@ class JointAffordanceModel(nn.Module):
         if all_point_logits is None:
             point_logits = None
         elif pc_valid_lengths is not None:
+            all_point_logits = self._apply_query_mask(all_point_logits, route_out.get("pc_query_mask"))
             point_logits = self._apply_sample_mask(all_point_logits, pc_valid_lengths > 0)
         else:
+            all_point_logits = self._apply_query_mask(all_point_logits, route_out.get("pc_query_mask"))
             point_logits = all_point_logits
         return image_logits, point_logits
 
@@ -147,7 +165,7 @@ class JointAffordanceModel(nn.Module):
         if self.point_encoder is not None:
             point_feature_size = int(getattr(self.point_encoder, "point_feature_size"))
         else:
-            point_feature_size = int(getattr(self.config.mllm.point_encoder_backbone, "dec_channels", (64,))[0])
+            point_feature_size = int(self.config.mllm.point_encoder_backbone.dec_channels[0])
 
         self.point_decoder_uses_shared_backbone = str(self.config.point_decoder.backbone_mode).lower() == "shared"
         self.point_decoder = PointCloudHiddenStateDecoder(
@@ -163,9 +181,9 @@ class JointAffordanceModel(nn.Module):
             tokenizer=self.tokenizer,
             task_placeholder_tokens=self.mllm.task_placeholder_tokens,
         )
-        # generate() patch 运行在 Qwen 实例内部，但路由器属于外层联合模型。
-        # 因此 HeadRouter 创建完成后，需要把它作为运行时引用挂到 MLLM/Qwen 上；
-        # 这样推理 generate() 的每一步才能用同一个 router 判断 text / 非 text 写回方式。
+        # 本地 feedback generate 运行在 MLLMBackbone 内部，但路由器属于外层联合模型。
+        # 因此 HeadRouter 创建完成后，需要把它作为运行时引用挂到 MLLM 上；
+        # 这样推理每一步才能用同一个 router 判断 text / 非 text 写回方式。
         self.mllm.set_generation_feedback_router(self.router)
         # 只有在执行路由设计相关的“消融”操作时，才应将此开关设置为“fixed_anchor”状态。
         self.routing_design_ablation = None
@@ -263,7 +281,7 @@ class JointAffordanceModel(nn.Module):
         """
         validate 推理入口：只用 prompt 进行 generate，GT answer 仅用于评估。
 
-        生成过程由 patched Qwen _sample 记录每步 hidden/route；下游 decoder 使用
+        生成过程由 MLLMBackbone 本地 greedy feedback loop 记录每步 hidden/route；下游 decoder 使用
         route 到 img/pc 的 generated hidden，而不是 teacher-forced GT answer hidden。
         """
         prompt_ids, prompt_attention = self._build_prompt_only_inputs(
@@ -372,6 +390,8 @@ class JointAffordanceModel(nn.Module):
             "image_logits": image_logits,
             "point_logits": point_logits,
             "token_ids": routed_token_ids,
+            "img_query_mask": img_query_mask,
+            "pc_query_mask": pc_query_mask,
             "generated_token_ids": generated_token_ids,
             "generated_ids": mllm_out.get("generated_ids"),
             "labels": labels,
@@ -415,6 +435,26 @@ class JointAffordanceModel(nn.Module):
         return_mllm_output: bool = False,
         **kwargs,
     ) -> Dict[str, Optional[torch.Tensor]]:
+        if bool(kwargs.pop("inference_generate", False)):
+            return self.generate_forward(
+                input_ids=input_ids,
+                labels=labels,
+                attention_mask=attention_mask,
+                pixel_values=pixel_values,
+                image_grid_thw=image_grid_thw,
+                images=images,
+                original_size_list=original_size_list,
+                img_valid_mask=img_valid_mask,
+                img_gt_tensor=img_gt_tensor,
+                point_clouds=point_clouds,
+                pc_valid_lengths=pc_valid_lengths,
+                pc_gt_tensor=pc_gt_tensor,
+                obj_type=obj_type,
+                aff_type=aff_type,
+                return_hidden_states=return_hidden_states,
+                return_mllm_output=return_mllm_output,
+                **kwargs,
+            )
 
         # ---- 0. 点云编码（单次 backbone，产出 token级 + 逐点级 两路特征）----
         point_encoder_outputs = None
@@ -495,6 +535,7 @@ class JointAffordanceModel(nn.Module):
                 original_size,
                 query_mask=route_out.get("img_query_mask"),
             )
+            all_image_logits = self._apply_query_mask(all_image_logits, route_out.get("img_query_mask"))
 
             # 将无效样本的输出置零（不影响 loss 计算）
             image_logits = self._apply_sample_mask(all_image_logits, img_valid_mask)
@@ -520,8 +561,10 @@ class JointAffordanceModel(nn.Module):
             if all_point_logits is None:
                 point_logits = None
             elif pc_valid_lengths is not None:
+                all_point_logits = self._apply_query_mask(all_point_logits, route_out.get("pc_query_mask"))
                 point_logits = self._apply_sample_mask(all_point_logits, pc_valid_lengths > 0)
             else:
+                all_point_logits = self._apply_query_mask(all_point_logits, route_out.get("pc_query_mask"))
                 point_logits = all_point_logits
 
 
@@ -530,6 +573,8 @@ class JointAffordanceModel(nn.Module):
             "image_logits": image_logits,
             "point_logits": point_logits,
             "token_ids": route_out["routed_token_ids"],
+            "img_query_mask": route_out.get("img_query_mask"),
+            "pc_query_mask": route_out.get("pc_query_mask"),
             "labels": model_labels,
             "attention_mask": model_attention_mask,
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）

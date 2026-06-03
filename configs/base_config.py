@@ -130,8 +130,9 @@ class MLLMConfigs(Configs):
             "pc": "<pc_aff>",
             # "latent": "<latent>",
         },
-        # 独立的 generate() router feedback patch：text 走 lookup，非 text 走 hidden-state 写回。
-        "use_generation_router_feedback_patch": True,
+        # 推理阶段 router 选中非 text task token 时，是否用 hidden state 作为下一步输入。
+        # False 时所有 token（包括 <img_aff>/<pc_aff>）都使用 MLLM 原生 embedding lookup。
+        "use_router_latent_feedback": True,
     }
 
     def __init__(self, config_dict: Optional[Dict] = None, **overrides):
