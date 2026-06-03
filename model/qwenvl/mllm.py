@@ -176,6 +176,141 @@ class MLLMBackbone(nn.Module):
                 attach_generation_router(candidate, router)
         return patched
 
+    def _local_router_feedback_greedy_generate(
+        self,
+        prompt_ids: torch.Tensor,
+        prompt_embeds: torch.Tensor,
+        prompt_attention: torch.Tensor,
+        router: nn.Module,
+        pixel_values: Optional[torch.Tensor],
+        image_grid_thw: Optional[torch.Tensor],
+        img_available: Optional[torch.Tensor],
+        pc_available: Optional[torch.Tensor],
+        max_new_tokens: int,
+        generation_config: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """
+        本地最小 greedy generation loop。
+
+        当前 PEFT/Transformers generate 路径不会进入实例级 _sample patch，因此这里直接复刻
+        必要的增量 decode：每步取 last hidden 做 router，text 走 token lookup，非 text 写回 hidden。
+        """
+        generated_ids = prompt_ids
+        inputs_embeds = prompt_embeds
+        attention_mask = prompt_attention
+        past_key_values = None
+        unfinished = torch.ones((prompt_ids.shape[0],), dtype=torch.bool, device=prompt_ids.device)
+
+        generation_config = generation_config or getattr(self.model, "generation_config", None)
+        eos_token_id = getattr(generation_config, "eos_token_id", getattr(self.tokenizer, "eos_token_id", None))
+        pad_token_id = getattr(generation_config, "pad_token_id", getattr(self.tokenizer, "pad_token_id", None))
+        pad_token_id = int(pad_token_id) if pad_token_id is not None else int(getattr(self.tokenizer, "pad_token_id", 0) or 0)
+        if isinstance(eos_token_id, int):
+            eos_token_ids = torch.tensor([eos_token_id], device=prompt_ids.device, dtype=prompt_ids.dtype)
+        elif eos_token_id is not None:
+            eos_token_ids = torch.tensor(list(eos_token_id), device=prompt_ids.device, dtype=prompt_ids.dtype)
+        else:
+            eos_token_ids = None
+
+        step_hidden_history = []
+        step_route_history = []
+        step_route_logits_history = []
+        step_route_probs_history = []
+        step_token_history = []
+        step_logits_history = []
+
+        for _ in range(int(max_new_tokens)):
+            position_ids = self._compute_multimodal_position_ids(
+                input_ids=generated_ids,
+                attention_mask=attention_mask,
+                image_grid_thw=image_grid_thw,
+            )
+            step_input_ids = generated_ids if past_key_values is None else generated_ids[:, -1:]
+            step_inputs_embeds = inputs_embeds if past_key_values is None else inputs_embeds[:, -1:, :]
+            if position_ids is not None and past_key_values is not None:
+                position_ids = position_ids[:, :, -1:]
+
+            model_inputs = {
+                "inputs_embeds": self._sanitize_image_placeholder_embeddings(step_input_ids, step_inputs_embeds),
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "past_key_values": past_key_values,
+                "pixel_values": pixel_values if past_key_values is None else None,
+                "image_grid_thw": image_grid_thw if past_key_values is None else None,
+                "use_cache": True,
+                "output_hidden_states": True,
+                "return_dict": True,
+            }
+            model_inputs = {k: v for k, v in model_inputs.items() if v is not None}
+            outputs = self.model(**model_inputs)
+            hidden_states = self._extract_qwen_hidden_states(outputs, model_inputs)
+            logits = getattr(outputs, "logits", None)
+            if logits is None:
+                raise RuntimeError("本地 router feedback generate 需要模型返回 logits。")
+
+            step_hidden = hidden_states[:, -1, :]
+            step_logits = logits[:, -1, :]
+            route_logits, route_probs, routed = router.route_hidden_states(
+                step_hidden.unsqueeze(1),
+                img_available=img_available,
+                pc_available=pc_available,
+            )
+            hard_route = routed[:, 0]
+            text_route_idx = int(getattr(router, "route_text_idx", 0))
+            text_mask = hard_route.eq(text_route_idx)
+
+            text_token_ids = torch.argmax(step_logits, dim=-1)
+            next_ids = text_token_ids.clone()
+            for task_name, route_idx in getattr(router, "task_id_by_name", {}).items():
+                if task_name == "text":
+                    continue
+                placeholder_id = getattr(router, "task_placeholder_ids", {}).get(task_name)
+                if placeholder_id is None:
+                    continue
+                task_mask = hard_route.eq(int(route_idx))
+                next_ids = torch.where(task_mask, torch.full_like(next_ids, int(placeholder_id)), next_ids)
+
+            if eos_token_ids is not None:
+                next_ids = torch.where(unfinished, next_ids, torch.full_like(next_ids, pad_token_id))
+
+            text_next_embeds = self.model.get_input_embeddings()(text_token_ids).to(dtype=step_hidden.dtype)
+            hidden_next_embeds = step_hidden.detach().to(dtype=text_next_embeds.dtype)
+            next_embeds = torch.where(text_mask.view(-1, 1), text_next_embeds, hidden_next_embeds)
+            if eos_token_ids is not None:
+                pad_embeds = self.model.get_input_embeddings()(next_ids).to(dtype=next_embeds.dtype)
+                next_embeds = torch.where(unfinished.view(-1, 1), next_embeds, pad_embeds)
+
+            step_hidden_history.append(step_hidden.detach())
+            step_route_history.append(hard_route.detach())
+            step_route_logits_history.append(route_logits[:, 0, :].detach())
+            step_route_probs_history.append(route_probs[:, 0, :].detach())
+            step_token_history.append(next_ids.detach())
+            step_logits_history.append(step_logits.detach())
+
+            past_key_values = getattr(outputs, "past_key_values", None)
+            generated_ids = torch.cat([generated_ids, next_ids[:, None]], dim=-1)
+            inputs_embeds = torch.cat([inputs_embeds, next_embeds.unsqueeze(1)], dim=1)
+            attention_mask = torch.cat([attention_mask, attention_mask.new_ones((attention_mask.shape[0], 1))], dim=1)
+
+            if eos_token_ids is not None:
+                is_eos = next_ids.unsqueeze(-1).eq(eos_token_ids.view(1, -1)).any(dim=-1)
+                unfinished = unfinished & (~is_eos)
+                if not bool(unfinished.any().item()):
+                    break
+
+        trace = {
+            "step_hidden_states": torch.stack(step_hidden_history, dim=1) if step_hidden_history else None,
+            "step_routes": torch.stack(step_route_history, dim=1) if step_route_history else None,
+            "step_route_logits": torch.stack(step_route_logits_history, dim=1) if step_route_logits_history else None,
+            "step_route_probs": torch.stack(step_route_probs_history, dim=1) if step_route_probs_history else None,
+            "step_token_ids": torch.stack(step_token_history, dim=1) if step_token_history else None,
+            "step_logits": torch.stack(step_logits_history, dim=1) if step_logits_history else None,
+            "generated_ids": generated_ids,
+            "prompt_input_ids": prompt_ids,
+            "prompt_attention_mask": prompt_attention,
+        }
+        return {"trace": trace, "generated_ids": generated_ids}
+
     def _sync_point_encoder_config(self):
         point_encoder = getattr(self, "point_encoder", None)
         backbone_cfg = getattr(self.config, "point_encoder_backbone", None)
@@ -805,18 +940,6 @@ class MLLMBackbone(nn.Module):
         if router is None:
             raise RuntimeError("generate_with_router_feedback 需要先通过 set_generation_feedback_router 挂载 router。")
 
-        # LoRA/PEFT 加载可能会在 JointAffordanceModel 初始化后替换 self.model。
-        # 因此 generate 前必须针对 wrapper 和内部 base model 同时确认 patch 和 router 挂载状态。
-        generation_models = self._ensure_generation_feedback_patch(router)
-        execution_model = next(
-            (
-                candidate
-                for candidate in generation_models
-                if hasattr(candidate, "_sample") and type(candidate).__name__ != "PeftModelForCausalLM"
-            ),
-            self.model,
-        )
-
         token_embeds = self.model.get_input_embeddings()(input_ids)
         if attention_mask is None:
             if self.tokenizer.pad_token_id is not None:
@@ -842,61 +965,22 @@ class MLLMBackbone(nn.Module):
         if max_new_tokens is None:
             max_new_tokens = max(1, min(64, int(getattr(self.config, "model_max_length", 512)) - int(prompt_ids.shape[1])))
 
-        for generation_model in generation_models:
-            object.__setattr__(generation_model, "_ja_generation_feedback_trace", None)
-            object.__setattr__(generation_model, "_ja_generation_img_available", img_available)
-            object.__setattr__(generation_model, "_ja_generation_pc_available", pc_available)
-        generate_args = dict(
-            input_ids=prompt_ids,
-            inputs_embeds=prompt_embeds,
-            attention_mask=prompt_attention,
+        local_out = self._local_router_feedback_greedy_generate(
+            prompt_ids=prompt_ids,
+            prompt_embeds=prompt_embeds,
+            prompt_attention=prompt_attention,
+            router=router,
             pixel_values=pixel_values,
             image_grid_thw=image_grid_thw,
+            img_available=img_available,
+            pc_available=pc_available,
             max_new_tokens=int(max_new_tokens),
-            num_beams=1,  # 确保能用上 latent patch
-            return_dict_in_generate=True,
+            generation_config=generation_config,
         )
-        if generation_config is not None:
-            generate_args["generation_config"] = generation_config
-        generate_args.update(generate_kwargs)
-        generate_args = {k: v for k, v in generate_args.items() if v is not None}
-
-        # PEFT wrapper 的 generate 可能绕过实例级 _sample patch；base Qwen 已包含 LoRA 层，
-        # 直接调用已 patch 的 base model generate 更能保证进入 router_feedback_sample。
-        outputs = execution_model.generate(**generate_args)
-        trace = None
-        for generation_model in generation_models:
-            candidate_trace = getattr(generation_model, "_ja_generation_feedback_trace", None)
-            if isinstance(candidate_trace, dict) and candidate_trace.get("step_hidden_states") is not None:
-                trace = candidate_trace
-                break
-        if not isinstance(trace, dict) or trace.get("step_hidden_states") is None:
-            generation_cfg = getattr(outputs, "generation_config", None) or generation_config or getattr(self.model, "generation_config", None)
-            debug_info = {
-                "model_class": type(self.model).__name__,
-                "execution_model_class": type(execution_model).__name__,
-                "patch_enabled": bool(getattr(self.model, "_ja_router_generation_patch_enabled", False)),
-                "has_router": getattr(self.model, "_ja_generation_router", None) is not None,
-                "has_original_sample": hasattr(self.model, "_ja_original_sample"),
-                "patched_candidates": [type(candidate).__name__ for candidate in generation_models],
-                "candidate_trace_types": [
-                    type(getattr(candidate, "_ja_generation_feedback_trace", None)).__name__
-                    for candidate in generation_models
-                ],
-                "num_beams": getattr(generation_cfg, "num_beams", None),
-                "do_sample": getattr(generation_cfg, "do_sample", None),
-            }
-            raise RuntimeError(
-                "patched generate 未返回 router feedback trace，请确认 router 已挂载且 _sample patch 生效。"
-                f" debug={debug_info}"
-            )
-
-        sequences = getattr(outputs, "sequences", outputs)
-        trace["generated_ids"] = sequences
-        trace["prompt_input_ids"] = prompt_ids
-        trace["prompt_attention_mask"] = prompt_attention
+        trace = local_out["trace"]
+        sequences = local_out["generated_ids"]
         return {
-            "output": outputs,
+            "output": None,
             "trace": trace,
             "generated_ids": sequences,
             "generated_token_ids": trace.get("step_token_ids"),
