@@ -257,6 +257,87 @@ class JointAffordanceModel(nn.Module):
         valid_f = valid.to(token_loss.dtype)
         return (token_loss * valid_f).sum() / valid_f.sum().clamp_min(1.0), ignored_tokens
 
+    def _compute_router_classification_stats(
+        self,
+        labels: Optional[torch.Tensor],
+        route_out: Optional[Dict[str, torch.Tensor]],
+        ignore_index: int = -100,
+    ) -> Dict[str, int]:
+        """统计 router 的逐 token 分类结果。
+
+        Args:
+            labels: 训练用语言标签，形状为 ``[B, L]``。这里沿用 causal LM 的
+                shift 规则，用 ``labels[t + 1]`` 作为 ``hard_route[t]`` 的监督目标。
+            route_out: HeadRouter 输出，必须包含 ``hard_route``。
+            ignore_index: 不参与语言监督的位置，同样不参与 router 分类统计。
+
+        Returns:
+            Dict[str, int]: batch 级计数。字段命名使用 ``*_wrong`` / ``*_total``，
+            日志里展示为 ``wrong/total``，避免小 batch 下准确率抖动掩盖真实数量。
+        """
+        empty_stats = {
+            "route_wrong": 0,
+            "route_total": 0,
+            "route_text_wrong": 0,
+            "route_text_total": 0,
+            "route_img_wrong": 0,
+            "route_img_total": 0,
+            "route_pc_wrong": 0,
+            "route_pc_total": 0,
+            "route_aff_wrong": 0,
+            "route_aff_total": 0,
+            "route_text_as_aff": 0,
+            "route_aff_as_text": 0,
+        }
+        if labels is None or route_out is None or route_out.get("hard_route") is None:
+            return empty_stats
+        hard_route = route_out["hard_route"]
+        if labels.dim() != 2 or hard_route.dim() != 2 or labels.shape[0] != hard_route.shape[0]:
+            return empty_stats
+        if labels.shape[1] <= 1:
+            return empty_stats
+
+        # Router 与语言模型一样采用 next-token 对齐：hidden[t] 应预测 labels[t + 1] 的语义角色。
+        pred_len = min(hard_route.shape[1], labels.shape[1] - 1)
+        if pred_len <= 0:
+            return empty_stats
+        shifted_labels = labels[:, 1 : 1 + pred_len].to(hard_route.device)
+        pred_routes = hard_route[:, :pred_len]
+        valid = shifted_labels.ne(ignore_index)
+
+        target_routes = torch.full_like(pred_routes, int(self.router.route_text_idx))
+        for placeholder_id, task_id in self.router.placeholder_id_to_task_id.items():
+            target_routes = torch.where(
+                shifted_labels.eq(int(placeholder_id)),
+                torch.full_like(target_routes, int(task_id)),
+                target_routes,
+            )
+
+        wrong = valid & pred_routes.ne(target_routes)
+        text_target = valid & target_routes.eq(int(self.router.route_text_idx))
+        aff_target = valid & target_routes.ne(int(self.router.route_text_idx))
+        pred_aff = pred_routes.ne(int(self.router.route_text_idx))
+
+        stats = dict(empty_stats)
+        stats["route_wrong"] = int(wrong.sum().item())
+        stats["route_total"] = int(valid.sum().item())
+        stats["route_text_wrong"] = int((wrong & text_target).sum().item())
+        stats["route_text_total"] = int(text_target.sum().item())
+        stats["route_aff_wrong"] = int((wrong & aff_target).sum().item())
+        stats["route_aff_total"] = int(aff_target.sum().item())
+        stats["route_text_as_aff"] = int((text_target & pred_aff).sum().item())
+        stats["route_aff_as_text"] = int((aff_target & pred_routes.eq(int(self.router.route_text_idx))).sum().item())
+
+        if self.router.route_img_idx is not None:
+            img_target = valid & target_routes.eq(int(self.router.route_img_idx))
+            stats["route_img_wrong"] = int((wrong & img_target).sum().item())
+            stats["route_img_total"] = int(img_target.sum().item())
+        if self.router.route_pc_idx is not None:
+            pc_target = valid & target_routes.eq(int(self.router.route_pc_idx))
+            stats["route_pc_wrong"] = int((wrong & pc_target).sum().item())
+            stats["route_pc_total"] = int(pc_target.sum().item())
+        return stats
+
     def generate_forward(
         self,
         input_ids: Optional[torch.Tensor] = None,
@@ -408,6 +489,7 @@ class JointAffordanceModel(nn.Module):
             "task_placeholder_ids": self.router.task_placeholder_ids,
             "placeholder_id_to_task_id": self.router.placeholder_id_to_task_id,
             "ce_ignored_token_count": 0,
+            "route_classification_stats": self._compute_router_classification_stats(None, None),
         }
         return output_dict
 
@@ -493,6 +575,7 @@ class JointAffordanceModel(nn.Module):
 
         ce_loss = None
         ce_ignored_token_count = 0
+        route_classification_stats = self._compute_router_classification_stats(None, None)
         
         if hidden_states is not None:
             img_available = img_valid_mask if img_valid_mask is not None else None
@@ -509,6 +592,11 @@ class JointAffordanceModel(nn.Module):
                 route_out = self.router.fixed_anchor_forward(**route_kwargs)
             else:
                 route_out = self.router(**route_kwargs)
+            route_classification_stats = self._compute_router_classification_stats(
+                labels=model_labels,
+                route_out=route_out,
+                ignore_index=-100,
+            )
 
             if output_logits is not None and model_labels is not None:
                 ce_loss, ce_ignored_token_count = self._compute_text_ce_without_task_tokens(
@@ -594,6 +682,8 @@ class JointAffordanceModel(nn.Module):
             "placeholder_id_to_task_id": self.router.placeholder_id_to_task_id,
             # batch 级统计：CE 中被忽略的非 text 任务 token 数
             "ce_ignored_token_count": ce_ignored_token_count,
+            # batch 级 router 分类统计：日志中展示为 wrong/total，便于直接观察误判规模。
+            "route_classification_stats": route_classification_stats,
         }
 
         if hidden_states is not None:

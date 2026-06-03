@@ -24,13 +24,16 @@ export TORCHINDUCTOR_NO_PARALLEL_COMPILE=1
 # ================================ 训练参数 ================================
 
 COMMON_ARGS=(
-  --log_dir ../runs/UniAfford-debug/
-  --dataset_dir ../datasets/merged1-2-3/
-
+  # 预训练权重
   --qwen_model ../pretrained/Qwen/Qwen3-VL-2B-Instruct
   --vision_pretrained ../pretrained/sam_vit_h_4b8939.pth
   --point_backbone_pretrained ../pretrained/sonata.pth
   
+  # 训练保存位置、数据集
+  --log_dir ../runs/UniAfford-debug/
+  --dataset_dir ../datasets/merged1-2-3/
+
+  # 其他参数
   --batch_size 1
   --epochs 150
 

@@ -296,14 +296,22 @@ def train_one_epoch(
         if (batch_idx + 1) % config.print_freq == 0 or (batch_idx + 1) == len(train_loader):
             lr_dict = get_current_lr(scheduler, optimizer)
             lr_text = ", ".join([f"{k}={v:.2e}" for k, v in lr_dict.items()])
-            ignored_cnt = int(output_dict.get("ce_ignored_token_count", 0) or 0)
+            route_stats = output_dict.get("route_classification_stats") or {}
+            route_wrong = int(route_stats.get("route_wrong", 0) or 0)
+            route_total = int(route_stats.get("route_total", 0) or 0)
+            text_as_aff = int(route_stats.get("route_text_as_aff", 0) or 0)
+            text_total = int(route_stats.get("route_text_total", 0) or 0)
+            aff_as_text = int(route_stats.get("route_aff_as_text", 0) or 0)
+            aff_total = int(route_stats.get("route_aff_total", 0) or 0)
             logger.info(
                 f"  [{batch_idx + 1}/{len(train_loader)}] "
                 f"loss={loss_dict['loss'].item():.6f} "
                 f"(ce={loss_dict['ce_loss'].item():.6f}, "
                 f"img={loss_dict['img_loss'].item():.6f}, "
                 f"pc={loss_dict['pc_loss'].item():.6f}, "
-                f"ce_ignore_aff_tok={ignored_cnt})"
+                f"route_mis={route_wrong}/{route_total}, "
+                f"text2aff={text_as_aff}/{text_total}, "
+                f"aff2text={aff_as_text}/{aff_total})"
                 + (f" lr=({lr_text})" if lr_text else "")
             )
             if local_rank == 0 and writer is not None:
@@ -316,7 +324,9 @@ def train_one_epoch(
                         gt_threshold=getattr(config, "gt_threshold_2d", 0.5),
                     )
                 )
-                batch_log["ce_ignored_token_count"] = float(ignored_cnt)
+                # Router 统计直接记录计数，避免小 batch 下准确率波动掩盖误判规模。
+                for k, v in route_stats.items():
+                    batch_log[f"router/{k}"] = float(v)
                 for k, v in lr_dict.items():
                     batch_log[f"lr/{k}"] = v
                 if lr_dict:
