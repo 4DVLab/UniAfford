@@ -808,6 +808,14 @@ class MLLMBackbone(nn.Module):
         # LoRA/PEFT 加载可能会在 JointAffordanceModel 初始化后替换 self.model。
         # 因此 generate 前必须针对 wrapper 和内部 base model 同时确认 patch 和 router 挂载状态。
         generation_models = self._ensure_generation_feedback_patch(router)
+        execution_model = next(
+            (
+                candidate
+                for candidate in generation_models
+                if hasattr(candidate, "_sample") and type(candidate).__name__ != "PeftModelForCausalLM"
+            ),
+            self.model,
+        )
 
         token_embeds = self.model.get_input_embeddings()(input_ids)
         if attention_mask is None:
@@ -853,7 +861,9 @@ class MLLMBackbone(nn.Module):
         generate_args.update(generate_kwargs)
         generate_args = {k: v for k, v in generate_args.items() if v is not None}
 
-        outputs = self.model.generate(**generate_args)
+        # PEFT wrapper 的 generate 可能绕过实例级 _sample patch；base Qwen 已包含 LoRA 层，
+        # 直接调用已 patch 的 base model generate 更能保证进入 router_feedback_sample。
+        outputs = execution_model.generate(**generate_args)
         trace = None
         for generation_model in generation_models:
             candidate_trace = getattr(generation_model, "_ja_generation_feedback_trace", None)
@@ -864,6 +874,7 @@ class MLLMBackbone(nn.Module):
             generation_cfg = getattr(outputs, "generation_config", None) or generation_config or getattr(self.model, "generation_config", None)
             debug_info = {
                 "model_class": type(self.model).__name__,
+                "execution_model_class": type(execution_model).__name__,
                 "patch_enabled": bool(getattr(self.model, "_ja_router_generation_patch_enabled", False)),
                 "has_router": getattr(self.model, "_ja_generation_router", None) is not None,
                 "has_original_sample": hasattr(self.model, "_ja_original_sample"),
