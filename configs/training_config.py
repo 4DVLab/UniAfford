@@ -175,6 +175,8 @@ class TrainingConfig(Configs):
         "val_batch_size": 10,  # 验证时每卡 batch 大小
         "workers": 4,
         "print_freq": 1,
+        # 默认使用短回答模板，降低 generate 阶段自回归格式漂移；关闭后恢复原来的丰富自然语言回答。
+        "use_simple_answer_template": True,
         # 训练策略：默认全量训练，需要冻结的模块统一写到 name_of_params_to_freeze
         # 默认冻结qwen的视觉编码器， point_encoder (pretrained SONATA)的点云编码器， image_decoder (SAM)的图像编码器
         "name_of_params_to_freeze": "mllm.model.visual, point_encoder.point_backbone, image_decoder.visual_model.image_encoder",

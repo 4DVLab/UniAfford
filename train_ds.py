@@ -670,6 +670,7 @@ def main():
         image_precision=model_config.image_decoder.compute_dtype,
         point_precision=model_config.point_decoder.compute_dtype,
         use_sample_cache=training_configs.use_sample_cache,
+        use_simple_answer_template=training_configs.use_simple_answer_template,
     )
     if training_configs.samples_per_epoch:
         train_ds_kwargs["samples_per_epoch"] = training_configs.samples_per_epoch

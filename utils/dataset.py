@@ -63,6 +63,7 @@ class JointAffordanceTorchDataset(Dataset):
         image_precision="fp32",
         point_precision="fp32",
         use_sample_cache: bool = True,
+        use_simple_answer_template: bool = True,
     ):
         self.samples = samples
         self.processor = processor
@@ -72,6 +73,7 @@ class JointAffordanceTorchDataset(Dataset):
         self.mllm_precision = resolve_dtype(mllm_precision) or torch.bfloat16
         self.image_precision = resolve_dtype(image_precision) or torch.float32
         self.point_precision = resolve_dtype(point_precision) or torch.float32
+        self.use_simple_answer_template = bool(use_simple_answer_template)
         # 懒加载源（如 JointDataset.lazy_load=True）下，禁止预缓存，避免初始化阶段全量读盘
         if getattr(samples, "lazy_load", False) and use_sample_cache:
             warnings.warn(
@@ -94,6 +96,40 @@ class JointAffordanceTorchDataset(Dataset):
         if self.use_sample_cache:
             return self._sample_cache[index]
         return self._build_sample(self.samples[index])
+
+    def _build_simple_answer(
+        self,
+        obj_type: str,
+        aff_type: str,
+        has_image: bool,
+        has_pc: bool,
+        img_token: str,
+        pc_token: str,
+    ) -> str:
+        """构造短回答模板。
+
+        Args:
+            obj_type: 物体类别名称，用于保留回答中的语义监督。
+            aff_type: affordance 类别名称，用于保留回答中的语义监督。
+            has_image: 当前样本是否包含 2D 图像输入。
+            has_pc: 当前样本是否包含 3D 点云输入。
+            img_token: 2D affordance 分支的占位 token。
+            pc_token: 3D affordance 分支的占位 token。
+
+        Returns:
+            str: 固定且低自由度的 assistant answer。相比原丰富模板，它减少随机表达；
+            相比纯 token 模板，它保留 obj/aff 语义，避免语言监督过弱。
+        """
+        if has_image and has_pc:
+            return (
+                f"In the 2D image, the {aff_type} affordance region of the {obj_type} is {img_token}; "
+                f"in the 3D point cloud, it is {pc_token}."
+            )
+        if has_image:
+            return f"In the 2D image, the {aff_type} affordance region of the {obj_type} is {img_token}."
+        if has_pc:
+            return f"In the 3D point cloud, the {aff_type} affordance region of the {obj_type} is {pc_token}."
+        return "No visual input."
 
     def _build_text(self, obj_type, aff_type, has_image: bool, has_pc: bool, instruction: str) -> tuple[str, str]:
         """使用通用占位 token 构建回答，作为 router 的 token-level 监督标签。
@@ -244,6 +280,9 @@ class JointAffordanceTorchDataset(Dataset):
                 f"{question}\n"
                 f"Point cloud input: {DEFAULT_PC_TOKEN}"
             )
+        # 默认启用短回答模板：训练目标只保留必要的任务 token，降低 generate 阶段格式漂移。
+        if self.use_simple_answer_template:
+            return question, self._build_simple_answer(obj_type, aff_type, has_image, has_pc, img_token, pc_token)
 
         answer_prefixes = [
             "",
@@ -632,6 +671,7 @@ class JointAffordanceTrainDataset(JointAffordanceTorchDataset):
         image_precision="fp32",
         point_precision="fp32",
         use_sample_cache: bool = True,
+        use_simple_answer_template: bool = True,
     ):
         super().__init__(
             samples=samples,
@@ -642,6 +682,7 @@ class JointAffordanceTrainDataset(JointAffordanceTorchDataset):
             image_precision=image_precision,
             point_precision=point_precision,
             use_sample_cache=use_sample_cache,
+            use_simple_answer_template=use_simple_answer_template,
         )
         self.samples_per_epoch = samples_per_epoch
         self.num_samples = len(self.samples)

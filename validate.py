@@ -139,6 +139,7 @@ def build_dataloader_for_split(
         image_precision=model_cfg.image_decoder.compute_dtype,
         point_precision=model_cfg.point_decoder.compute_dtype,
         use_sample_cache=training_cfg.use_sample_cache,
+        use_simple_answer_template=training_cfg.use_simple_answer_template,
     )
 
     loader = DataLoader(
