@@ -62,6 +62,8 @@ def parse_args():
                         help="验证 batch 大小（默认使用 TrainingConfig.val_batch_size）")
     parser.add_argument("--split", type=str, default=None, choices=["train", "val", "test"],
                         help="要评估的数据集分割（默认：test）")
+    parser.add_argument("--inference_mode", type=str, default="generate", choices=["generate", "forward"],
+                        help="推理模式：generate 为 prompt-only 自回归推理（默认）；forward 为 teacher-forcing 前向诊断。")
     parser.add_argument("--device", type=str, default=None,
                         help="使用的设备（默认：cuda，若不可用则 CPU）")
     parser.add_argument("--num_workers", type=int, default=None,
@@ -151,6 +153,28 @@ def build_dataloader_for_split(
         collate_fn=collator,
     )
     return loader, torch_dataset, processor
+
+
+def run_model_inference(model, input_dict: Dict, inference_mode: str, return_hidden_states: bool = False) -> Dict:
+    """根据验证模式执行模型推理。
+
+    Args:
+        model: JointAffordanceModel 实例。
+        input_dict: 已经移动到目标设备上的 batch 输入。
+        inference_mode: ``"generate"`` 使用 prompt-only 自回归推理；``"forward"`` 使用
+            teacher-forcing 前向，仅用于诊断 forward 上限。
+        return_hidden_states: 是否返回 hidden states，用于 t-SNE 等可视化。
+
+    Returns:
+        Dict: 模型输出字典，字段与指标计算逻辑保持兼容。
+    """
+    if inference_mode == "generate":
+        # 默认真实推理路径：不把 GT answer 输入 MLLM。
+        return model.generate_forward(**input_dict, return_hidden_states=return_hidden_states)
+    if inference_mode == "forward":
+        # 诊断路径：GT answer 会进入 MLLM，只用于定位 generate/forward 差异。
+        return model(**input_dict, return_hidden_states=return_hidden_states)
+    raise ValueError(f"Unsupported inference_mode: {inference_mode}")
 
 
 def save_batch_predictions(
@@ -598,7 +622,12 @@ def main():
         for batch_idx, input_dict in enumerate(tqdm(val_loader, desc="验证中")):
             input_dict = dict_to_cuda(input_dict, device=device)
             # validate 推理必须只使用 prompt 进行 generate，GT answer 仅用于指标与文本对齐记录。
-            output_dict = model.generate_forward(**input_dict, return_hidden_states=args.save_tsne)
+            output_dict = run_model_inference(
+                model,
+                input_dict,
+                inference_mode=args.inference_mode,
+                return_hidden_states=args.save_tsne,
+            )
 
             # 计算损失 + 更新指标（包括 2D IoU/KLD/SIM/NSS 与 3D IoU/MAE/AUC/SIM）
             loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
@@ -646,6 +675,7 @@ def main():
                     "sample_id": input_dict.get("sample_id")[i],
                     "obj_type": input_dict.get("obj_type")[i],
                     "aff_type": input_dict.get("aff_type")[i],
+                    "inference_mode": args.inference_mode,
                     "text_id": src_ids.get("ins_id", ""),
                     "img_id": src_ids.get("img_id", ""),
                     "pc_id": src_ids.get("pc_id", ""),
@@ -785,7 +815,7 @@ def main():
     sample_records.sort(key=lambda r: r["sample_id"])
     csv_fields = [
         "sample_id", "obj_type", "aff_type",
-        "text_id", "img_id", "pc_id",
+        "inference_mode", "text_id", "img_id", "pc_id",
         "pred_token_ids", "pred_text", "gt_text",
         "aff_token_names",
         "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d",
