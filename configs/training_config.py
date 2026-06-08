@@ -205,6 +205,8 @@ class TrainingConfig(Configs):
         # 验证集搜索预测阈值的候选范围
         "auto_select_mask_threshold": True,
         "write_selected_mask_threshold_to_config": True,
+        # 训练内 generate 验证默认启用 query fallback，避免 router 偶发缺失导致全零 query 污染训练观测。
+        "generate_query_fallback": True,
         "gradient_checkpointing": True,
         # 损失配置
         "focal_loss_weight": 2.0,
@@ -214,6 +216,10 @@ class TrainingConfig(Configs):
         "bce_loss_weight": 2.0,
         "pc_dice_loss_weight": 0.5,
         "ce_loss_weight": 1.0,
+        "route_loss_weight": 1.0,
+        "route_exist_loss_weight": 0.5,
+        "route_sparse_loss_weight": 0.01,
+        "route_target_present_count": 1.0,
         # 高级配置
         "exclude_val": False,
         "no_eval": False,

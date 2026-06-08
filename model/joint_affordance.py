@@ -151,6 +151,61 @@ class JointAffordanceModel(nn.Module):
             point_logits = all_point_logits
         return image_logits, point_logits
 
+    @staticmethod
+    def _apply_missing_query_fallback(
+        query_tokens: torch.Tensor,
+        query_mask: torch.Tensor,
+        branch_token_emb: torch.Tensor,
+        route_probs: Optional[torch.Tensor],
+        route_idx: Optional[int],
+        sample_available: Optional[torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+        """为 generate 阶段缺失的分支 query 补充最高路由概率的 hidden state。
+
+        Args:
+            query_tokens: 已按 hard route 打包后的分支 query，形状为 ``[B, K, C]``。
+            query_mask: query 是否有效的掩码，形状为 ``[B, K]``。
+            branch_token_emb: 对应分支投影后的 generated hidden，形状为 ``[B, T, C]``。
+            route_probs: 每个生成 step 的路由概率，形状为 ``[B, T, R]``。
+            route_idx: 当前分支在 router 中的类别 id。
+            sample_available: 当前样本是否具备该模态输入，形状为 ``[B]``。
+
+        Returns:
+            Tuple[Tensor, Tensor, int]: fallback 后的 query、query mask，以及实际补充的样本数。
+        """
+        if (
+            query_tokens is None
+            or query_mask is None
+            or branch_token_emb is None
+            or route_probs is None
+            or route_idx is None
+        ):
+            return query_tokens, query_mask, 0
+        if query_tokens.dim() != 3 or query_mask.dim() != 2 or branch_token_emb.dim() != 3:
+            return query_tokens, query_mask, 0
+        if route_probs.dim() != 3 or route_probs.shape[:2] != branch_token_emb.shape[:2]:
+            return query_tokens, query_mask, 0
+
+        batch_size = min(query_tokens.shape[0], query_mask.shape[0], branch_token_emb.shape[0])
+        if sample_available is None:
+            available = torch.ones(batch_size, dtype=torch.bool, device=query_tokens.device)
+        else:
+            available = sample_available[:batch_size].bool().to(query_tokens.device)
+
+        out_tokens = query_tokens.clone()
+        out_mask = query_mask.clone()
+        fallback_count = 0
+        for batch_idx in range(batch_size):
+            if not bool(available[batch_idx].item()):
+                continue
+            if bool(out_mask[batch_idx].any().item()):
+                continue
+            best_pos = int(route_probs[batch_idx, :, int(route_idx)].argmax().item())
+            out_tokens[batch_idx, 0, :] = branch_token_emb[batch_idx, best_pos, :].to(out_tokens.dtype)
+            out_mask[batch_idx, 0] = True
+            fallback_count += 1
+        return out_tokens, out_mask, fallback_count
+
     def __init__(self, config: Optional[JointAffordanceConfig] = None):
         super().__init__()
         self.config = config or JointAffordanceConfig()
@@ -357,6 +412,7 @@ class JointAffordanceModel(nn.Module):
         return_hidden_states: bool = False,
         return_mllm_output: bool = False,
         max_new_tokens: Optional[int] = None,
+        generate_query_fallback: bool = False,
         **kwargs,
     ) -> Dict[str, Optional[torch.Tensor]]:
         """
@@ -419,6 +475,24 @@ class JointAffordanceModel(nn.Module):
             attention_mask=generated_attention,
             route_mask=None,
         )
+        fallback_stats = {"img_query_fallback_count": 0, "pc_query_fallback_count": 0}
+        if generate_query_fallback and route_probs is not None:
+            img_query_tokens, img_query_mask, fallback_stats["img_query_fallback_count"] = self._apply_missing_query_fallback(
+                query_tokens=img_query_tokens,
+                query_mask=img_query_mask,
+                branch_token_emb=img_token_emb,
+                route_probs=route_probs,
+                route_idx=self.router.route_img_idx,
+                sample_available=img_available,
+            )
+            pc_query_tokens, pc_query_mask, fallback_stats["pc_query_fallback_count"] = self._apply_missing_query_fallback(
+                query_tokens=pc_query_tokens,
+                query_mask=pc_query_mask,
+                branch_token_emb=pc_token_emb,
+                route_probs=route_probs,
+                route_idx=self.router.route_pc_idx,
+                sample_available=pc_available,
+            )
         routed_token_ids = self.router.build_routed_token_ids(
             base_token_ids=generated_token_ids,
             hard_route=hard_route,
@@ -488,6 +562,7 @@ class JointAffordanceModel(nn.Module):
             "pc_any_prob": route_out["pc_any_prob"],
             "img_expected_count": route_out["img_expected_count"],
             "pc_expected_count": route_out["pc_expected_count"],
+            "query_fallback_stats": fallback_stats,
             "task_placeholder_ids": self.router.task_placeholder_ids,
             "placeholder_id_to_task_id": self.router.placeholder_id_to_task_id,
             "ce_ignored_token_count": 0,

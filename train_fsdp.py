@@ -380,6 +380,7 @@ def validate_one_epoch(
             return_hidden_states=False,
             return_mllm_output=False,
             inference_generate=True,
+            generate_query_fallback=getattr(config, "generate_query_fallback", True),
         )
         loss_dict = calc.compute_losses(val_output, val_dict, **loss_kwargs)
         update_torchmetrics(

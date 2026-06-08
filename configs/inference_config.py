@@ -13,6 +13,7 @@ class InferenceConfig(base_config.Configs):
         "precision": None,
         "mask_threshold_2d": None,
         "mask_threshold_3d": None,
+        "generate_query_fallback": False,
     }
 
     def __init__(

@@ -64,6 +64,8 @@ def parse_args():
                         help="要评估的数据集分割（默认：test）")
     parser.add_argument("--inference_mode", type=str, default="generate", choices=["generate", "forward"],
                         help="推理模式：generate 为 prompt-only 自回归推理（默认）；forward 为 teacher-forcing 前向诊断。")
+    parser.add_argument("--generate_query_fallback", action="store_true",
+                        help="generate 模式下若缺少 img/pc query，则用对应 route 概率最高的 hidden state 兜底；默认关闭以真实评估 router。")
     parser.add_argument("--device", type=str, default=None,
                         help="使用的设备（默认：cuda，若不可用则 CPU）")
     parser.add_argument("--num_workers", type=int, default=None,
@@ -155,7 +157,13 @@ def build_dataloader_for_split(
     return loader, torch_dataset, processor
 
 
-def run_model_inference(model, input_dict: Dict, inference_mode: str, return_hidden_states: bool = False) -> Dict:
+def run_model_inference(
+    model,
+    input_dict: Dict,
+    inference_mode: str,
+    return_hidden_states: bool = False,
+    generate_query_fallback: bool = False,
+) -> Dict:
     """根据验证模式执行模型推理。
 
     Args:
@@ -169,9 +177,17 @@ def run_model_inference(model, input_dict: Dict, inference_mode: str, return_hid
         Dict: 模型输出字典，字段与指标计算逻辑保持兼容。
     """
     if inference_mode == "generate":
+        # 独立验证默认真实评估 router；仅显式打开开关时启用 query fallback。
+        return model.generate_forward(
+            **input_dict,
+            return_hidden_states=return_hidden_states,
+            generate_query_fallback=generate_query_fallback,
+        )
         # 默认真实推理路径：不把 GT answer 输入 MLLM。
         return model.generate_forward(**input_dict, return_hidden_states=return_hidden_states)
     if inference_mode == "forward":
+        # 诊断路径：GT answer 会进入 MLLM，只用于定位 generate/forward 差异。
+        return model(**input_dict, return_hidden_states=return_hidden_states)
         # 诊断路径：GT answer 会进入 MLLM，只用于定位 generate/forward 差异。
         return model(**input_dict, return_hidden_states=return_hidden_states)
     raise ValueError(f"Unsupported inference_mode: {inference_mode}")
@@ -627,6 +643,7 @@ def main():
                 input_dict,
                 inference_mode=args.inference_mode,
                 return_hidden_states=args.save_tsne,
+                generate_query_fallback=args.generate_query_fallback,
             )
 
             # 计算损失 + 更新指标（包括 2D IoU/KLD/SIM/NSS 与 3D IoU/MAE/AUC/SIM）
