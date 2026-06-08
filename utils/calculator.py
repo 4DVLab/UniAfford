@@ -374,6 +374,179 @@ def route_supervision_loss(
     return loss, targets, valid_mask
 
 
+def _labels_to_answer_route_targets(
+    labels_i: torch.Tensor,
+    placeholder_id_to_task_id: Dict[int, int],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """提取单样本 answer token，并转换为对应的路由类别。
+
+    Args:
+        labels_i: 单个样本的语言监督标签，形状为 ``[L]``。
+        placeholder_id_to_task_id: placeholder token id 到路由类别 id 的映射。
+
+    Returns:
+        Tuple[Tensor, Tensor]: ``answer_ids`` 为去除 ``IGNORE_INDEX`` 后的 answer token；
+        ``route_targets`` 为每个 answer token 对应的路由类别，普通文本默认为 text 类 0。
+    """
+    answer_ids = labels_i[labels_i.ne(IGNORE_INDEX)]
+    route_targets = torch.zeros_like(answer_ids, dtype=torch.long)
+    for placeholder_id, task_id in placeholder_id_to_task_id.items():
+        route_targets = torch.where(
+            answer_ids.eq(int(placeholder_id)),
+            torch.full_like(route_targets, int(task_id)),
+            route_targets,
+        )
+    return answer_ids, route_targets
+
+
+def grouped_generate_text_ce_loss(
+    generated_logits: Optional[torch.Tensor],
+    hard_route: Optional[torch.Tensor],
+    labels: Optional[torch.Tensor],
+    placeholder_id_to_task_id: Optional[Dict[int, int]],
+    device: torch.device,
+    text_task_id: int = 0,
+) -> torch.Tensor:
+    """按路由类别对齐 generate 文本 token 后计算 CE。
+
+    generate 的 answer 长度和模板可能与 GT 不一致，不能沿用训练阶段的绝对
+    ``labels[t + 1]`` 对齐方式。这里先根据 router 结果取出预测侧 text token，
+    再从 GT 中取出 text token，二者在 text 类内部按顺序比较。
+
+    Args:
+        generated_logits: generate 每一步的词表 logits，形状为 ``[B, T, V]``。
+        hard_route: generate 每一步的离散路由结果，形状为 ``[B, T]``。
+        labels: GT answer 监督标签，形状为 ``[B, L]``。
+        placeholder_id_to_task_id: placeholder token id 到路由类别 id 的映射。
+        device: loss 所在设备。
+        text_task_id: text 类对应的路由 id。
+
+    Returns:
+        Tensor: 按类别内顺序对齐后的文本 CE；没有可比较 token 时返回 0。
+    """
+    zero = torch.tensor(0.0, device=device)
+    if (
+        generated_logits is None
+        or hard_route is None
+        or labels is None
+        or not placeholder_id_to_task_id
+    ):
+        return zero
+    if generated_logits.dim() != 3 or hard_route.dim() != 2 or labels.dim() != 2:
+        return zero
+
+    logits_list = []
+    target_list = []
+    batch_size = min(generated_logits.shape[0], hard_route.shape[0], labels.shape[0])
+    for batch_idx in range(batch_size):
+        answer_ids, route_targets = _labels_to_answer_route_targets(
+            labels[batch_idx].to(generated_logits.device),
+            placeholder_id_to_task_id,
+        )
+        gt_text_ids = answer_ids[route_targets.eq(int(text_task_id))]
+        pred_text_logits = generated_logits[batch_idx][
+            hard_route[batch_idx].to(generated_logits.device).eq(int(text_task_id))
+        ]
+        pair_count = min(int(pred_text_logits.shape[0]), int(gt_text_ids.shape[0]))
+        if pair_count <= 0:
+            continue
+        logits_list.append(pred_text_logits[:pair_count])
+        target_list.append(gt_text_ids[:pair_count])
+
+    if not logits_list:
+        return zero
+    text_logits = torch.cat(logits_list, dim=0)
+    text_targets = torch.cat(target_list, dim=0).to(text_logits.device)
+    return F.cross_entropy(text_logits, text_targets, reduction="mean")
+
+
+def grouped_generate_route_supervision_loss(
+    route_logits: Optional[torch.Tensor],
+    hard_route: Optional[torch.Tensor],
+    labels: Optional[torch.Tensor],
+    placeholder_id_to_task_id: Optional[Dict[int, int]],
+    device: torch.device,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """按路由类别对齐 generate token 后计算 router CE。
+
+    与训练阶段不同，generate 阶段不假设第 ``t`` 个生成 step 对应 GT 的第 ``t``
+    个 answer token。该函数先按预测路由把 token 分成 text/img/pc 等类别，再把
+    GT answer 也按 placeholder token 分成同样类别，最后在每个类别内部按出现顺序
+    截断对齐。
+
+    Args:
+        route_logits: generate 每一步的 router logits，形状为 ``[B, T, R]``。
+        hard_route: generate 每一步的离散路由结果，形状为 ``[B, T]``。
+        labels: GT answer 监督标签，形状为 ``[B, L]``。
+        placeholder_id_to_task_id: placeholder token id 到路由类别 id 的映射。
+        device: loss 所在设备。
+
+    Returns:
+        Tuple[Tensor, Optional[Tensor], Optional[Tensor]]: router CE、对齐后的目标类别、
+        以及有效位置 mask。后两者主要用于兼容训练阶段返回值。
+    """
+    zero = torch.tensor(0.0, device=device)
+    if route_logits is None or hard_route is None or labels is None or not placeholder_id_to_task_id:
+        return zero, None, None
+    if route_logits.dim() != 3 or hard_route.dim() != 2 or labels.dim() != 2:
+        return zero, None, None
+
+    num_routes = int(route_logits.shape[-1])
+    if num_routes <= 0:
+        return zero, None, None
+    placeholder_id_to_task_id = {
+        int(placeholder_id): int(task_id)
+        for placeholder_id, task_id in placeholder_id_to_task_id.items()
+        if int(task_id) < num_routes
+    }
+
+    logits_list = []
+    target_list = []
+    batch_size = min(route_logits.shape[0], hard_route.shape[0], labels.shape[0])
+    route_ids = list(range(num_routes))
+    for batch_idx in range(batch_size):
+        _, gt_route_targets = _labels_to_answer_route_targets(
+            labels[batch_idx].to(route_logits.device),
+            placeholder_id_to_task_id,
+        )
+        pred_routes = hard_route[batch_idx].to(route_logits.device)
+        for route_id in route_ids:
+            pred_logits = route_logits[batch_idx][pred_routes.eq(int(route_id))]
+            gt_count = int(gt_route_targets.eq(int(route_id)).sum().item())
+            pair_count = min(int(pred_logits.shape[0]), gt_count)
+            if pair_count <= 0:
+                continue
+            logits_list.append(pred_logits[:pair_count])
+            target_list.append(
+                torch.full(
+                    (pair_count,),
+                    int(route_id),
+                    dtype=torch.long,
+                    device=route_logits.device,
+                )
+            )
+
+    if not logits_list:
+        return zero, None, None
+
+    aligned_logits = torch.cat(logits_list, dim=0)
+    aligned_targets = torch.cat(target_list, dim=0)
+    class_counts = torch.bincount(aligned_targets, minlength=num_routes).to(aligned_logits.dtype)
+    present = class_counts > 0
+    class_weight = torch.zeros((num_routes,), dtype=aligned_logits.dtype, device=aligned_logits.device)
+    class_weight[present] = aligned_targets.numel() / (
+        present.sum().to(aligned_logits.dtype) * class_counts[present]
+    )
+    loss = F.cross_entropy(
+        aligned_logits,
+        aligned_targets,
+        reduction="mean",
+        weight=class_weight,
+    )
+    valid_mask = torch.ones_like(aligned_targets, dtype=torch.bool)
+    return loss, aligned_targets, valid_mask
+
+
 def route_structure_loss(
     img_any_prob: Optional[torch.Tensor],
     pc_any_prob: Optional[torch.Tensor],
@@ -542,21 +715,40 @@ def compute_losses(
     else:
         pc_bce = pc_dice = pc_total = zero
 
-    # ---------- 语言模型 CE 损失 ----------
-    ce = output_dict.get("ce_loss", zero)
-    if not isinstance(ce, torch.Tensor):
-        ce = torch.tensor(float(ce), device=device)
-
-    # ---------- Router 损失 ----------
+    # ---------- 语言模型 CE 与 Router 损失 ----------
+    # generate 阶段的 token 序列长度/模板可能与 GT 不一致，因此不能沿用训练阶段
+    # 的绝对 next-token 位置对齐；这里切换到按路由类别分组后的顺序对齐。
     route_logits = output_dict.get("route_logits")
     labels = output_dict.get("labels", input_dict.get("labels"))
     placeholder_id_to_task_id = output_dict.get("placeholder_id_to_task_id")
-    route_ce, route_targets, route_valid = route_supervision_loss(
-        route_logits=route_logits,
-        labels=labels,
-        placeholder_id_to_task_id=placeholder_id_to_task_id,
-        device=device,
-    )
+    is_generate_loss = output_dict.get("generated_token_ids") is not None
+
+    if is_generate_loss:
+        # generate 输出先按 text/img/pc 路由类别拆分，再在类别内部按顺序和 GT 对齐。
+        ce = grouped_generate_text_ce_loss(
+            generated_logits=output_dict.get("generated_logits"),
+            hard_route=output_dict.get("hard_route"),
+            labels=labels,
+            placeholder_id_to_task_id=placeholder_id_to_task_id,
+            device=device,
+        )
+        route_ce, route_targets, route_valid = grouped_generate_route_supervision_loss(
+            route_logits=route_logits,
+            hard_route=output_dict.get("hard_route"),
+            labels=labels,
+            placeholder_id_to_task_id=placeholder_id_to_task_id,
+            device=device,
+        )
+    else:
+        ce = output_dict.get("ce_loss", zero)
+        if not isinstance(ce, torch.Tensor):
+            ce = torch.tensor(float(ce), device=device)
+        route_ce, route_targets, route_valid = route_supervision_loss(
+            route_logits=route_logits,
+            labels=labels,
+            placeholder_id_to_task_id=placeholder_id_to_task_id,
+            device=device,
+        )
 
     route_exist, route_sparse = route_structure_loss(
         img_any_prob=output_dict.get("img_any_prob"),

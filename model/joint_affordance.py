@@ -475,6 +475,8 @@ class JointAffordanceModel(nn.Module):
             "pc_query_mask": pc_query_mask,
             "generated_token_ids": generated_token_ids,
             "generated_ids": mllm_out.get("generated_ids"),
+            "generated_logits": mllm_out.get("step_logits"),
+            "hard_route": hard_route,
             "labels": labels,
             "attention_mask": attention_mask,
             "ce_loss": zero_loss,
@@ -663,6 +665,7 @@ class JointAffordanceModel(nn.Module):
             "token_ids": route_out["routed_token_ids"],
             "img_query_mask": route_out.get("img_query_mask"),
             "pc_query_mask": route_out.get("pc_query_mask"),
+            "hard_route": route_out.get("hard_route"),
             "labels": model_labels,
             "attention_mask": model_attention_mask,
             # 语言模型交叉熵损失（若未提供 labels 或模型未返回 loss，则为 None）
