@@ -692,7 +692,6 @@ def main():
                     "sample_id": input_dict.get("sample_id")[i],
                     "obj_type": input_dict.get("obj_type")[i],
                     "aff_type": input_dict.get("aff_type")[i],
-                    "inference_mode": args.inference_mode,
                     "text_id": src_ids.get("ins_id", ""),
                     "img_id": src_ids.get("img_id", ""),
                     "pc_id": src_ids.get("pc_id", ""),
@@ -757,6 +756,42 @@ def main():
                     record["aff_token_names"] = ""
 
                 # ---- 逐样本 2D/3D 指标（与总体一致：giou_2d, ciou_2d, kld/sim/nss_2d, iou_3d=aiou20 等）----
+                # 使用实际输入 decoder 的 query 覆盖旧的 hard-route aff token 记录。
+                record["img_query_count"] = 0
+                record["pc_query_count"] = 0
+                record["img_query_fallback_count"] = 0
+                record["pc_query_fallback_count"] = 0
+                decoder_query_pairs = output_dict.get("decoder_query_pairs")
+                if decoder_query_pairs is not None and i < len(decoder_query_pairs) and lm_head is not None:
+                    query_pairs_i = decoder_query_pairs[i]
+                    if query_pairs_i:
+                        emb_stack = torch.stack([p[1] for p in query_pairs_i], dim=0)
+                        emb_stack = emb_stack.to(device=next(lm_head.parameters()).device, dtype=next(lm_head.parameters()).dtype)
+                        query_logits = lm_head(emb_stack)
+                        query_ids = query_logits.argmax(dim=-1).detach().cpu().tolist()
+                        query_tokens = [tokenizer.convert_ids_to_tokens(int(tid)) for tid in query_ids]
+                        query_infos = []
+                        for (branch, _emb, is_fallback), tok, tid in zip(query_pairs_i, query_tokens, query_ids):
+                            branch = str(branch)
+                            is_fallback = bool(is_fallback)
+                            if branch == "img":
+                                record["img_query_count"] += 1
+                                record["img_query_fallback_count"] += int(is_fallback)
+                            elif branch == "pc":
+                                record["pc_query_count"] += 1
+                                record["pc_query_fallback_count"] += int(is_fallback)
+                            query_infos.append(
+                                {
+                                    "branch": branch,
+                                    "token": tok,
+                                    "id": int(tid),
+                                    "fallback": is_fallback,
+                                }
+                            )
+                        record["aff_token_names"] = json.dumps(query_infos, ensure_ascii=False)
+                    else:
+                        record["aff_token_names"] = ""
+
                 sample_metrics = compute_sample_metrics(
                     output_dict, input_dict, i,
                     threshold_2d=threshold_2d, threshold_3d=threshold_3d,
@@ -832,9 +867,10 @@ def main():
     sample_records.sort(key=lambda r: r["sample_id"])
     csv_fields = [
         "sample_id", "obj_type", "aff_type",
-        "inference_mode", "text_id", "img_id", "pc_id",
+        "text_id", "img_id", "pc_id",
         "pred_token_ids", "pred_text", "gt_text",
         "aff_token_names",
+        "img_query_count", "pc_query_count", "img_query_fallback_count", "pc_query_fallback_count",
         "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d",
         "iou_3d", "auc_3d", "mae_3d", "sim_3d",
     ]

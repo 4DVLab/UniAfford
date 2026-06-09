@@ -159,7 +159,7 @@ class JointAffordanceModel(nn.Module):
         route_probs: Optional[torch.Tensor],
         route_idx: Optional[int],
         sample_available: Optional[torch.Tensor],
-    ) -> Tuple[torch.Tensor, torch.Tensor, int]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """为 generate 阶段缺失的分支 query 补充最高路由概率的 hidden state。
 
         Args:
@@ -171,7 +171,8 @@ class JointAffordanceModel(nn.Module):
             sample_available: 当前样本是否具备该模态输入，形状为 ``[B]``。
 
         Returns:
-            Tuple[Tensor, Tensor, int]: fallback 后的 query、query mask，以及实际补充的样本数。
+            Tuple[Tensor, Tensor, Tensor, int]: fallback 后的 query、query mask、
+            fallback 位置 mask，以及实际补充的样本数。
         """
         if (
             query_tokens is None
@@ -180,11 +181,12 @@ class JointAffordanceModel(nn.Module):
             or route_probs is None
             or route_idx is None
         ):
-            return query_tokens, query_mask, 0
+            fallback_mask = torch.zeros_like(query_mask) if query_mask is not None else None
+            return query_tokens, query_mask, fallback_mask, 0
         if query_tokens.dim() != 3 or query_mask.dim() != 2 or branch_token_emb.dim() != 3:
-            return query_tokens, query_mask, 0
+            return query_tokens, query_mask, torch.zeros_like(query_mask), 0
         if route_probs.dim() != 3 or route_probs.shape[:2] != branch_token_emb.shape[:2]:
-            return query_tokens, query_mask, 0
+            return query_tokens, query_mask, torch.zeros_like(query_mask), 0
 
         batch_size = min(query_tokens.shape[0], query_mask.shape[0], branch_token_emb.shape[0])
         if sample_available is None:
@@ -194,6 +196,7 @@ class JointAffordanceModel(nn.Module):
 
         out_tokens = query_tokens.clone()
         out_mask = query_mask.clone()
+        fallback_mask = torch.zeros_like(query_mask)
         fallback_count = 0
         for batch_idx in range(batch_size):
             if not bool(available[batch_idx].item()):
@@ -203,8 +206,119 @@ class JointAffordanceModel(nn.Module):
             best_pos = int(route_probs[batch_idx, :, int(route_idx)].argmax().item())
             out_tokens[batch_idx, 0, :] = branch_token_emb[batch_idx, best_pos, :].to(out_tokens.dtype)
             out_mask[batch_idx, 0] = True
+            fallback_mask[batch_idx, 0] = True
             fallback_count += 1
-        return out_tokens, out_mask, fallback_count
+        return out_tokens, out_mask, fallback_mask, fallback_count
+
+    @staticmethod
+    def _build_decoder_query_pairs(
+        img_query_tokens: Optional[torch.Tensor],
+        img_query_mask: Optional[torch.Tensor],
+        img_fallback_mask: Optional[torch.Tensor],
+        pc_query_tokens: Optional[torch.Tensor],
+        pc_query_mask: Optional[torch.Tensor],
+        pc_fallback_mask: Optional[torch.Tensor],
+    ) -> List[List[Tuple[str, torch.Tensor, bool]]]:
+        """记录实际输入 decoder 的 query，用于验证表分析。
+
+        Args:
+            img_query_tokens: 2D decoder 使用的 query，形状为 ``[B, K_img, C]``。
+            img_query_mask: 2D query 是否有效。
+            img_fallback_mask: 2D query 是否由 fallback 补充。
+            pc_query_tokens: 3D decoder 使用的 query，形状为 ``[B, K_pc, C]``。
+            pc_query_mask: 3D query 是否有效。
+            pc_fallback_mask: 3D query 是否由 fallback 补充。
+
+        Returns:
+            List[List[Tuple[str, Tensor, bool]]]: 每个样本的实际 decoder query 列表，
+            tuple 依次为分支名、query embedding、是否 fallback。
+        """
+        batch_size = 0
+        for tensor in (img_query_tokens, pc_query_tokens):
+            if isinstance(tensor, torch.Tensor):
+                batch_size = max(batch_size, int(tensor.shape[0]))
+        pairs: List[List[Tuple[str, torch.Tensor, bool]]] = [[] for _ in range(batch_size)]
+
+        def _append_branch(branch: str, tokens, mask, fallback_mask):
+            if tokens is None or mask is None:
+                return
+            cur_bsz = min(batch_size, int(tokens.shape[0]), int(mask.shape[0]))
+            fallback = torch.zeros_like(mask) if fallback_mask is None else fallback_mask
+            for batch_idx in range(cur_bsz):
+                valid_pos = torch.nonzero(mask[batch_idx].bool(), as_tuple=False).view(-1)
+                for pos in valid_pos.tolist():
+                    is_fallback = bool(fallback[batch_idx, pos].item()) if pos < fallback.shape[1] else False
+                    pairs[batch_idx].append((branch, tokens[batch_idx, pos, :], is_fallback))
+
+        _append_branch("img", img_query_tokens, img_query_mask, img_fallback_mask)
+        _append_branch("pc", pc_query_tokens, pc_query_mask, pc_fallback_mask)
+        return pairs
+
+    @staticmethod
+    def _build_decoder_query_hidden_pairs(
+        hidden_states: torch.Tensor,
+        hard_route: torch.Tensor,
+        attention_mask: Optional[torch.Tensor],
+        route_probs: Optional[torch.Tensor],
+        img_route_idx: Optional[int],
+        img_fallback_mask: Optional[torch.Tensor],
+        pc_route_idx: Optional[int],
+        pc_fallback_mask: Optional[torch.Tensor],
+    ) -> List[List[Tuple[str, torch.Tensor, bool]]]:
+        """记录实际 decoder query 对应的原始 LLM hidden state。
+
+        Args:
+            hidden_states: generate 每一步的原始 LLM hidden，形状为 ``[B, T, C]``。
+            hard_route: generate 每一步的离散路由结果，形状为 ``[B, T]``。
+            attention_mask: generate step 是否有效的掩码，形状为 ``[B, T]``。
+            route_probs: generate 每一步的路由概率，形状为 ``[B, T, R]``。
+            img_route_idx: img 分支在 router 中的类别 id。
+            img_fallback_mask: img query 是否由 fallback 补充，形状为 ``[B, K_img]``。
+            pc_route_idx: pc 分支在 router 中的类别 id。
+            pc_fallback_mask: pc query 是否由 fallback 补充，形状为 ``[B, K_pc]``。
+
+        Returns:
+            List[List[Tuple[str, Tensor, bool]]]: 每个样本的 query 记录，tuple 依次为
+            分支名、投影前的 LLM hidden state、是否 fallback。
+        """
+        if hidden_states is None or hard_route is None:
+            return []
+        batch_size, seq_len = hidden_states.shape[:2]
+        pairs: List[List[Tuple[str, torch.Tensor, bool]]] = [[] for _ in range(batch_size)]
+        if attention_mask is None:
+            valid_mask = torch.ones((batch_size, seq_len), dtype=torch.bool, device=hidden_states.device)
+        else:
+            valid_mask = attention_mask.bool().to(hidden_states.device)
+
+        def _append_branch(branch: str, route_idx: Optional[int], fallback_mask: Optional[torch.Tensor]):
+            if route_idx is None:
+                return
+            for batch_idx in range(batch_size):
+                route_pos = torch.nonzero(
+                    hard_route[batch_idx].eq(int(route_idx)) & valid_mask[batch_idx],
+                    as_tuple=False,
+                ).view(-1)
+                for pos in route_pos.tolist():
+                    pairs[batch_idx].append((branch, hidden_states[batch_idx, pos, :], False))
+
+                has_fallback = (
+                    fallback_mask is not None
+                    and batch_idx < fallback_mask.shape[0]
+                    and bool(fallback_mask[batch_idx].any().item())
+                )
+                if has_fallback and route_probs is not None:
+                    # fallback query 由最高 route probability 的 step 投影得到；
+                    # 这里用于语言空间反投影，因此记录投影前的原始 hidden state。
+                    branch_probs = route_probs[batch_idx, :, int(route_idx)].masked_fill(
+                        ~valid_mask[batch_idx],
+                        float("-inf"),
+                    )
+                    best_pos = int(branch_probs.argmax().item())
+                    pairs[batch_idx].append((branch, hidden_states[batch_idx, best_pos, :], True))
+
+        _append_branch("img", img_route_idx, img_fallback_mask)
+        _append_branch("pc", pc_route_idx, pc_fallback_mask)
+        return pairs
 
     def __init__(self, config: Optional[JointAffordanceConfig] = None):
         super().__init__()
@@ -476,8 +590,15 @@ class JointAffordanceModel(nn.Module):
             route_mask=None,
         )
         fallback_stats = {"img_query_fallback_count": 0, "pc_query_fallback_count": 0}
+        img_query_fallback_mask = torch.zeros_like(img_query_mask)
+        pc_query_fallback_mask = torch.zeros_like(pc_query_mask)
         if generate_query_fallback and route_probs is not None:
-            img_query_tokens, img_query_mask, fallback_stats["img_query_fallback_count"] = self._apply_missing_query_fallback(
+            (
+                img_query_tokens,
+                img_query_mask,
+                img_query_fallback_mask,
+                fallback_stats["img_query_fallback_count"],
+            ) = self._apply_missing_query_fallback(
                 query_tokens=img_query_tokens,
                 query_mask=img_query_mask,
                 branch_token_emb=img_token_emb,
@@ -485,7 +606,12 @@ class JointAffordanceModel(nn.Module):
                 route_idx=self.router.route_img_idx,
                 sample_available=img_available,
             )
-            pc_query_tokens, pc_query_mask, fallback_stats["pc_query_fallback_count"] = self._apply_missing_query_fallback(
+            (
+                pc_query_tokens,
+                pc_query_mask,
+                pc_query_fallback_mask,
+                fallback_stats["pc_query_fallback_count"],
+            ) = self._apply_missing_query_fallback(
                 query_tokens=pc_query_tokens,
                 query_mask=pc_query_mask,
                 branch_token_emb=pc_token_emb,
@@ -493,6 +619,16 @@ class JointAffordanceModel(nn.Module):
                 route_idx=self.router.route_pc_idx,
                 sample_available=pc_available,
             )
+        decoder_query_pairs = self._build_decoder_query_hidden_pairs(
+            hidden_states=hidden_states,
+            hard_route=hard_route,
+            attention_mask=generated_attention,
+            route_probs=route_probs,
+            img_route_idx=self.router.route_img_idx,
+            img_fallback_mask=img_query_fallback_mask,
+            pc_route_idx=self.router.route_pc_idx,
+            pc_fallback_mask=pc_query_fallback_mask,
+        )
         routed_token_ids = self.router.build_routed_token_ids(
             base_token_ids=generated_token_ids,
             hard_route=hard_route,
@@ -556,6 +692,7 @@ class JointAffordanceModel(nn.Module):
             "ce_loss": zero_loss,
             "output": mllm_out.get("output") if return_mllm_output else None,
             "aff_token_pairs": aff_token_pairs,
+            "decoder_query_pairs": decoder_query_pairs,
             "route_logits": route_logits,
             "route_probs": route_probs,
             "img_any_prob": route_out["img_any_prob"],
