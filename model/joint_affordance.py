@@ -37,7 +37,10 @@ class JointAffordanceModel(nn.Module):
         if logits.shape[0] != query_mask.shape[0] or logits.shape[1] != query_mask.shape[1]:
             return logits
         view_shape = list(query_mask.shape) + [1] * (logits.dim() - 2)
-        return logits * query_mask.bool().view(*view_shape).to(logits.dtype)
+        valid_mask = query_mask.bool().view(*view_shape)
+        # 无效 query 仍保持 logits 语义，但 sigmoid 后应接近 0，避免低阈值下变成整图正样本。
+        invalid_logits = torch.full_like(logits, -30.0)
+        return torch.where(valid_mask, logits, invalid_logits)
 
     def _sync_point_decoder_config(self):
         point_decoder_cfg = self.config.point_decoder

@@ -133,10 +133,11 @@ class ImageHiddenStateDecoder(nn.Module):
             original_size=original_size,
         )
         pred_masks = pred_masks[:, 0].view(bsz, num_queries, *pred_masks.shape[-2:])
+        invalid_logits = torch.full_like(pred_masks, -30.0)  # 用很小的负数mask住无效预测，sigmoid之后接近0
         pred_masks = torch.where(
             query_mask[:, :, None, None],
             pred_masks,
-            torch.zeros_like(pred_masks),
+            invalid_logits,
         )
         return pred_masks[:, 0] if single_query else pred_masks
 
