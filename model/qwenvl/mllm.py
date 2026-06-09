@@ -152,8 +152,10 @@ class MLLMBackbone(nn.Module):
         step_route_probs_history = []
         step_token_history = []
         step_logits_history = []
+        step_active_history = []
 
         for _ in range(int(max_new_tokens)):
+            step_active = unfinished.clone()
             position_ids = self._compute_multimodal_position_ids(
                 input_ids=generated_ids,
                 attention_mask=attention_mask,
@@ -248,6 +250,8 @@ class MLLMBackbone(nn.Module):
             step_route_probs_history.append(route_probs[:, 0, :].detach())
             step_token_history.append(next_ids.detach())
             step_logits_history.append(step_logits.detach())
+            # 记录该 step 生成前样本是否尚未结束，避免 EOS 后的 pad step 被后续 router 当成有效 query。
+            step_active_history.append(step_active.detach())
 
             past_key_values = getattr(outputs, "past_key_values", None)
             generated_ids = torch.cat([generated_ids, next_ids[:, None]], dim=-1)
@@ -267,6 +271,7 @@ class MLLMBackbone(nn.Module):
             "step_route_probs": torch.stack(step_route_probs_history, dim=1) if step_route_probs_history else None,
             "step_token_ids": torch.stack(step_token_history, dim=1) if step_token_history else None,
             "step_logits": torch.stack(step_logits_history, dim=1) if step_logits_history else None,
+            "step_attention_mask": torch.stack(step_active_history, dim=1) if step_active_history else None,
             "generated_ids": generated_ids,
             "prompt_input_ids": prompt_ids,
             "prompt_attention_mask": prompt_attention,
@@ -947,5 +952,6 @@ class MLLMBackbone(nn.Module):
             "step_routes": trace.get("step_routes"),
             "step_route_logits": trace.get("step_route_logits"),
             "step_route_probs": trace.get("step_route_probs"),
+            "step_attention_mask": trace.get("step_attention_mask"),
             "step_logits": trace.get("step_logits"),
         }

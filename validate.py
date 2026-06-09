@@ -668,7 +668,8 @@ def main():
                 )
 
             pred_token_ids_batch = output_dict.get("generated_token_ids")
-            if pred_token_ids_batch is None:
+            pred_is_generated = pred_token_ids_batch is not None
+            if not pred_is_generated:
                 pred_token_ids_batch = output_dict.get("token_ids")
             if pred_token_ids_batch is not None:
                 pred_token_ids_batch = pred_token_ids_batch.detach().cpu()
@@ -710,11 +711,18 @@ def main():
                 gt_ids = labels_i[supervised_pos].tolist()
                 record["gt_text"] = tokenizer.decode(gt_ids, skip_special_tokens=False)
 
-                # 预测文本：validate 现在使用 prompt-only generate，直接解码 generated_token_ids。
-                # 这里不再按 labels 左移取 forward logits，避免 GT answer 泄露后的 teacher-forcing 诊断值混入推理结果。
+                # 预测文本：generate 直接解码新生成 token；forward 则按 next-token 规则对齐到 answer 监督位。
+                # 注意 forward 的 pred_text 只用于 teacher-forcing 诊断，不代表真实无泄露生成结果。
                 if pred_token_ids_batch is not None:
                     pred_ids_i = pred_token_ids_batch[i]
-                    pred_answer_ids = pred_ids_i.tolist()
+                    if pred_is_generated:
+                        pred_answer_ids = pred_ids_i.tolist()
+                    else:
+                        # forward logits[t] 预测 labels[t+1]，因此只记录 answer 监督位左移一格后的预测。
+                        pred_positions = supervised_pos - 1
+                        pred_positions = pred_positions[pred_positions >= 0]
+                        pred_positions = pred_positions[pred_positions < pred_ids_i.shape[0]]
+                        pred_answer_ids = pred_ids_i[pred_positions].tolist()
                     pad_id = getattr(tokenizer, "pad_token_id", None)
                     eos_id = getattr(tokenizer, "eos_token_id", None)
                     if pad_id is not None:

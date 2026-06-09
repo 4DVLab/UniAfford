@@ -206,7 +206,10 @@ class JointAffordanceModel(nn.Module):
                 continue
             if bool(out_mask[batch_idx].any().item()):
                 continue
-            best_pos = int(route_probs[batch_idx, :, int(route_idx)].argmax().item())
+            branch_scores = route_probs[batch_idx, :, int(route_idx)]
+            if not bool(torch.isfinite(branch_scores).any().item()):
+                continue
+            best_pos = int(branch_scores.argmax().item())
             out_tokens[batch_idx, 0, :] = branch_token_emb[batch_idx, best_pos, :].to(out_tokens.dtype)
             out_mask[batch_idx, 0] = True
             fallback_mask[batch_idx, 0] = True
@@ -577,11 +580,25 @@ class JointAffordanceModel(nn.Module):
         route_logits = mllm_out.get("step_route_logits")
         route_probs = mllm_out.get("step_route_probs")
         generated_token_ids = mllm_out.get("generated_token_ids")
-        generated_attention = torch.ones(
-            hidden_states.shape[:2],
-            dtype=torch.bool,
-            device=hidden_states.device,
-        )
+        generated_attention = mllm_out.get("step_attention_mask")
+        if generated_attention is None:
+            generated_attention = torch.ones(
+                hidden_states.shape[:2],
+                dtype=torch.bool,
+                device=hidden_states.device,
+            )
+        else:
+            generated_attention = generated_attention.bool().to(hidden_states.device)
+            if generated_attention.shape != hidden_states.shape[:2]:
+                generated_attention = torch.ones(
+                    hidden_states.shape[:2],
+                    dtype=torch.bool,
+                    device=hidden_states.device,
+                )
+        fallback_route_probs = route_probs
+        if route_probs is not None:
+            # fallback 只能从尚未结束的生成 step 中选择，避免 EOS 后 pad step 的 route 污染 query。
+            fallback_route_probs = route_probs.masked_fill(~generated_attention[:, :, None], float("-inf"))
 
         img_token_emb = self.router.img_branch_head(hidden_states)
         pc_token_emb = self.router.pc_branch_head(hidden_states)
@@ -595,7 +612,7 @@ class JointAffordanceModel(nn.Module):
         fallback_stats = {"img_query_fallback_count": 0, "pc_query_fallback_count": 0}
         img_query_fallback_mask = torch.zeros_like(img_query_mask)
         pc_query_fallback_mask = torch.zeros_like(pc_query_mask)
-        if generate_query_fallback and route_probs is not None:
+        if generate_query_fallback and fallback_route_probs is not None:
             (
                 img_query_tokens,
                 img_query_mask,
@@ -605,7 +622,7 @@ class JointAffordanceModel(nn.Module):
                 query_tokens=img_query_tokens,
                 query_mask=img_query_mask,
                 branch_token_emb=img_token_emb,
-                route_probs=route_probs,
+                route_probs=fallback_route_probs,
                 route_idx=self.router.route_img_idx,
                 sample_available=img_available,
             )
@@ -618,7 +635,7 @@ class JointAffordanceModel(nn.Module):
                 query_tokens=pc_query_tokens,
                 query_mask=pc_query_mask,
                 branch_token_emb=pc_token_emb,
-                route_probs=route_probs,
+                route_probs=fallback_route_probs,
                 route_idx=self.router.route_pc_idx,
                 sample_available=pc_available,
             )
