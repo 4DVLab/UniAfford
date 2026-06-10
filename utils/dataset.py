@@ -595,6 +595,8 @@ class JointAffordanceTorchDataset(Dataset):
         result["data_source_id"] = data.get("data_source_id", {})
 
         question, answer = self._build_text(obj_type, aff_type, has_image, has_pc, data.get("ins") or "")
+        result["text_prompt"] = question
+        result["gt_answer"] = answer
 
         # ZeRO-3 兼容：始终给 Qwen 提供一张图片
         if has_image:
@@ -753,6 +755,7 @@ def joint_affordance_collate_fn(
     images_list, img_gt_masks = [], []
     point_clouds_list, pc_gt_masks = [], []
     sample_ids, obj_types, aff_types, data_source_ids = [], [], [], []
+    text_prompts, gt_answers = [], []
     original_size_per_sample = []
     for sample in batch:
         # 文本与 Qwen3-VL 位置编码
@@ -776,6 +779,8 @@ def joint_affordance_collate_fn(
         obj_types.append(sample.get("obj_type"))
         aff_types.append(sample.get("aff_type"))
         data_source_ids.append(sample.get("data_source_id", {}))
+        text_prompts.append(sample.get("text_prompt", ""))
+        gt_answers.append(sample.get("gt_answer", ""))
         original_size_per_sample.append(sample.get("original_size"))
 
     # -------- 2) 文本输入 padding --------
@@ -795,6 +800,8 @@ def joint_affordance_collate_fn(
         "obj_type": obj_types,
         "aff_type": aff_types,
         "data_source_id": data_source_ids,
+        "text_prompt": text_prompts,
+        "gt_answer": gt_answers,
     }
 
     # -------- 3) Qwen3-VL 视觉输入补齐（保证 ZeRO-3 各 rank 统一前向）--------

@@ -72,6 +72,8 @@ def parse_args():
                         help="DataLoader worker 数量（默认使用 TrainingConfig.workers）")
     parser.add_argument("--save_predictions", action="store_true",
                         help="是否保存预测结果（2D mask PNG + 3D CSV）")
+    parser.add_argument("--save_binary_predictions", action="store_true",
+                        help="保存预测时按配置阈值写出二值 mask；默认保存 sigmoid 概率分布。")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="预测结果保存目录（默认：./validation_output）")
     parser.add_argument("--precision", type=str, default=None, choices=["fp32", "bf16", "fp16"],
@@ -199,6 +201,9 @@ def save_batch_predictions(
     batch_idx: int,
     output_dir: str,
     batch_start: Optional[int] = None,
+    binary_masks: bool = False,
+    threshold_2d: float = 0.5,
+    threshold_3d: float = 0.5,
 ):
     """
     保存一个 batch 的预测结果（2D PNG + 3D CSV），适配新版输出字段：
@@ -248,10 +253,15 @@ def save_batch_predictions(
 
     def _to_uint8_mask(mask_tensor: torch.Tensor) -> np.ndarray:
         mask = _normalize_mask(mask_tensor)
+        if binary_masks:
+            mask = (mask > float(threshold_2d)).to(mask.dtype)
         return mask.mul(255.0).round().to(torch.uint8).cpu().numpy()
 
-    def _to_float_mask(mask_tensor: torch.Tensor) -> np.ndarray:
-        return _normalize_mask(mask_tensor).cpu().numpy()
+    def _to_float_mask(mask_tensor: torch.Tensor, threshold: float) -> np.ndarray:
+        mask = _normalize_mask(mask_tensor)
+        if binary_masks:
+            mask = (mask > float(threshold)).to(mask.dtype)
+        return mask.cpu().numpy()
 
     def _save_pointcloud_csv(file_path: str, points: np.ndarray, mask: np.ndarray, label: str):
         header = ["x", "y", "z", label]
@@ -339,7 +349,7 @@ def save_batch_predictions(
             if points.ndim == 3 and points.shape[0] == 3:
                 points = np.transpose(points, (1, 0))
 
-            mask_3d = _to_float_mask(pred_mask_3d).reshape(-1)
+            mask_3d = _to_float_mask(pred_mask_3d, threshold_3d).reshape(-1)
             pc_lengths = input_dict.get("pc_valid_lengths")
             if isinstance(pc_lengths, torch.Tensor) and pc_lengths.shape[0] > i:
                 num_points = int(pc_lengths[i].item())
@@ -696,6 +706,7 @@ def main():
                     "text_id": src_ids.get("ins_id", ""),
                     "img_id": src_ids.get("img_id", ""),
                     "pc_id": src_ids.get("pc_id", ""),
+                    "text_prompt": input_dict.get("text_prompt", [""] * batch_size)[i],
                 }
 
                 # GT 文本：从 labels 中提取非 IGNORE 的 token ids 解码
@@ -826,6 +837,9 @@ def main():
                     output_dict,
                     batch_idx,
                     infer_cfg.output_dir,
+                    binary_masks=args.save_binary_predictions,
+                    threshold_2d=threshold_2d,
+                    threshold_3d=threshold_3d,
                 )
             # 释放当前 batch 的 GPU 张量引用，避免长验证阶段显存碎片累积
             del output_dict, loss_dict, input_dict, pred_token_ids_batch
@@ -876,7 +890,7 @@ def main():
     csv_fields = [
         "sample_id", "obj_type", "aff_type",
         "text_id", "img_id", "pc_id",
-        "pred_token_ids", "pred_text", "gt_text",
+        "text_prompt", "pred_token_ids", "pred_text", "gt_text",
         "aff_token_names",
         "img_query_count", "pc_query_count", "img_query_fallback_count", "pc_query_fallback_count",
         "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d",

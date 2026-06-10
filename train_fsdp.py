@@ -794,8 +794,24 @@ def main():
             FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=True),
         ):
             full_state = model_fsdp.state_dict()
-            optim_state = FSDP.optim_state_dict(model_fsdp, optimizer)
+            try:
+                optim_state = FSDP.optim_state_dict(model_fsdp, optimizer)
+            except Exception as exc:
+                optim_state = None
+                if local_rank == 0:
+                    logger.warning(f"保存 FSDP optimizer_state_dict 失败，将尝试保存普通 optimizer 状态: {exc}")
+        scheduler_state = None
+        try:
+            scheduler_state = scheduler.state_dict() if scheduler is not None else None
+        except Exception as exc:
+            if local_rank == 0:
+                logger.warning(f"保存 scheduler_state_dict 失败: {exc}")
         if local_rank == 0:
+            if optim_state is None:
+                try:
+                    optim_state = optimizer.state_dict()
+                except Exception as exc:
+                    logger.warning(f"保存普通 optimizer.state_dict 仍然失败，本次 checkpoint 不含优化器状态: {exc}")
             save_portable_checkpoint(
                 os.path.join(ckpt_dir, filename),
                 model_state_dict=full_state,
@@ -803,7 +819,7 @@ def main():
                 training_cfg=training_configs,
                 asset_bundle=portable_asset_bundle,
                 optimizer_state_dict=optim_state,
-                scheduler=scheduler,
+                scheduler_state_dict=scheduler_state,
                 lr_dict=get_current_lr(scheduler, optimizer),
                 logger=logger,
             )
@@ -823,25 +839,6 @@ def main():
             val_loader, model_fsdp, training_configs, epoch, writer, logger, local_rank,
             loss_kwargs=loss_kwargs,
         )
-        if (
-            getattr(training_configs, "auto_select_mask_threshold", True)
-            and getattr(training_configs, "write_selected_mask_threshold_to_config", True)
-        ):
-            updated_threshold = False
-            if "best_mask_threshold_2d" in val_results:
-                training_configs.mask_threshold_2d = float(val_results["best_mask_threshold_2d"])
-                updated_threshold = True
-            if "best_mask_threshold_3d" in val_results:
-                training_configs.mask_threshold_3d = float(val_results["best_mask_threshold_3d"])
-                updated_threshold = True
-            if updated_threshold and local_rank == 0:
-                training_configs.save_json(config_json_path, include_deepspeed=False)
-                logger.info(
-                    "已将验证集最优预测阈值写回配置: "
-                    f"mask_threshold_2d={training_configs.mask_threshold_2d:.4f}, "
-                    f"mask_threshold_3d={training_configs.mask_threshold_3d:.4f}, "
-                    f"path={config_json_path}"
-                )
         last_val_metrics = _to_serializable_metrics(val_results)
 
         monitor = float(val_results.get("loss", train_results.get("loss", float("inf"))))
@@ -873,7 +870,27 @@ def main():
                 "val_metrics": last_val_metrics,
             }
             if is_best_save:
+                best_threshold_updated = False
+                if (
+                    getattr(training_configs, "auto_select_mask_threshold", True)
+                    and getattr(training_configs, "write_selected_mask_threshold_to_config", True)
+                ):
+                    # 只有 best checkpoint 使用当前 epoch 的最优阈值，避免 latest 覆盖 best 配置。
+                    if "best_mask_threshold_2d" in val_results:
+                        training_configs.mask_threshold_2d = float(val_results["best_mask_threshold_2d"])
+                        best_threshold_updated = True
+                    if "best_mask_threshold_3d" in val_results:
+                        training_configs.mask_threshold_3d = float(val_results["best_mask_threshold_3d"])
+                        best_threshold_updated = True
                 _save_full_checkpoint("best_fsdp.pth", common_meta)
+                if best_threshold_updated and local_rank == 0:
+                    training_configs.save_json(config_json_path, include_deepspeed=False)
+                    logger.info(
+                        "已将 best checkpoint 对应的验证集最优预测阈值写回配置: "
+                        f"mask_threshold_2d={training_configs.mask_threshold_2d:.4f}, "
+                        f"mask_threshold_3d={training_configs.mask_threshold_3d:.4f}, "
+                        f"path={config_json_path}"
+                    )
                 if local_rank == 0:
                     logger.info(f"Best checkpoint 更新: epoch={best_epoch}, val_loss={best_metric:.6f}")
                 did_save = True
