@@ -39,11 +39,15 @@ class PredictionRun:
         name: 对比图中的列名。
         csv_path: validation_samples.csv 路径。
         prediction_root: validate.py 保存预测结果的目录。
+        threshold_2d: 当前 run 的 2D 预测二值化阈值。
+        threshold_3d: 当前 run 的 3D 预测二值化阈值。
     """
 
     name: str
     csv_path: str
     prediction_root: str
+    threshold_2d: float = 0.5
+    threshold_3d: float = 0.5
 
 
 @dataclass(frozen=True)
@@ -356,6 +360,112 @@ def _read_point_csv(path: str, aff_type: Optional[str] = None) -> Tuple[np.ndarr
     return data[:, :3], data[:, 3 + mask_idx]
 
 
+def _mask_to_prob(mask: np.ndarray) -> np.ndarray:
+    """将 PNG/CSV mask 统一归一化到 [0, 1] 概率范围。
+
+    Args:
+        mask: 输入 mask 数组。
+
+    Returns:
+        float32 概率 mask。
+    """
+
+    prob = np.asarray(mask, dtype=np.float32)
+    if prob.size > 0 and np.nanmax(prob) > 1.0:
+        prob = prob / 255.0
+    return np.clip(prob, 0.0, 1.0)
+
+
+def _binarize_mask(mask: np.ndarray, threshold: float) -> np.ndarray:
+    """按阈值将预测概率 mask 二值化。
+
+    Args:
+        mask: 概率或 uint8 mask。
+        threshold: 二值化阈值。
+
+    Returns:
+        float32 二值 mask，取值为 0/1。
+    """
+
+    return (_mask_to_prob(mask) > float(threshold)).astype(np.float32)
+
+
+def _binary_seg_metrics(pred_binary: np.ndarray, gt_mask: np.ndarray, gt_threshold: float = 0.5) -> Dict[str, float]:
+    """计算二值预测与 GT 的通用分割指标。
+
+    Args:
+        pred_binary: 已二值化的预测 mask。
+        gt_mask: GT mask，可为概率或 uint8。
+        gt_threshold: GT 二值化阈值。
+
+    Returns:
+        指标字典，包含 IoU/intersection/union/MAE/SIM。
+    """
+
+    pred = np.asarray(pred_binary, dtype=np.float32).reshape(-1) > 0.5
+    gt_prob = _mask_to_prob(gt_mask).reshape(-1)
+    gt = gt_prob > float(gt_threshold)
+    intersection = float(np.logical_and(pred, gt).sum())
+    union = float(np.logical_or(pred, gt).sum())
+    iou = intersection / (union + 1e-8) if union > 0 else 0.0
+    pred_float = pred.astype(np.float32)
+    gt_float = gt.astype(np.float32)
+    mae = float(np.mean(np.abs(pred_float - gt_float))) if pred_float.size else 0.0
+    pred_sum = float(pred_float.sum())
+    gt_sum = float(gt_float.sum())
+    if pred_sum > 1e-12 and gt_sum > 1e-12:
+        sim = float(np.minimum(pred_float / pred_sum, gt_float / gt_sum).sum())
+    else:
+        sim = 0.0
+    return {
+        "iou": round(iou, 6),
+        "intersection": round(intersection, 6),
+        "union": round(union, 6),
+        "mae": round(mae, 6),
+        "sim": round(sim, 6),
+    }
+
+
+def _image_saliency_metrics(pred_binary: np.ndarray, gt_mask: np.ndarray, gt_threshold: float = 0.5) -> Dict[str, float]:
+    """计算 2D 二值预测的补充 saliency 指标。
+
+    Args:
+        pred_binary: 已二值化的 2D 预测 mask。
+        gt_mask: 2D GT mask。
+        gt_threshold: GT 二值化阈值。
+
+    Returns:
+        KLD、NSS 和 P@IoU 指标。
+    """
+
+    pred = np.asarray(pred_binary, dtype=np.float32)
+    gt = (_mask_to_prob(gt_mask) > float(gt_threshold)).astype(np.float32)
+    pred_flat = pred.reshape(-1)
+    gt_flat = gt.reshape(-1)
+    pred_sum = pred_flat.sum()
+    gt_sum = gt_flat.sum()
+    eps = 1e-12
+    pred_norm = pred_flat / (pred_sum + eps)
+    gt_norm = gt_flat / (gt_sum + eps)
+    kld = float((gt_norm * (np.log(gt_norm + eps) - np.log(pred_norm + eps))).sum())
+    pred_std = float(pred_flat.std())
+    if pred_std > 1e-8 and gt_flat.sum() > 0:
+        pred_z = (pred_flat - float(pred_flat.mean())) / (pred_std + 1e-8)
+        nss = float((pred_z * gt_flat).sum() / (gt_flat.sum() + 1e-8))
+    else:
+        nss = 0.0
+    base = _binary_seg_metrics(pred, gt, gt_threshold=0.5)
+    iou = base["iou"]
+    p_thresholds = np.arange(0.5, 0.96, 0.05)
+    p_values = (iou > p_thresholds).astype(np.float32)
+    return {
+        "kld": round(kld, 6),
+        "nss": round(nss, 6),
+        "p50": round(float(p_values[0]), 6),
+        "p50_95": round(float(p_values.mean()), 6),
+    }
+
+
 def _load_render_config(config_path: Optional[str]) -> Dict[str, Any]:
     """加载 batch_render 风格的渲染配置。
 
@@ -426,6 +536,7 @@ def _render_image_cells(
     render_cfg: Dict[str, Any],
     cell_size: Tuple[int, int],
     background_rgb: Sequence[int],
+    gt_threshold_2d: float,
 ) -> Tuple[List[np.ndarray], Dict[str, Any]]:
     """渲染一个 2D 样本对应的一排单元格。
 
@@ -437,6 +548,7 @@ def _render_image_cells(
         render_cfg: 渲染配置。
         cell_size: 占位图尺寸。
         background_rgb: RGB 背景色。
+        gt_threshold_2d: 2D GT 二值化阈值。
 
     Returns:
         ``(cells, manifest_row)``。
@@ -446,7 +558,6 @@ def _render_image_cells(
     image_cfg = render_cfg.get("image", {})
     alpha = float(image_cfg.get("alpha", 0.5))
     color_rgb = tuple(image_cfg.get("color_rgb", [255, 0, 0]))
-    threshold = float(image_cfg.get("threshold", 0.0))
 
     rgb_path = _find_original_rgb_path(dataset_root, key.obj_type, key.source_id)
     gt_mask_path = _find_original_mask_path(dataset_root, key.obj_type, key.aff_type, key.source_id)
@@ -476,13 +587,14 @@ def _render_image_cells(
         gt_cell = _placeholder("missing GT", cell_width, cell_height, background_rgb)
     else:
         gt_mask = cv2.imread(gt_mask_path, cv2.IMREAD_GRAYSCALE)
-        gt_cell = _render_image_overlay_affordance_r1(base_img, gt_mask, alpha=alpha, color_rgb=color_rgb, threshold=threshold)
+        gt_cell = _render_image_overlay_affordance_r1(base_img, gt_mask, alpha=alpha, color_rgb=color_rgb, threshold=gt_threshold_2d)
     cells.append(_add_label(gt_cell, "GT", f"{key.aff_type}"))
 
     for run, index in zip(runs, indices):
         row = index.get(key)
         pred_path = None
         sample_id = None
+        metrics: Dict[str, float] = {}
         if row is None:
             warnings.warn(f"image: {run.name} 缺少对齐记录 {key}")
             pred_cell = _placeholder("missing row", cell_width, cell_height, background_rgb)
@@ -494,9 +606,33 @@ def _render_image_cells(
                 pred_cell = _placeholder("missing pred", cell_width, cell_height, background_rgb)
             else:
                 pred_mask = cv2.imread(pred_path, cv2.IMREAD_GRAYSCALE)
-                pred_cell = _render_image_overlay_affordance_r1(base_img, pred_mask, alpha=alpha, color_rgb=color_rgb, threshold=threshold)
-        row_info["predictions"].append({"run": run.name, "sample_id": sample_id, "mask_path": pred_path})
-        cells.append(_add_label(pred_cell, run.name, f"sample_id={sample_id or 'missing'}"))
+                pred_binary = _binarize_mask(pred_mask, run.threshold_2d)
+                pred_cell = _render_image_overlay_affordance_r1(
+                    base_img,
+                    pred_binary,
+                    alpha=alpha,
+                    color_rgb=color_rgb,
+                    threshold=0.5,
+                )
+                if gt_mask_path is not None:
+                    gt_for_metrics = cv2.imread(gt_mask_path, cv2.IMREAD_GRAYSCALE)
+                    metrics = _binary_seg_metrics(pred_binary, gt_for_metrics, gt_threshold=gt_threshold_2d)
+                    metrics.update(_image_saliency_metrics(pred_binary, gt_for_metrics, gt_threshold=gt_threshold_2d))
+                else:
+                    metrics = {}
+        row_info["predictions"].append(
+            {
+                "run": run.name,
+                "sample_id": sample_id,
+                "mask_path": pred_path,
+                "threshold_2d": run.threshold_2d,
+                "metrics": metrics if row is not None and pred_path is not None else {},
+            }
+        )
+        title = run.name
+        if row is not None and pred_path is not None and metrics:
+            title = f"{run.name} IoU={metrics['iou']:.3f}"
+        cells.append(_add_label(pred_cell, title, f"sample_id={sample_id or 'missing'} | th={run.threshold_2d:.3f}"))
     return cells, row_info
 
 
@@ -508,6 +644,7 @@ def _render_point_cells(
     render_cfg: Dict[str, Any],
     cell_size: Tuple[int, int],
     background_rgb: Sequence[int],
+    gt_threshold_3d: float,
 ) -> Tuple[List[np.ndarray], Dict[str, Any]]:
     """渲染一个 3D 样本对应的一排单元格。
 
@@ -519,6 +656,7 @@ def _render_point_cells(
         render_cfg: 渲染配置。
         cell_size: 占位图尺寸。
         background_rgb: RGB 背景色。
+        gt_threshold_3d: 3D GT 二值化阈值。
 
     Returns:
         ``(cells, manifest_row)``。
@@ -580,6 +718,7 @@ def _render_point_cells(
         row = index.get(key)
         pred_path = None
         sample_id = None
+        metrics: Dict[str, float] = {}
         if row is None:
             warnings.warn(f"point: {run.name} 缺少对齐记录 {key}")
             pred_cell = _placeholder("missing row", cell_width, cell_height, background_rgb)
@@ -592,12 +731,33 @@ def _render_point_cells(
             else:
                 try:
                     pred_points, pred_mask = _read_point_csv(pred_path, row.get("aff_type") or key.aff_type)
-                    pred_cell = _render_point_cloud_static(pred_points, pred_mask, **point_kwargs)
+                    pred_binary = _binarize_mask(pred_mask, run.threshold_3d)
+                    pred_cell = _render_point_cloud_static(pred_points, pred_binary, **point_kwargs)
+                    if original_pc_path is not None:
+                        _, gt_for_metrics = _read_point_csv(original_pc_path, key.aff_type)
+                        if gt_for_metrics is not None and gt_for_metrics.shape[0] == pred_binary.shape[0]:
+                            metrics = _binary_seg_metrics(pred_binary, gt_for_metrics, gt_threshold=gt_threshold_3d)
+                        else:
+                            warnings.warn(
+                                f"point: {run.name} 预测点数与 GT 点数不一致，跳过指标: "
+                                f"key={key}, sample_id={sample_id}"
+                            )
                 except Exception as exc:
                     warnings.warn(f"point: {run.name} 渲染预测失败 {key}, sample_id={sample_id}: {exc}")
                     pred_cell = _placeholder("bad pred", cell_width, cell_height, background_rgb)
-        row_info["predictions"].append({"run": run.name, "sample_id": sample_id, "point_path": pred_path})
-        cells.append(_add_label(pred_cell, run.name, f"sample_id={sample_id or 'missing'}"))
+        row_info["predictions"].append(
+            {
+                "run": run.name,
+                "sample_id": sample_id,
+                "point_path": pred_path,
+                "threshold_3d": run.threshold_3d,
+                "metrics": metrics,
+            }
+        )
+        title = run.name
+        if metrics:
+            title = f"{run.name} IoU={metrics['iou']:.3f}"
+        cells.append(_add_label(pred_cell, title, f"sample_id={sample_id or 'missing'} | th={run.threshold_3d:.3f}"))
     return cells, row_info
 
 
@@ -626,6 +786,53 @@ def _save_row_image(cells: Sequence[np.ndarray], output_path: str, grid_cfg: Dic
     cv2.imwrite(output_path, canvas)
 
 
+def _save_metrics_csv(rows: Sequence[Dict[str, Any]], output_path: str, modality: str) -> None:
+    """将 paired manifest 中的逐 run 指标展开为 CSV。
+
+    Args:
+        rows: paired_paths JSON 中的行记录。
+        output_path: CSV 输出路径。
+        modality: ``image`` 或 ``point``。
+    """
+
+    id_key = "img_id" if modality == "image" else "pc_id"
+    metric_keys = ["iou", "intersection", "union", "mae", "sim", "kld", "nss", "p50", "p50_95"]
+    path_key = "mask_path" if modality == "image" else "point_path"
+    threshold_key = "threshold_2d" if modality == "image" else "threshold_3d"
+    fieldnames = [
+        "modality",
+        "obj_type",
+        "aff_type",
+        id_key,
+        "run",
+        "sample_id",
+        threshold_key,
+        path_key,
+        "output_path",
+    ] + metric_keys
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            for pred in row.get("predictions", []):
+                out = {
+                    "modality": modality,
+                    "obj_type": row.get("obj_type"),
+                    "aff_type": row.get("aff_type"),
+                    id_key: row.get(id_key),
+                    "run": pred.get("run"),
+                    "sample_id": pred.get("sample_id"),
+                    threshold_key: pred.get(threshold_key),
+                    path_key: pred.get(path_key),
+                    "output_path": row.get("output_path"),
+                }
+                metrics = pred.get("metrics") or {}
+                for key in metric_keys:
+                    out[key] = metrics.get(key)
+                writer.writerow(out)
+
+
 def _split_csv_arg(value: Optional[str]) -> Optional[List[str]]:
     """解析逗号分隔参数。
 
@@ -641,13 +848,42 @@ def _split_csv_arg(value: Optional[str]) -> Optional[List[str]]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _build_runs(csv_files: Sequence[str], method_names: Optional[Sequence[str]], roots: Optional[Sequence[str]]) -> List[PredictionRun]:
+def _parse_float_sequence(value: Optional[str], count: int, default: float, name: str) -> List[float]:
+    """解析逗号分隔的浮点序列。
+
+    Args:
+        value: 参数字符串。
+        count: 期望数量。
+        default: 未提供参数时使用的默认值。
+        name: 参数名，用于报错。
+
+    Returns:
+        浮点数列表。
+    """
+
+    if not value:
+        return [float(default)] * count
+    items = [item.strip() for item in value.split(",") if item.strip()]
+    if len(items) != count:
+        raise ValueError(f"{name} 数量必须与 CSV 数量一致: got={len(items)}, expected={count}")
+    return [float(item) for item in items]
+
+
+def _build_runs(
+    csv_files: Sequence[str],
+    method_names: Optional[Sequence[str]],
+    roots: Optional[Sequence[str]],
+    thresholds_2d: Sequence[float],
+    thresholds_3d: Sequence[float],
+) -> List[PredictionRun]:
     """构建预测 run 列表。
 
     Args:
         csv_files: CSV 文件列表。
         method_names: 可选显示名。
         roots: 可选预测根目录。
+        thresholds_2d: 每个 run 的 2D 二值化阈值。
+        thresholds_3d: 每个 run 的 3D 二值化阈值。
 
     Returns:
         PredictionRun 列表。
@@ -657,13 +893,23 @@ def _build_runs(csv_files: Sequence[str], method_names: Optional[Sequence[str]],
         raise ValueError("--method-names 数量必须与 CSV 数量一致")
     if roots is not None and len(roots) != len(csv_files):
         raise ValueError("--prediction-roots 数量必须与 CSV 数量一致")
+    if len(thresholds_2d) != len(csv_files) or len(thresholds_3d) != len(csv_files):
+        raise ValueError("thresholds_2d/thresholds_3d 数量必须与 CSV 数量一致")
 
     runs: List[PredictionRun] = []
     for idx, csv_path in enumerate(csv_files):
         abs_csv = os.path.abspath(csv_path)
         name = method_names[idx] if method_names else os.path.splitext(os.path.basename(os.path.dirname(abs_csv)))[0]
         root = os.path.abspath(roots[idx]) if roots else os.path.dirname(abs_csv)
-        runs.append(PredictionRun(name=name or f"run_{idx}", csv_path=abs_csv, prediction_root=root))
+        runs.append(
+            PredictionRun(
+                name=name or f"run_{idx}",
+                csv_path=abs_csv,
+                prediction_root=root,
+                threshold_2d=float(thresholds_2d[idx]),
+                threshold_3d=float(thresholds_3d[idx]),
+            )
+        )
     return runs
 
 
@@ -675,6 +921,8 @@ def render_comparison(
     render_config: Dict[str, Any],
     join: str = "reference",
     max_rows: Optional[int] = None,
+    gt_threshold_2d: float = 0.5,
+    gt_threshold_3d: float = 0.5,
 ) -> Dict[str, List[str]]:
     """渲染并保存对比结果。
 
@@ -686,6 +934,8 @@ def render_comparison(
         render_config: 渲染配置。
         join: 对齐策略。
         max_rows: 最大输出样本数。
+        gt_threshold_2d: 2D GT 二值化阈值。
+        gt_threshold_3d: 3D GT 二值化阈值。
 
     Returns:
         模态到输出图片列表的映射。
@@ -717,10 +967,28 @@ def render_comparison(
         row_dir = os.path.join(output_dir, f"{one_modality}_rows")
         for key in keys:
             if one_modality == "image":
-                cells, row_info = _render_image_cells(dataset_root, runs, indices, key, render_cfg, cell_size, bg_rgb)
+                cells, row_info = _render_image_cells(
+                    dataset_root,
+                    runs,
+                    indices,
+                    key,
+                    render_cfg,
+                    cell_size,
+                    bg_rgb,
+                    gt_threshold_2d=gt_threshold_2d,
+                )
                 name = _safe_name(f"{key.obj_type}_{key.aff_type}_img{key.source_id}")
             else:
-                cells, row_info = _render_point_cells(dataset_root, runs, indices, key, render_cfg, cell_size, bg_rgb)
+                cells, row_info = _render_point_cells(
+                    dataset_root,
+                    runs,
+                    indices,
+                    key,
+                    render_cfg,
+                    cell_size,
+                    bg_rgb,
+                    gt_threshold_3d=gt_threshold_3d,
+                )
                 name = _safe_name(f"{key.obj_type}_{key.aff_type}_pc{key.source_id}")
             output_path = os.path.join(row_dir, f"{name}.jpg")
             _save_row_image(cells, output_path, grid_cfg)
@@ -731,6 +999,11 @@ def render_comparison(
         manifest_path = os.path.join(output_dir, f"paired_paths_{one_modality}.json")
         with open(manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifests[one_modality], f, ensure_ascii=False, indent=2)
+        _save_metrics_csv(
+            manifests[one_modality],
+            os.path.join(output_dir, f"metrics_{one_modality}.csv"),
+            one_modality,
+        )
     return saved
 
 
@@ -747,6 +1020,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output-dir", required=True, help="对比图输出目录。")
     parser.add_argument("--method-names", default=None, help="逗号分隔的列名，数量需与 CSV 一致。")
     parser.add_argument("--prediction-roots", default=None, help="逗号分隔的预测根目录；默认使用每个 CSV 的父目录。")
+    parser.add_argument("--thresholds-2d", default=None, help="逗号分隔的 2D 预测二值化阈值，数量需与 CSV 一致；默认全为 0.5。")
+    parser.add_argument("--thresholds-3d", default=None, help="逗号分隔的 3D 预测二值化阈值，数量需与 CSV 一致；默认全为 0.5。")
+    parser.add_argument("--gt-threshold-2d", type=float, default=0.5, help="2D GT 二值化阈值。")
+    parser.add_argument("--gt-threshold-3d", type=float, default=0.5, help="3D GT 二值化阈值。")
     parser.add_argument("--modality", default="both", choices=("image", "point", "both"), help="渲染模态。")
     parser.add_argument(
         "--join",
@@ -763,10 +1040,14 @@ def main() -> None:
     """命令行入口。"""
 
     args = parse_args()
+    thresholds_2d = _parse_float_sequence(args.thresholds_2d, len(args.csv_files), 0.5, "--thresholds-2d")
+    thresholds_3d = _parse_float_sequence(args.thresholds_3d, len(args.csv_files), 0.5, "--thresholds-3d")
     runs = _build_runs(
         csv_files=args.csv_files,
         method_names=_split_csv_arg(args.method_names),
         roots=_split_csv_arg(args.prediction_roots),
+        thresholds_2d=thresholds_2d,
+        thresholds_3d=thresholds_3d,
     )
     render_config = _load_render_config(args.render_config)
     saved = render_comparison(
@@ -777,6 +1058,8 @@ def main() -> None:
         render_config=render_config,
         join=args.join,
         max_rows=args.max_rows,
+        gt_threshold_2d=args.gt_threshold_2d,
+        gt_threshold_3d=args.gt_threshold_3d,
     )
     for mode, paths in saved.items():
         print(f"{mode}: saved {len(paths)} row images")
