@@ -224,48 +224,17 @@
       background: #fff;
     }
 
-    .video-wrapper {
-      position: relative;
-      overflow: hidden;
-      border-radius: 22px;
-      border: 1px solid var(--line);
-      background: #101827;
-      box-shadow: inset 0 0 0 1px rgba(255,255,255,0.04);
-    }
-
-    .video-placeholder {
-      min-height: 390px;
-      display: grid;
-      place-items: center;
-      padding: 30px;
-      color: #dbe6ff;
-      text-align: center;
-      background:
-        linear-gradient(135deg, rgba(49, 95, 206, 0.34), rgba(21, 164, 184, 0.22)),
-        radial-gradient(circle at 70% 30%, rgba(243, 155, 49, 0.28), transparent 20rem),
-        #101827;
-    }
-
-    .play {
-      width: 78px;
-      height: 78px;
-      margin: 0 auto 16px;
-      display: grid;
-      place-items: center;
-      border-radius: 50%;
-      background: rgba(255,255,255,0.14);
-      border: 1px solid rgba(255,255,255,0.22);
-      font-size: 28px;
-    }
-
-    .grid2, .grid3, .gallery-grid {
+    .grid2, .grid3, .dataset-sources {
       display: grid;
       gap: 18px;
     }
 
     .grid2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .grid3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .gallery-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .dataset-sources {
+      grid-template-columns: 1fr;
+      gap: 12px;
+    }
 
     .card {
       padding: 20px;
@@ -285,33 +254,244 @@
       font-weight: 800;
     }
 
-    .gallery-item {
-      overflow: hidden;
+    .pipeline-img, .chart-img, .figure-img {
+      width: 100%;
       border: 1px solid var(--line);
-      border-radius: 20px;
+      border-radius: 22px;
       background: #fff;
     }
 
-    .gallery-item img {
+    .figure-img {
+      display: block;
+      height: auto;
+    }
+
+    .method-layout {
+      display: grid;
+      gap: 20px;
+    }
+
+    .method-figure {
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .method-figure .pipeline-img {
+      display: block;
+      min-width: 780px;
+      height: auto;
+    }
+
+    .method-cards {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+
+
+    .result-block {
+      display: grid;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .result-header {
+      display: flex;
+      align-items: end;
+      justify-content: space-between;
+      gap: 18px;
+    }
+
+    .result-header p {
+      max-width: 760px;
+      margin: 0;
+    }
+
+    .prediction-grid {
+      display: grid;
+      grid-template-columns: 98px minmax(0, 1fr);
+      gap: 6px 10px;
+      align-items: center;
+    }
+
+    .prediction-scroll {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .prediction-stage {
+      position: relative;
+      height: 100%;
+    }
+
+    .prediction-slide {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      grid-template-columns: 98px minmax(0, 1fr);
+      gap: 6px 10px;
+      align-items: center;
+      opacity: 0;
+      transform: translateY(14px) scale(0.985);
+      transition:
+        opacity 420ms ease,
+        transform 420ms cubic-bezier(0.22, 1, 0.36, 1);
+      will-change: opacity, transform;
+    }
+
+    .prediction-slide.is-active {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+
+    .prediction-slide.is-exit {
+      opacity: 0;
+      transform: translateY(-12px) scale(0.97);
+    }
+
+    .prediction-label {
+      display: grid;
+      gap: 2px;
+      color: var(--ink);
+      font-size: 13px;
+      font-weight: 800;
+      line-height: 1.25;
+    }
+
+    .prediction-label span {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .prediction-img {
       display: block;
       width: 100%;
-      aspect-ratio: 4 / 3;
+      height: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: #f3f6fb;
+      cursor: zoom-in;
+    }
+
+    .image-lightbox {
+      position: fixed;
+      inset: 0;
+      z-index: 100;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 32px;
+      background: rgba(12, 18, 32, 0.82);
+      backdrop-filter: blur(10px);
+    }
+
+    .image-lightbox.is-open {
+      display: flex;
+    }
+
+    .image-lightbox img {
+      max-width: min(1180px, 94vw);
+      max-height: 88vh;
+      border-radius: 18px;
+      background: #fff;
+      box-shadow: 0 26px 72px rgba(0, 0, 0, 0.42);
+      cursor: zoom-out;
+    }
+
+    .image-lightbox-caption {
+      position: absolute;
+      left: 50%;
+      bottom: 18px;
+      transform: translateX(-50%);
+      padding: 7px 12px;
+      border-radius: 999px;
+      color: #fff;
+      background: rgba(12, 18, 32, 0.66);
+      font-size: 13px;
+      font-weight: 750;
+    }
+
+    .image-lightbox-close {
+      position: absolute;
+      top: 18px;
+      right: 18px;
+      width: 42px;
+      height: 42px;
+      border: 1px solid rgba(255, 255, 255, 0.34);
+      border-radius: 999px;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.12);
+      font-size: 26px;
+      line-height: 1;
+      cursor: pointer;
+    }
+
+    .metric-tables {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 8px;
+    }
+
+    /* 数据集区块用于解释混合数据来源、统一后的监督形式与可视化样例。 */
+    .dataset-layout {
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
+      gap: 22px;
+      align-items: start;
+    }
+
+    .dataset-lead {
+      margin-top: 0;
+    }
+
+    .dataset-source-card {
+      min-height: 100%;
+      padding: 16px;
+    }
+
+    .dataset-source-card h3 {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .dataset-source-card p {
+      margin-bottom: 0;
+    }
+
+    .dataset-samples {
+      display: grid;
+      gap: 14px;
+    }
+
+    .dataset-sample {
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: #fff;
+    }
+
+    .dataset-sample img {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
       object-fit: cover;
       background: #f3f6fb;
     }
 
-    .gallery-item span {
-      display: block;
-      padding: 10px 12px;
+    .dataset-sample figcaption {
+      padding: 11px 14px;
       color: var(--muted);
       font-size: 13px;
       font-weight: 700;
     }
 
-    .pipeline-img, .chart-img {
-      width: 100%;
+    .table-scroll {
+      overflow-x: auto;
       border: 1px solid var(--line);
-      border-radius: 22px;
+      border-radius: 16px;
       background: #fff;
     }
 
@@ -336,6 +516,11 @@
       font-weight: 800;
     }
 
+    .best {
+      color: var(--brand-dark);
+      font-weight: 800;
+    }
+
     pre {
       margin: 0;
       padding: 18px;
@@ -355,9 +540,11 @@
 
     @media (max-width: 880px) {
       .nav-menu { display: none; }
-      .grid2, .grid3, .gallery-grid { grid-template-columns: 1fr; }
+      .grid2, .grid3, .dataset-sources, .dataset-layout, .method-cards, .metric-tables { grid-template-columns: 1fr; }
+      .prediction-grid, .prediction-slide { grid-template-columns: 78px minmax(0, 1fr); }
+      .result-header { display: block; }
       .hero { padding-top: 48px; }
-      .video-placeholder { min-height: 280px; }
+      .method-figure .pipeline-img { min-width: 680px; }
     }
   </style>
 </head>
@@ -367,8 +554,8 @@
       <a class="nav-brand" href="#home">UniAfford</a>
       <ul class="nav-menu">
         <li><a href="#home">Home</a></li>
-        <li><a href="#video">Video</a></li>
-        <li><a href="#gallery">Gallery</a></li>
+        <li><a href="#overview">Overview</a></li>
+        <li><a href="#dataset">Dataset</a></li>
         <li><a href="#method">Method</a></li>
         <li><a href="#results">Results</a></li>
         <li><a href="#citation">Citation</a></li>
@@ -382,74 +569,97 @@
       <span class="hero-title-main">UniAfford</span>
       <h1 class="hero-title-sub">Token-Routed Multitask Learning for Generalizable 2D-3D Affordance Perception</h1>
       <p class="hero-description">
-        A unified language-image-point-cloud framework for reasoning about actionable regions in RGB images
-        and point clouds, using routed MLLM tokens as downstream 2D/3D affordance queries.
+        A unified framework for generalizable 2D-3D affordance perception that routes MLLM hidden
+        states into image- and point-cloud-affordance queries for dense 2D masks and 3D point-wise prediction.
       </p>
 
       <div class="hero-links">
-        <a href="#" class="btn"><i class="fa-solid fa-file-lines"></i> Paper Coming Soon</a>
-        <a href="../README.md" class="btn secondary"><i class="fa-brands fa-github"></i> Code</a>
-        <a href="https://huggingface.co/your-org/2d-3d-uniafford" class="btn secondary">🤗 Weights</a>
-        <a href="https://huggingface.co/datasets/your-org/2d-3d-uniafford" class="btn secondary">🤗 Dataset</a>
-        <a href="DATASET.md" class="btn secondary"><i class="fa-solid fa-database"></i> Dataset Format</a>
+        <a href="#" class="btn" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-arrow-up-right-from-square"></i> arXiv</a>
+        <a href="assets/downloads/UniAfford.pdf" class="btn secondary" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-file-arrow-down"></i> Paper PDF</a>
+        <a href="https://github.com/4DVLab/UniAfford" class="btn secondary" target="_blank" rel="noopener noreferrer"><i class="fa-brands fa-github"></i> Code</a>
+        <a href="https://huggingface.co/yiqian7a/UniAfford-4B" class="btn secondary" target="_blank" rel="noopener noreferrer">🤗 Weights</a>
+        <a href="https://huggingface.co/datasets/yiqian7a/UniAfford-Data" class="btn secondary" target="_blank" rel="noopener noreferrer">🤗 Dataset</a>
       </div>
 
       <div class="authors">
-        <a href="#">Author One</a><sup>*</sup>,
-        <a href="#">Author Two</a><sup>*</sup>,
-        <a href="#">Author Three</a>,
-        <a href="#">Corresponding Author</a>
+        <a href="#">Yuhao Liu</a>, 
+        <a href="https://ymzhong66.github.io">Yiming Zhong</a>, 
+        <a href="https://hq-king.github.io">Hanqing Wang</a>, 
+        <br>
+        <a href="https://laka-3dv.github.io/">Shaocheng Yan</a>, 
+        <a href="https://scholar.google.com/citations?user=G1iWHL8AAAAJ&hl=en">Yuhang Zhang</a>, 
+        <a href="https://github.com/wenzhoulyu">Wenzhou Lyu</a>, 
+        <a href="https://scholar.google.com/citations?user=SuFIjWQAAAAJ&hl=zh-CN">Ziyang Ding</a>, 
+        <a href="https://679347153.github.io/">Wei Zhang</a>, 
+        <a href="#">Xue Zhao</a>, 
+        <br>
+        <a href="https://sites.google.com/view/cuhk-pan-jin/">Jin Pan</a>, 
+        <a href="http://yuexinma.me/aboutme.html">Yuexin Ma</a><sup>*</sup>, 
+        <a href="http://xingezhu.me/aboutme.html">Xinge Zhu</a>
       </div>
       <div class="institutions">
-        <sup>*</sup>Equal contribution · Institution / Lab · Venue Coming Soon
+        Shandong University &middot; ShanghaiTech University &middot; HKUST(GZ) &middot; Yinwang
+        <br>
+        <sup>*</sup>Corresponding author
       </div>
     </div>
   </header>
 
   <main class="container">
-    <section class="teaser-card" aria-label="Teaser">
-      <img src="assets/figures/teaser.svg" alt="UniAfford teaser">
+    <section id="overview">
+      <h2>Paper Overview</h2>
+      <p class="muted">
+        UniAfford-Data unifies pixel-level 2D affordance masks and point-level 3D affordance labels,
+        while UniAfford routes MLLM hidden states into dense 2D and 3D prediction branches.
+      </p>
+      <img class="figure-img" src="assets/figures/teaser.svg" alt="UniAfford overview figure">
     </section>
 
-    <section id="video">
-      <h2>Video Demo</h2>
-      <p class="muted">
-        This section is reserved for the final video or animation demo. Replace the placeholder with
-        <code>assets/videos/demo.mp4</code> or an embedded online video before release.
-      </p>
-      <div class="video-wrapper">
-        <div class="video-placeholder">
-          <div>
-            <div class="play"><i class="fa-solid fa-play"></i></div>
-            <h3>Video / Animation Demo Placeholder</h3>
-            <p>RGB input · point cloud input · routed affordance tokens · 2D/3D predictions</p>
+    <section id="dataset">
+      <h2>UniAfford-Data</h2>
+      <div class="dataset-layout">
+        <div>
+          <p class="muted dataset-lead">
+            UniAfford-Data is a hybrid affordance dataset built by aligning heterogeneous 2D and 3D
+            affordance resources under a shared object-affordance taxonomy. It preserves modality-specific
+            supervision while exposing a unified instruction-driven interface for joint 2D-3D training.
+          </p>
+          <div class="dataset-sources">
+            <div class="card dataset-source-card">
+              <span class="pill">2D Source</span>
+              <h3><i class="fa-solid fa-image"></i> Pixel masks</h3>
+              <p class="muted">
+                RGB images with pixel-level affordance masks provide dense visual grounding for interaction
+                regions such as graspable, supportable, or containable parts.
+              </p>
+            </div>
+            <div class="card dataset-source-card">
+              <span class="pill">3D Source</span>
+              <h3><i class="fa-solid fa-cube"></i> Point labels</h3>
+              <p class="muted">
+                Point-cloud annotations describe affordance regions directly on object geometry, enabling
+                point-wise evaluation and 3D interaction reasoning.
+              </p>
+            </div>
+            <div class="card dataset-source-card">
+              <span class="pill">Language</span>
+              <h3><i class="fa-solid fa-comment-dots"></i> Instructions</h3>
+              <p class="muted">
+                Natural-language prompts connect object categories, affordance labels, and modality-specific
+                targets so the model can learn a common task interface.
+              </p>
+            </div>
           </div>
         </div>
-      </div>
-    </section>
-
-    <section id="gallery">
-      <h2>Gallery</h2>
-      <p class="muted">
-        Example slots for qualitative visualizations. Replace the SVG placeholders with rendered images,
-        GIFs, or video thumbnails generated by <code>utils/rendering/</code>.
-      </p>
-      <div class="gallery-grid">
-        <div class="gallery-item">
-          <img src="assets/figures/example_2d.svg" alt="2D affordance example">
-          <span>2D affordance mask</span>
-        </div>
-        <div class="gallery-item">
-          <img src="assets/figures/example_3d.svg" alt="3D affordance example">
-          <span>3D point-wise affordance</span>
-        </div>
-        <div class="gallery-item">
-          <img src="assets/figures/example_route.svg" alt="Token routing example">
-          <span>Token routing analysis</span>
-        </div>
-        <div class="gallery-item">
-          <img src="assets/figures/example_grid.svg" alt="Grid visualization example">
-          <span>Batch rendering grid</span>
+        <div class="dataset-samples">
+          <figure class="dataset-sample">
+            <img src="assets/figures/2d-dataset-vis.png" alt="UniAfford-Data 2D mask visualization examples">
+            <figcaption>2D examples: RGB objects paired with pixel-level affordance masks.</figcaption>
+          </figure>
+          <figure class="dataset-sample">
+            <img src="assets/figures/3d-dataset-vis.png" alt="UniAfford-Data 3D point-cloud label visualization examples">
+            <figcaption>3D examples: point clouds with affordance-specific point labels.</figcaption>
+          </figure>
         </div>
       </div>
     </section>
@@ -457,21 +667,27 @@
     <section id="abstract">
       <h2>Abstract</h2>
       <p class="muted">
-        UniAfford studies generalizable 2D-3D affordance perception under a unified multimodal setting.
-        Given language instructions, RGB images, and point clouds, the model learns to route MLLM hidden
-        states into text, 2D, and 3D branches. Routed affordance tokens are used as task queries for
-        downstream decoders, producing image masks and point-wise 3D affordance logits. This design supports
-        flexible supervision across image-only, point-cloud-only, and paired multimodal samples.
+        Affordance perception aims to highlight the actionable regions that support embodied interaction,
+        yet 2D and 3D affordance grounding have evolved as separate problems, with different task
+        definitions, supervision formats, datasets, and evaluation protocols. We propose Token Router for
+        Tasks, a general multitask training paradigm for MLLM-based systems that routes contextual hidden
+        states to task-specific branches instead of forcing downstream tasks to be represented by predefined
+        textual markers. We instantiate this paradigm as UniAfford, a unified framework for generalizable
+        2D-3D affordance perception, together with UniAfford-Data, a unified dataset organized by a shared
+        object-affordance taxonomy that integrates pixel-level 2D annotations, point-level 3D annotations,
+        and language instructions. Experiments show strong zero-shot generalization on both 2D and 3D
+        affordance benchmarks without target-specific fine-tuning.
       </p>
     </section>
 
     <section id="method">
       <h2>Method Overview</h2>
-      <div class="grid2">
-        <div>
+      <div class="method-layout">
+        <!-- pipeline 是横版图，单独占满一行以保留论文图的阅读尺度。 -->
+        <div class="method-figure">
           <img class="pipeline-img" src="assets/figures/pipeline.svg" alt="UniAfford pipeline">
         </div>
-        <div class="grid2" style="grid-template-columns:1fr;">
+        <div class="method-cards">
           <div class="card">
             <span class="pill">Token Router</span>
             <h3>Soft branch assignment</h3>
@@ -483,10 +699,10 @@
           </div>
           <div class="card">
             <span class="pill">Similarity Alignment</span>
-            <h3>Point-wise 3D decoding</h3>
+            <h3>Similarity-based 2D-3D grounding</h3>
             <p class="muted">
-              Routed 3D affordance queries and per-point features are projected into a shared space,
-              normalized, and matched with a learned logit scale.
+              Routed tokens are similarity-matched to pixel-level (2D) and point-level (3D) features
+              in a shared normalized space with a learned logit scale.
             </p>
           </div>
         </div>
@@ -495,32 +711,112 @@
 
     <section id="results">
       <h2>Results</h2>
-      <p class="muted">Quantitative results will be added after the paper is finalized.</p>
-      <div class="grid2">
-        <img class="chart-img" src="assets/figures/result_chart.svg" alt="Result chart placeholder">
-        <div>
-          <table>
-            <thead>
-              <tr>
-                <th>Method</th>
-                <th>2D gIoU</th>
-                <th>3D aIOU</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td>UniAfford</td>
-                <td>Coming soon</td>
-                <td>Coming soon</td>
-              </tr>
-              <tr>
-                <td>Baseline</td>
-                <td>Coming soon</td>
-                <td>Coming soon</td>
-              </tr>
-            </tbody>
-          </table>
+      <!-- <p class="muted">
+        Qualitative comparisons visualize predictions from different 2D and 3D affordance models.
+      </p> -->
+      
+      <div class="result-block">
+        <div class="result-header">
+          <div>
+            <span class="pill">Metrics</span>
+            <h3>Quantitative comparison</h3>
+          </div>
+          <p class="muted">
+            This section shows comparison results for some of the models in our paper.
+          </p>
         </div>
+        <div class="metric-tables">
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>2D Method</th>
+                  <th>Benchmark</th>
+                  <th>gIoU</th>
+                  <th>cIoU</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Affordance-R1</td>
+                  <td>zero-shot on AGD20k</td>
+                  <td>31.78</td>
+                  <td>27.85</td>
+                </tr>
+                <tr>
+                  <td>UniAfford</td>
+                  <td>zero-shot on AGD20k</td>
+                  <td class="best">27.52</td>
+                  <td class="best">25.22</td>
+                </tr>
+                <tr>
+                  <td>AffordanceNet</td>
+                  <td>zero-shot on AGD20k</td>
+                  <td>14.10</td>
+                  <td>20.04</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>3D Method</th>
+                  <th>Benchmark</th>
+                  <th>AUC</th>
+                  <th>mIoU</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>UniAfford</td>
+                  <td>zero-shot on GEAL*</td>
+                  <td class="best">77.33</td>
+                  <td class="best">14.25</td>
+                </tr>
+                <tr>
+                  <td>GREAT</td>
+                  <td>zero-shot on GEAL*</td>
+                  <td>73.61</td>
+                  <td>8.82</td>
+                </tr>
+                <tr>
+                  <td>IAGNet</td>
+                  <td>zero-shot on GEAL*</td>
+                  <td>71.84</td>
+                  <td>7.95</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="result-block">
+        <div class="result-header">
+          <div>
+            <span class="pill">2D Prediction</span>
+            <h3>Image affordance comparison</h3>
+          </div>
+          <p class="muted">
+            All RGB examples show model predictions over pixel-level affordance regions.
+          </p>
+        </div>
+        <div class="prediction-scroll" data-prediction-gallery="2d"></div>
+      </div>
+
+      <div class="result-block">
+        <div class="result-header">
+          <div>
+            <span class="pill">3D Prediction</span>
+            <h3>Point-cloud affordance comparison</h3>
+          </div>
+          <p class="muted">
+            All point-cloud examples compare predicted 3D affordance regions across methods.
+          </p>
+        </div>
+        <div class="prediction-scroll" data-prediction-gallery="3d"></div>
       </div>
     </section>
 
@@ -531,19 +827,19 @@
           <span class="pill">Code</span>
           <h3>Repository</h3>
           <p class="muted">Installation, training, validation, and demo usage are documented in the repository README.</p>
-          <a href="../README.md">Open README</a>
+          <a href="https://github.com/4DVLab/UniAfford/blob/master/README.md">Open README</a>
         </div>
         <div class="card">
           <span class="pill">Data</span>
           <h3>Dataset</h3>
           <p class="muted">The dataset format and split convention are documented separately for release packaging.</p>
-          <a href="DATASET.md">Open DATASET.md</a>
+          <a href="https://huggingface.co/datasets/yiqian7a/UniAfford-Data/blob/main/README.md">Open DATASET.md</a>
         </div>
         <div class="card">
           <span class="pill">Rendering</span>
           <h3>Figures and Demos</h3>
           <p class="muted">Use the rendering utilities to export 2D overlays, 3D point-cloud figures, grids, and thumbnails.</p>
-          <a href="rendering.md">Open rendering guide</a>
+          <a href="https://github.com/4DVLab/UniAfford/blob/master/docs/rendering.md">Open rendering guide</a>
         </div>
       </div>
     </section>
@@ -552,7 +848,7 @@
       <h2>Citation</h2>
       <pre><code>@article{uniafford2026,
   title   = {UniAfford: Token-Routed Multitask Learning for Generalizable 2D-3D Affordance Perception},
-  author  = {Author One and Author Two and Author Three},
+  author  = {Yuhao Liu, Yiming Zhong, Hanqing Wang, Shaocheng Yan, Yuhang Zhang, Wenzhou Lyu, Ziyang Ding, Wei Zhang, Xue Zhao, Jin Pan, Yuexin Ma, Xinge Zhu },
   journal = {Coming soon},
   year    = {2026}
 }</code></pre>
@@ -560,7 +856,263 @@
   </main>
 
   <footer>
-    2D-3D UniAfford · Academic homepage branch. Replace placeholders before public release.
+    2D-3D UniAfford · Academic homepage branch.
   </footer>
+
+  <script>
+    const predictionImages = {
+      "2d": [
+        "assets/figures/show/2d/motorcycle_sit_on_img59.jpg",
+        "assets/figures/show/2d/keyboard_type_on_img1.jpg",
+        "assets/figures/show/2d/drum_beat_img10.jpg",
+        "assets/figures/show/2d/knife_hold_img64.jpg",
+        "assets/figures/show/2d/scissors_hold_img23.jpg",
+        "assets/figures/show/2d/wine_glass_drink_with_img13.jpg",
+        "assets/figures/show/2d/basketball_throw_img10.jpg",
+        "assets/figures/show/2d/apple_cut_img9.jpg",
+        "assets/figures/show/2d/hammer_hold_img10.jpg",
+        "assets/figures/show/2d/scissors_cut_with_img4.jpg",
+        "assets/figures/show/2d/banana_cut_img8.jpg",
+        "assets/figures/show/2d/knife_cut_with_img29.jpg",
+        "assets/figures/show/2d/knife_hold_img39.jpg",
+        "assets/figures/show/2d/scissors_hold_img17.jpg",
+        "assets/figures/show/2d/axe_hold_img14.jpg",
+        "assets/figures/show/2d/drum_beat_img6.jpg",
+        "assets/figures/show/2d/hot_dog_eat_img1.jpg",
+        "assets/figures/show/2d/knife_hold_img50.jpg",
+        "assets/figures/show/2d/scissors_hold_img15.jpg",
+        "assets/figures/show/2d/bench_lie_on_img3.jpg",
+        "assets/figures/show/2d/hammer_hold_img11.jpg",
+        "assets/figures/show/2d/golf_clubs_hold_img6.jpg",
+        "assets/figures/show/2d/bed_lie_on_img1.jpg",
+        "assets/figures/show/2d/scissors_hold_img20.jpg",
+        "assets/figures/show/2d/bottle_open_img35.jpg",
+        "assets/figures/show/2d/toothbrush_brush_with_img6.jpg",
+        "assets/figures/show/2d/knife_cut_with_img4.jpg",
+        "assets/figures/show/2d/baseball_bat_hold_img19.jpg",
+        "assets/figures/show/2d/fork_lift_img21.jpg",
+        "assets/figures/show/2d/wine_glass_hold_img32.jpg"
+      ],
+      "3d": [
+        "assets/figures/show/3d/chair_move_pc328.jpg",
+        "assets/figures/show/3d/bag_contain_pc56.jpg",
+        "assets/figures/show/3d/display_display_pc135.jpg",
+        "assets/figures/show/3d/mug_grasp_pc128.jpg",
+        "assets/figures/show/3d/knife_cut_pc52.jpg",
+        "assets/figures/show/3d/knife_cut_pc132.jpg",
+        "assets/figures/show/3d/chair_sit_pc224.jpg",
+        "assets/figures/show/3d/bottle_grasp_pc349.jpg",
+        "assets/figures/show/3d/trashcan_open_pc107.jpg",
+        "assets/figures/show/3d/chair_sit_pc263.jpg",
+        "assets/figures/show/3d/mug_contain_pc43.jpg"
+      ]
+    };
+
+    const affordanceTokens = [
+      "drink_with",
+      "cut_with",
+      "brush_with",
+      "sit_on",
+      "type_on",
+      "lie_on",
+      "contain",
+      "display",
+      "grasp",
+      "throw",
+      "hold",
+      "open",
+      "move",
+      "beat",
+      "lift",
+      "cut",
+      "eat"
+    ];
+
+    const titleCase = (value) => value
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (letter) => letter.toUpperCase());
+
+    const imageLightbox = (() => {
+      const lightbox = document.createElement("div");
+      const image = document.createElement("img");
+      const caption = document.createElement("div");
+      const close = document.createElement("button");
+
+      lightbox.className = "image-lightbox";
+      caption.className = "image-lightbox-caption";
+      close.className = "image-lightbox-close";
+      close.type = "button";
+      close.setAttribute("aria-label", "Close image preview");
+      close.textContent = "x";
+
+      lightbox.append(image, caption, close);
+      document.body.appendChild(lightbox);
+
+      const hide = () => {
+        lightbox.classList.remove("is-open");
+        image.removeAttribute("src");
+      };
+
+      const show = (src, alt) => {
+        image.src = src;
+        image.alt = alt;
+        caption.textContent = alt;
+        lightbox.classList.add("is-open");
+      };
+
+      lightbox.addEventListener("click", (event) => {
+        if (event.target === lightbox || event.target === image || event.target === close) {
+          hide();
+        }
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && lightbox.classList.contains("is-open")) {
+          hide();
+        }
+      });
+
+      return { show };
+    })();
+
+    const parseObjectAffordance = (path) => {
+      const fileName = path.split("/").pop().replace(/\.(jpg|jpeg|png)$/i, "");
+      const key = fileName.replace(/_(img|pc)\d+$/i, "");
+      const affordance = affordanceTokens.find((token) => key.endsWith(`_${token}`));
+
+      if (!affordance) {
+        return { object: titleCase(key), affordance: "prediction" };
+      }
+
+      return {
+        object: titleCase(key.slice(0, -(affordance.length + 1))),
+        affordance: affordance.replace(/_/g, " ")
+      };
+    };
+
+    const renderPredictionGallery = (container, paths) => {
+      const stage = document.createElement("div");
+      stage.className = "prediction-stage";
+      container.dataset.currentIndex = "0";
+      container.predictionItems = paths.map((path) => ({
+        path,
+        ...parseObjectAffordance(path)
+      }));
+
+      if (container.predictionItems.length > 0) {
+        stage.appendChild(createPredictionSlide(container.predictionItems[0], true));
+      }
+
+      container.appendChild(stage);
+    };
+
+    const createPredictionSlide = (item, isActive = false) => {
+      const slide = document.createElement("div");
+      const label = document.createElement("div");
+      const aff = document.createElement("span");
+      const image = document.createElement("img");
+
+      slide.className = `prediction-slide${isActive ? " is-active" : ""}`;
+      label.className = "prediction-label";
+      label.textContent = item.object;
+      aff.textContent = item.affordance;
+      label.appendChild(aff);
+
+      image.className = "prediction-img";
+      image.src = item.path;
+      image.alt = `${item.object} ${item.affordance} affordance prediction comparison`;
+      image.title = "Double-click to enlarge";
+      image.addEventListener("load", () => {
+        const container = image.closest(".prediction-scroll");
+        if (container) fitSinglePredictionRow(container);
+      }, { once: true });
+      image.addEventListener("dblclick", () => {
+        imageLightbox.show(image.src, image.alt);
+      });
+
+      slide.append(label, image);
+      return slide;
+    };
+
+    const fitSinglePredictionRow = (container) => {
+      const activeSlide = container.querySelector(".prediction-slide.is-active");
+      if (!activeSlide) return;
+
+      const activeImage = activeSlide.querySelector(".prediction-img");
+      const activeLabel = activeSlide.querySelector(".prediction-label");
+      const rowHeight = Math.max(
+        activeImage?.offsetHeight || 0,
+        activeLabel?.offsetHeight || 0
+      );
+
+      if (rowHeight > 0) {
+        container.style.height = `${rowHeight}px`;
+      }
+    };
+
+    const showNextPrediction = (container) => {
+      const items = container.predictionItems || [];
+      const stage = container.querySelector(".prediction-stage");
+      const currentSlide = container.querySelector(".prediction-slide.is-active");
+
+      if (!stage || !currentSlide || items.length < 2) return false;
+
+      const currentIndex = Number(container.dataset.currentIndex || 0);
+      const nextIndex = (currentIndex + 1) % items.length;
+      const nextSlide = createPredictionSlide(items[nextIndex]);
+
+      stage.appendChild(nextSlide);
+      fitSinglePredictionRow(container);
+
+      window.requestAnimationFrame(() => {
+        currentSlide.classList.remove("is-active");
+        currentSlide.classList.add("is-exit");
+        nextSlide.classList.add("is-active");
+      });
+
+      window.setTimeout(() => {
+        currentSlide.remove();
+        container.dataset.currentIndex = String(nextIndex);
+        fitSinglePredictionRow(container);
+      }, 460);
+
+      return true;
+    };
+
+    const startAutoScroll = (container) => {
+      let isPaused = false;
+      let isAnimating = false;
+
+      const setRowHeight = () => fitSinglePredictionRow(container);
+      container.querySelectorAll("img").forEach((image) => {
+        if (image.complete) return;
+        image.addEventListener("load", setRowHeight, { once: true });
+      });
+
+      window.addEventListener("load", setRowHeight);
+      window.addEventListener("resize", setRowHeight);
+      container.addEventListener("mouseenter", () => { isPaused = true; });
+      container.addEventListener("mouseleave", () => { isPaused = false; });
+      setRowHeight();
+
+      window.setInterval(() => {
+        if (isPaused || isAnimating) return;
+        isAnimating = true;
+
+        if (!showNextPrediction(container)) {
+          isAnimating = false;
+          return;
+        }
+
+        window.setTimeout(() => { isAnimating = false; }, 520);
+      }, 2500);
+    };
+
+    document.querySelectorAll("[data-prediction-gallery]").forEach((container) => {
+      const modality = container.dataset.predictionGallery;
+      renderPredictionGallery(container, predictionImages[modality] || []);
+      startAutoScroll(container);
+    });
+  </script>
 </body>
 </html>
