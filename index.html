@@ -205,6 +205,38 @@
       letter-spacing: -0.04em;
     }
 
+    .section-heading {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .section-heading h2 {
+      margin: 0;
+    }
+
+    .section-heading-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 12px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      color: var(--ink);
+      background: #fff;
+      font-size: 13px;
+      font-weight: 800;
+    }
+
+    .section-heading-link:hover {
+      color: var(--brand-dark);
+      text-decoration: none;
+      border-color: rgba(49, 95, 206, 0.28);
+    }
+
     h3 {
       margin: 0 0 8px;
       font-size: 18px;
@@ -650,7 +682,12 @@
     </section>
 
     <section id="dataset">
-      <h2>UniAfford-Data</h2>
+      <div class="section-heading">
+        <h2>UniAfford-Data</h2>
+        <a class="section-heading-link" href="https://huggingface.co/datasets/yiqian7a/UniAfford-Data" target="_blank" rel="noopener noreferrer">
+          🤗 Hugging Face Dataset
+        </a>
+      </div>
       <div class="dataset-layout">
         <div>
           <p class="muted dataset-lead">
