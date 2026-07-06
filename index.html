@@ -319,6 +319,40 @@
       overflow: hidden;
     }
 
+    .prediction-view {
+      display: grid;
+      gap: 6px;
+    }
+
+    .prediction-columns-header {
+      display: grid;
+      grid-template-columns: 98px minmax(0, 1fr);
+      gap: 6px 10px;
+      align-items: center;
+    }
+
+    .prediction-columns-spacer {
+      min-height: 1px;
+    }
+
+    .prediction-columns-labels {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      align-items: center;
+    }
+
+    .prediction-columns-labels span {
+      text-align: center;
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 800;
+      line-height: 1.2;
+    }
+
+    .prediction-columns-labels .is-ours {
+      color: var(--brand-dark);
+    }
+
     .prediction-stage {
       position: relative;
       height: 100%;
@@ -541,7 +575,7 @@
     @media (max-width: 880px) {
       .nav-menu { display: none; }
       .grid2, .grid3, .dataset-sources, .dataset-layout, .method-cards, .metric-tables { grid-template-columns: 1fr; }
-      .prediction-grid, .prediction-slide { grid-template-columns: 78px minmax(0, 1fr); }
+      .prediction-grid, .prediction-slide, .prediction-columns-header { grid-template-columns: 78px minmax(0, 1fr); }
       .result-header { display: block; }
       .hero { padding-top: 48px; }
       .method-figure .pipeline-img { min-width: 680px; }
@@ -574,28 +608,28 @@
       </p>
 
       <div class="hero-links">
-        <a href="#" class="btn" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-arrow-up-right-from-square"></i> arXiv</a>
-        <a href="assets/downloads/UniAfford.pdf" class="btn secondary" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-file-arrow-down"></i> Paper PDF</a>
-        <a href="https://github.com/4DVLab/UniAfford" class="btn secondary" target="_blank" rel="noopener noreferrer"><i class="fa-brands fa-github"></i> Code</a>
-        <a href="https://huggingface.co/yiqian7a/UniAfford-4B" class="btn secondary" target="_blank" rel="noopener noreferrer">🤗 Weights</a>
-        <a href="https://huggingface.co/datasets/yiqian7a/UniAfford-Data" class="btn secondary" target="_blank" rel="noopener noreferrer">🤗 Dataset</a>
+        <a target="_blank" href="#" class="btn" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-arrow-up-right-from-square"></i> arXiv (coming soon)</a>
+        <a target="_blank" href="assets/downloads/UniAfford.pdf" class="btn secondary" target="_blank" rel="noopener noreferrer"><i class="fa-solid fa-file-arrow-down"></i> Paper PDF</a>
+        <a target="_blank" href="https://github.com/4DVLab/UniAfford" class="btn secondary" target="_blank" rel="noopener noreferrer"><i class="fa-brands fa-github"></i> Code</a>
+        <a target="_blank" href="https://huggingface.co/yiqian7a/UniAfford-4B" class="btn secondary" target="_blank" rel="noopener noreferrer">🤗 Weights</a>
+        <a target="_blank" href="https://huggingface.co/datasets/yiqian7a/UniAfford-Data" class="btn secondary" target="_blank" rel="noopener noreferrer">🤗 Dataset</a>
       </div>
 
       <div class="authors">
-        <a href="#">Yuhao Liu</a>, 
-        <a href="https://ymzhong66.github.io">Yiming Zhong</a>, 
-        <a href="https://hq-king.github.io">Hanqing Wang</a>, 
+        <a target="_blank" href="https://yiqian7a.github.io">Yuhao Liu</a>, 
+        <a target="_blank" href="https://ymzhong66.github.io">Yiming Zhong</a>, 
+        <a target="_blank" href="https://hq-king.github.io">Hanqing Wang</a>, 
         <br>
-        <a href="https://laka-3dv.github.io/">Shaocheng Yan</a>, 
-        <a href="https://scholar.google.com/citations?user=G1iWHL8AAAAJ&hl=en">Yuhang Zhang</a>, 
-        <a href="https://github.com/wenzhoulyu">Wenzhou Lyu</a>, 
-        <a href="https://scholar.google.com/citations?user=SuFIjWQAAAAJ&hl=zh-CN">Ziyang Ding</a>, 
-        <a href="https://679347153.github.io/">Wei Zhang</a>, 
-        <a href="#">Xue Zhao</a>, 
+        <a target="_blank" href="https://laka-3dv.github.io/">Shaocheng Yan</a>, 
+        <a target="_blank" href="https://scholar.google.com/citations?user=G1iWHL8AAAAJ&hl=en">Yuhang Zhang</a>, 
+        <a target="_blank" href="https://github.com/wenzhoulyu">Wenzhou Lyu</a>, 
+        <a target="_blank" href="https://scholar.google.com/citations?user=SuFIjWQAAAAJ&hl=zh-CN">Ziyang Ding</a>, 
+        <a target="_blank" href="https://679347153.github.io/">Wei Zhang</a>, 
+        <a target="_blank" href="#">Xue Zhao</a>, 
         <br>
-        <a href="https://sites.google.com/view/cuhk-pan-jin/">Jin Pan</a>, 
-        <a href="http://yuexinma.me/aboutme.html">Yuexin Ma</a><sup>*</sup>, 
-        <a href="http://xingezhu.me/aboutme.html">Xinge Zhu</a>
+        <a target="_blank" href="https://sites.google.com/view/cuhk-pan-jin/">Jin Pan</a>, 
+        <a target="_blank" href="http://yuexinma.me/aboutme.html">Yuexin Ma</a><sup>*</sup>, 
+        <a target="_blank" href="http://xingezhu.me/aboutme.html">Xinge Zhu</a>
       </div>
       <div class="institutions">
         Shandong University &middot; ShanghaiTech University &middot; HKUST(GZ) &middot; Yinwang
@@ -744,7 +778,7 @@
                   <td>27.85</td>
                 </tr>
                 <tr>
-                  <td>UniAfford</td>
+                  <td>UniAfford (Ours)</td>
                   <td>zero-shot on AGD20k</td>
                   <td class="best">27.52</td>
                   <td class="best">25.22</td>
@@ -770,7 +804,7 @@
               </thead>
               <tbody>
                 <tr>
-                  <td>UniAfford</td>
+                  <td>UniAfford (Ours)</td>
                   <td>zero-shot on GEAL*</td>
                   <td class="best">77.33</td>
                   <td class="best">14.25</td>
@@ -800,10 +834,22 @@
             <h3>Image affordance comparison</h3>
           </div>
           <p class="muted">
-            All RGB examples show model predictions over pixel-level affordance regions.
+            The red part in the image is the model’s prediction result, processed according to the fixed binary threshold.
           </p>
         </div>
-        <div class="prediction-scroll" data-prediction-gallery="2d"></div>
+        <div class="prediction-view">
+          <div class="prediction-columns-header" aria-hidden="true">
+            <div class="prediction-columns-spacer"></div>
+            <div class="prediction-columns-labels">
+              <span>Input</span>
+              <span>GT</span>
+              <span class="is-ours">Ours</span>
+              <span>RAGNet</span>
+              <span>Afford-R1</span>
+            </div>
+          </div>
+          <div class="prediction-scroll" data-prediction-gallery="2d"></div>
+        </div>
       </div>
 
       <div class="result-block">
@@ -813,10 +859,22 @@
             <h3>Point-cloud affordance comparison</h3>
           </div>
           <p class="muted">
-            All point-cloud examples compare predicted 3D affordance regions across methods.
+            In the image, the red dots predicted by the model are the binarized result of the model’s output, while the GT shows the annotated heatmap.
           </p>
         </div>
-        <div class="prediction-scroll" data-prediction-gallery="3d"></div>
+        <div class="prediction-view">
+          <div class="prediction-columns-header" aria-hidden="true">
+            <div class="prediction-columns-spacer"></div>
+            <div class="prediction-columns-labels">
+              <span>Input</span>
+              <span>GT</span>
+              <span class="is-ours">Ours</span>
+              <span>GREAT</span>
+              <span>IAGNet</span>
+            </div>
+          </div>
+          <div class="prediction-scroll" data-prediction-gallery="3d"></div>
+        </div>
       </div>
     </section>
 
@@ -928,6 +986,48 @@
       "eat"
     ];
 
+    const imagePreloadCache = new Map();
+
+    const preloadImage = (path) => {
+      if (imagePreloadCache.has(path)) {
+        return imagePreloadCache.get(path);
+      }
+
+      const promise = new Promise((resolve, reject) => {
+        const img = new Image();
+        img.decoding = "async";
+        img.onload = () => resolve(img);
+        img.onerror = () => reject(new Error(`Failed to preload ${path}`));
+        img.src = path;
+      });
+
+      imagePreloadCache.set(path, promise);
+      return promise;
+    };
+
+    const preloadPredictionImages = (paths) =>
+      Promise.allSettled(paths.map((path) => preloadImage(path)));
+
+    const preloadAheadCount = 2;
+
+    const preloadGalleryWindow = (paths, startIndex = 0) => {
+      if (!paths.length) return;
+
+      for (let offset = 0; offset <= preloadAheadCount; offset += 1) {
+        preloadImage(paths[(startIndex + offset) % paths.length]);
+      }
+    };
+
+    const scheduleBackgroundPreload = (paths) => {
+      const run = () => preloadPredictionImages(paths);
+
+      if ("requestIdleCallback" in window) {
+        window.requestIdleCallback(run, { timeout: 4000 });
+      } else {
+        window.setTimeout(run, 1200);
+      }
+    };
+
     const titleCase = (value) => value
       .replace(/_/g, " ")
       .replace(/\b\w/g, (letter) => letter.toUpperCase());
@@ -950,7 +1050,6 @@
 
       const hide = () => {
         lightbox.classList.remove("is-open");
-        image.removeAttribute("src");
       };
 
       const show = (src, alt) => {
@@ -1020,6 +1119,8 @@
 
       image.className = "prediction-img";
       image.src = item.path;
+      image.loading = "eager";
+      image.decoding = "async";
       image.alt = `${item.object} ${item.affordance} affordance prediction comparison`;
       image.title = "Double-click to enlarge";
       image.addEventListener("load", () => {
@@ -1060,6 +1161,8 @@
       const currentIndex = Number(container.dataset.currentIndex || 0);
       const nextIndex = (currentIndex + 1) % items.length;
       const nextSlide = createPredictionSlide(items[nextIndex]);
+
+      preloadGalleryWindow(items.map((item) => item.path), nextIndex);
 
       stage.appendChild(nextSlide);
       fitSinglePredictionRow(container);
@@ -1108,11 +1211,33 @@
       }, 2500);
     };
 
-    document.querySelectorAll("[data-prediction-gallery]").forEach((container) => {
-      const modality = container.dataset.predictionGallery;
-      renderPredictionGallery(container, predictionImages[modality] || []);
-      startAutoScroll(container);
-    });
+    const initPredictionGalleries = () => {
+      document.querySelectorAll("[data-prediction-gallery]").forEach((container) => {
+        const modality = container.dataset.predictionGallery;
+        const paths = predictionImages[modality] || [];
+
+        renderPredictionGallery(container, paths);
+        preloadGalleryWindow(paths, 0);
+        startAutoScroll(container);
+      });
+
+      const resultsSection = document.getElementById("results");
+      if (!resultsSection) return;
+
+      const observer = new IntersectionObserver((entries) => {
+        if (!entries.some((entry) => entry.isIntersecting)) return;
+
+        observer.disconnect();
+        scheduleBackgroundPreload([
+          ...predictionImages["2d"],
+          ...predictionImages["3d"]
+        ]);
+      }, { rootMargin: "240px 0px" });
+
+      observer.observe(resultsSection);
+    };
+
+    initPredictionGalleries();
   </script>
 </body>
 </html>
