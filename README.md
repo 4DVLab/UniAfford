@@ -10,7 +10,8 @@
   <a href=""><img src="https://img.shields.io/badge/🤗%20Weights-coming%20soon-yellow.svg" alt="Model Weights"></a>
   <a href=""><img src="https://img.shields.io/badge/🤗%20Dataset-coming%20soon-yellow.svg" alt="Dataset"></a>
 </p>
-**UniAfford** is a unified 2D–3D affordance perception framework built upon Multimodal Large Language Models (MLLMs). It supports affordance perception from image-only, point-cloud-only, or joint multimodal inputs, aiming to achieve generalizable cross-modal affordance perception.
+
+**UniAfford** is a unified 2D–3D affordance perception framework built upon Multimodal Large Language Models (MLLMs). It supports affordance perception from image-only, point-cloud-only, or joint multimodal inputs, aiming to achieve generalizable cross-modal affordance perception. 
 
 We propose **Token Router for Tasks**, a multitask training paradigm that dynamically routes contextual hidden states from a shared MLLM into task-specific branches, enabling dense affordance supervision to directly shape shared semantic representations without relying on predefined textual task tokens.
 
