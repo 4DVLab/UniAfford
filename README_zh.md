@@ -10,6 +10,7 @@
   <a href=""><img src="https://img.shields.io/badge/🤗%20Weights-coming%20soon-yellow.svg" alt="Model Weights"></a>
   <a href=""><img src="https://img.shields.io/badge/🤗%20Dataset-coming%20soon-yellow.svg" alt="Dataset"></a>
 </p>
+
 **UniAfford** 是一个基于多模态大语言模型（MLLM）的统一二维和三维可供性感知框架，支持图像、点云或者两者同时输入的二维可供性感知，旨在实现具备泛化能力的跨模态 affordance perception。
 
 我们提出了 **Token Router for Tasks** 多任务训练范式，通过将共享 MLLM 的上下文隐状态动态路由至不同任务分支，使密集可供性监督能够直接塑造共享语义表示，而无需依赖预定义的文本任务 token。
