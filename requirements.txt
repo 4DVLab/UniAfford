@@ -1,20 +1,59 @@
-deepspeed==0.18.4
-numpy==2.3.5
-mpi4py==4.1.1
-accelerate==1.12.0
-open3d==0.19.0
-opencv-python==4.13.0.90
-peft==0.18.1
-sentencepiece==0.2.1
-tensorboard==2.20.0
-torchmetrics==1.8.2
-torch_scater==2.1.2
-safetensors==0.7.0
-tokenizers==0.22.2
-torch==2.8.0
-torchaudio==2.8.0
-torchvision==0.23.0
-tqdm==4.67.1
-transformers==4.57.6
-triton==3.2.0
-protobuf==6.33.4
+# UniAfford 最小复现环境：覆盖 README 推荐的 FSDP 训练 / 验证路径。
+# 目标环境：Python 3.10+，CUDA 12.4，PyTorch 2.6。
+#
+# 安装示例：
+#   pip install -r requirements_minimal.txt
+#
+# 说明：
+# - torch / torchvision 使用 PyTorch CUDA 12.4 wheel。
+# - torch-scatter 使用 PyG 对应 PyTorch 2.6 + CUDA 12.4 的 wheel 索引。
+# - spconv-cu120 是常用于 CUDA 12.x 环境的 spconv wheel；若本机 CUDA/PyTorch
+#   组合不同，需要按实际环境替换 spconv 和 torch-scatter 安装方式。
+
+--extra-index-url https://download.pytorch.org/whl/cu124
+--find-links https://data.pyg.org/whl/torch-2.6.0+cu124.html
+
+# 深度学习核心
+torch==2.6.0+cu124
+torchvision==0.21.0+cu124
+numpy>=1.26,<2.3
+
+# Qwen-VL / LoRA
+transformers>=4.57.0
+peft>=0.18.0
+accelerate>=1.0.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+protobuf>=4.25.0
+
+# 数据读取、指标与日志
+opencv-python-headless>=4.9.0
+Pillow>=10.0.0
+tqdm>=4.65.0
+scikit-learn>=1.4.0
+tensorboard>=2.15.0
+
+# 点云 backbone
+addict>=2.4.0
+timm>=1.0.0
+spconv-cu120>=2.3.6
+torch-scatter>=2.1.2
+
+# 可选：使用 train_ds.py 的 DeepSpeed 训练路径。
+# deepspeed>=0.18.0
+#
+# 可选：使用 app.py 的 Gradio demo。
+# gradio>=4.0.0
+# matplotlib>=3.7.0
+# trimesh>=3.20.0
+#
+# 可选：渲染 / 可视化工具。
+# open3d>=0.18.0
+#
+# 可选：自定义 Qwen flash-attention patch 或 bf16 flash_attention_2 配置。
+# flash-attn>=2.6.0
+#
+# 可选：旧版 PointCept engine 工具。
+# wandb>=0.16.0
+# SharedArray>=3.2.0
+# pycocotools>=2.0.7

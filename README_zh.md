@@ -15,7 +15,7 @@
 
 我们提出了 **Token Router for Tasks** 多任务训练范式，通过将共享 MLLM 的上下文隐状态动态路由至不同任务分支，使密集可供性监督能够直接塑造共享语义表示，而无需依赖预定义的文本任务 token。
 
-为支持统一跨模态学习，我们进一步构建了 **UniAfford-Data**，一个基于统一 object–affordance taxonomy 的大规模可供性数据集，包含二维像素级标注、三维点级标注以及语言指令。
+为支持统一跨模态学习，我们进一步构建了 **UniAfford-Data**，一个按照“物体-可供性“分类的大规模可供性数据集，包含二维像素级标注、三维点级标注以及语言指令。
 
 ## 资源
 
@@ -28,33 +28,30 @@
 | 数据集格式 | [docs/DATASET.md](docs/DATASET.md) |
 | 进阶文档 | [docs/README_ADVANCED.md](docs/README_ADVANCED.md) |
 
+## 仓库结构
+
+- `configs/`：训练、模型与推理配置。
+- `model/`：UniAfford 模型，以及 Segment Anything、PointCept、Qwen-VL 相关子模块。
+- `utils/`：数据集、指标、checkpoint、数据处理与渲染工具。
+- `scripts/`：训练、demo、checkpoint 与可视化相关脚本入口。
+- `train_ds.py` / `train_fsdp.py` / `validate.py` / `app.py`：训练、验证与 demo 顶层入口。
+
 ## 快速开始
 
 ### 环境与安装
 
-推荐 Python 3.10+，CUDA 12.4+，pytorch 2.6+；`requirements.txt` 中的版本主要面向完整训练栈复现。
+推荐 Python 3.10+，CUDA 12.4+，pytorch 2.6+；`requirements.txt` 中提供测验过的最低版本，根据需要安装其中注释掉的部分依赖库。
 
 ```bash
-# 训练 / 验证（完整栈，含 DeepSpeed、transformers、Open3D 等）
-pip install -r requirements.txt
-
-# 仅运行 Gradio demo
-pip install -r requirements_app.txt
+# 安装前先确保文件中的torch\transformer\peft等依赖库的版本适配您的机器，
+pip install -r requirements.txt --no-build-isolation
 ```
 
 ### 运行
 
+可交互的网页版demo，只需要下载checkpoint即可运行：
+
 ```bash
-# 训练（先在 scripts/run_train.sh 中修改 dataset / pretrained / log 路径）
-bash scripts/run_train.sh fsdp   # 或 ds（本项目使用deepspeed容易由于显存峰值OOM，fsdp相对稳定）
-
-# 验证
-python validate.py \
-  --checkpoint_path /path/to/checkpoint.pth \
-  --dataset_dir /path/to/dataset_root \
-  --split test
-
-# Gradio 演示
 python app.py --checkpoint_path /path/to/checkpoint --device cuda --port 7860
 ```
 
@@ -70,7 +67,7 @@ python app.py --checkpoint_path /path/to/checkpoint --device cuda --port 7860
 
 默认路径可在 `scripts/run_train.sh` 或 `configs/` 中调整。
 
-## 数据集格式
+### 数据集格式
 
 数据按 `obj_type` 组织，每个物体类别下包含 `Instruction.csv`、`Image/` 与 `PointCloud/`：
 
@@ -100,14 +97,6 @@ python -m utils.rendering.render_point --render-json docs/auto_render_manifest.j
 ```
 
 详细参数与渲染分层见 [docs/rendering.md](docs/rendering.md)。
-
-## 仓库结构
-
-- `configs/`：训练、模型与推理配置。
-- `model/`：UniAfford 模型，以及 Segment Anything、PointCept、Qwen-VL 相关子模块。
-- `utils/`：数据集、指标、checkpoint、数据处理与渲染工具。
-- `scripts/`：训练、demo、checkpoint 与可视化相关脚本入口。
-- `train_ds.py` / `train_fsdp.py` / `validate.py` / `app.py`：训练、验证与 demo 顶层入口。
 
 ## 致谢
 

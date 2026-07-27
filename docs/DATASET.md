@@ -104,7 +104,7 @@ x,y,z,grasp,contain
 
 - 前三列必须为 `x,y,z`。
 - 第四列起，每个列名都是一个 `aff_type`。
-- 每个 affordance 列中的值是逐点概率。
+- 每个 affordance 列中的值是逐点概率（0~1）。
 - 同一个点云可以通过多个 affordance 列保存多个标注。
 
 ## Split 文件
@@ -175,14 +175,6 @@ python utils/data_process/create_split.py --help
 
 - 标准训练评估：生成 `train.json` / `val.json` / `test.json`。
 - 全库训练：设置 `train_ratio=1.0, val_ratio=0.0, test_ratio=0.0`，只生成训练 split 与 `metadata.json`。
-
-## 发布前检查清单
-
-- 每个 split 中的 ID 都能在磁盘上找到对应文件。
-- `Instruction.csv` 使用固定六列：`ins,obj_type,aff_type,id,img_id,pc_id`。
-- 每个 `Image` split 条目都有对应 RGB 图与 `mask/<aff_type>/` 下的 mask。
-- 每个 `PointCloud` split 条目都有对应 CSV 文件，且 CSV 中存在名为 `<aff_type>` 的列。
-- `obj_type` 与 `aff_type` 命名在目录、文件名、CSV 与 split JSON 中一致。
 
 ## 可视化
 

@@ -28,6 +28,13 @@ from utils.dataset import (
     joint_affordance_collate_fn,
 )
 from utils.common import dict_to_cuda, resolve_dtype
+from utils.computational_cost import (
+    InferenceTimingProfiler,
+    print_flops_summary,
+    print_gpu_memory_summary,
+    print_model_parameter_stats,
+    profile_flops_once,
+)
 from utils.model_io import (
     load_checkpoint_payload,
     load_portable_model,
@@ -98,6 +105,10 @@ def parse_args():
                         help="记录 task token hidden/vocab embedding，并在验证结束后尝试生成 t-SNE 可视化")
     parser.add_argument("--tsne_max_points", type=int, default=4000,
                         help="t-SNE 最多采样点数，避免验证集过大导致内存和耗时过高")
+    parser.add_argument("--disable_cost_profile", action="store_true",
+                        help="关闭推理耗时、FLOPs、显存和参数量统计（默认开启）")
+    parser.add_argument("--cost_warmup_batches", type=int, default=1,
+                        help="耗时统计跳过的 warm-up batch 数（默认：1；仍正常参与指标计算）")
     return parser.parse_args()
 
 
@@ -581,6 +592,14 @@ def main():
     )
     model_cfg = training_cfg.model_config
     model.eval()
+    cost_profile_enabled = not args.disable_cost_profile
+    timing_profiler = InferenceTimingProfiler(model, device) if cost_profile_enabled else None
+    module_flops = None
+    flop_profile_attempted = False
+    flop_profile_batch_size = 0
+    gpu_memory_baseline = 0
+    if cost_profile_enabled:
+        print_model_parameter_stats(model)
 
     # DataLoader
     val_loader, torch_dataset, processor = build_dataloader_for_split(
@@ -643,10 +662,22 @@ def main():
             )
         )
 
+    cost_warmup_batches = min(
+        max(0, int(args.cost_warmup_batches)),
+        max(0, len(val_loader) - 1),
+    )
+    if cost_profile_enabled and device.type == "cuda":
+        torch.cuda.synchronize(device)
+        gpu_memory_baseline = int(torch.cuda.memory_allocated(device))
+        torch.cuda.reset_peak_memory_stats(device)
+
     print("开始验证...")
     with torch.no_grad():
         for batch_idx, input_dict in enumerate(tqdm(val_loader, desc="验证中")):
             input_dict = dict_to_cuda(input_dict, device=device)
+            batch_size = int(input_dict["input_ids"].shape[0])
+            if timing_profiler is not None:
+                timing_profiler.start_batch(measured=batch_idx >= cost_warmup_batches)
             # validate 推理必须只使用 prompt 进行 generate，GT answer 仅用于指标与文本对齐记录。
             output_dict = run_model_inference(
                 model,
@@ -655,6 +686,23 @@ def main():
                 return_hidden_states=args.save_tsne,
                 generate_query_fallback=args.generate_query_fallback,
             )
+            if timing_profiler is not None:
+                timing_profiler.finish_batch(batch_size=batch_size)
+
+            # FLOPs profiler 会重复执行一次真实推理；与耗时统计分开，避免 profiler 开销污染延迟。
+            if cost_profile_enabled and not flop_profile_attempted:
+                flop_profile_attempted = True
+                flop_profile_batch_size = batch_size
+                module_flops = profile_flops_once(
+                    model=model,
+                    inference_fn=lambda: run_model_inference(
+                        model,
+                        input_dict,
+                        inference_mode=args.inference_mode,
+                        return_hidden_states=False,
+                        generate_query_fallback=args.generate_query_fallback,
+                    ),
+                )
 
             # 计算损失 + 更新指标（包括 2D IoU/KLD/SIM/NSS 与 3D IoU/MAE/AUC/SIM）
             loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
@@ -691,7 +739,6 @@ def main():
                 aligned_attention_batch = aligned_attention_batch.detach().cpu()
 
             # ---- 逐样本记录 ----
-            batch_size = input_dict["input_ids"].shape[0]
             for i in range(batch_size):
                 sample_idx = batch_idx * infer_cfg.batch_size + i
                 if sample_idx >= len(torch_dataset):
@@ -845,6 +892,13 @@ def main():
             del output_dict, loss_dict, input_dict, pred_token_ids_batch
             if device.type == "cuda" and (batch_idx + 1) % 100 == 0:
                 torch.cuda.empty_cache()
+
+    if timing_profiler is not None:
+        timing_profiler.print_summary(warmup_batches=cost_warmup_batches)
+        timing_profiler.close()
+    print_flops_summary(module_flops, batch_size=flop_profile_batch_size)
+    if cost_profile_enabled:
+        print_gpu_memory_summary(device, baseline_allocated=gpu_memory_baseline)
 
     results = compute_and_reset_torchmetrics(metrics)
     threshold_search_results = {}
