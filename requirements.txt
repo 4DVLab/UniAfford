@@ -36,7 +36,7 @@ tensorboard>=2.15.0
 # 点云 backbone
 addict>=2.4.0
 timm>=1.0.0
-spconv-cu120>=2.3.6
+spconv-cu124>=2.3.6
 torch-scatter>=2.1.2
 
 # 可选：使用 train_ds.py 的 DeepSpeed 训练路径。

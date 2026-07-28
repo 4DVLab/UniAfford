@@ -339,6 +339,44 @@ class MLLMBackbone(nn.Module):
         from transformers import Qwen2VLForConditionalGeneration
         return Qwen2VLForConditionalGeneration
 
+    @staticmethod
+    def _default_qwen_rope_scaling() -> Dict[str, Any]:
+        # Qwen2/3-VL 需要非空 rope_scaling；部分旧 checkpoint 序列化后会变成 null。
+        return {
+            "rope_type": "default",
+            "mrope_section": [24, 20, 20],
+            "mrope_interleaved": True,
+        }
+
+    @classmethod
+    def _ensure_qwen_rope_scaling(cls, config_obj, fallback_model_path: Optional[str] = None) -> None:
+        """避免 transformers 在 rope_scaling=None 时调用 .get() 直接崩溃。"""
+        targets = [config_obj]
+        text_cfg = getattr(config_obj, "text_config", None)
+        if text_cfg is not None:
+            targets.append(text_cfg)
+
+        needs_fix = any(getattr(cfg, "rope_scaling", None) is None for cfg in targets)
+        if not needs_fix:
+            return
+
+        rope_scaling = None
+        if fallback_model_path and Path(fallback_model_path).exists():
+            try:
+                ref_cfg = AutoConfig.from_pretrained(fallback_model_path, local_files_only=True)
+                rope_scaling = getattr(ref_cfg, "rope_scaling", None)
+                if rope_scaling is None and getattr(ref_cfg, "text_config", None) is not None:
+                    rope_scaling = getattr(ref_cfg.text_config, "rope_scaling", None)
+            except Exception as exc:
+                print(f"[Warning] 无法从本地 Qwen 配置读取 rope_scaling: {exc}")
+
+        if not isinstance(rope_scaling, dict):
+            rope_scaling = cls._default_qwen_rope_scaling()
+
+        for cfg in targets:
+            if getattr(cfg, "rope_scaling", None) is None:
+                setattr(cfg, "rope_scaling", dict(rope_scaling))
+
     def _build_qwen_from_serialized_config(self, config: MLLMConfigs):
         serialized_files = config.serialized_model_config_files
         if not serialized_files:
@@ -347,6 +385,10 @@ class MLLMBackbone(nn.Module):
         with tempfile.TemporaryDirectory(prefix="ja_qwen_restore_") as tmpdir:
             self._write_temp_assets(tmpdir, serialized_files)
             config_obj = AutoConfig.from_pretrained(tmpdir, local_files_only=True)
+            self._ensure_qwen_rope_scaling(
+                config_obj,
+                fallback_model_path=config.qwen_model_name_or_path,
+            )
             if config.qwen_attn_implementation is not None:
                 setattr(config_obj, "_attn_implementation", config.qwen_attn_implementation)
                 setattr(config_obj, "attn_implementation", config.qwen_attn_implementation)
