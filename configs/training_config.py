@@ -9,7 +9,7 @@ from typing import List, Optional, Union
 import torch
 from utils.common import resolve_dtype
 
-from .base_config import Configs, ImageDecoderConfigs, JointAffordanceConfig, MLLMConfigs, PointDecoderConfigs
+from .base_config import Configs, ImageDecoderConfigs, UniAffordConfig, MLLMConfigs, PointDecoderConfigs
 
 
 class DeepSpeedConfigs(Configs):
@@ -234,7 +234,7 @@ class TrainingConfig(Configs):
     def __init__(
         self,
         config_dict: Optional[dict] = None,
-        model_config: Optional[JointAffordanceConfig | dict] = None,
+        model_config: Optional[UniAffordConfig | dict] = None,
         deepspeed_config: Optional[DeepSpeedConfigs | dict] = None,
         lora_config: Optional[LoRAConfigs | dict] = None,
         **kwargs,
@@ -253,13 +253,13 @@ class TrainingConfig(Configs):
             lora_config = raw.pop("lora")
 
         if model_config is None:
-            model_config = JointAffordanceConfig(
+            model_config = UniAffordConfig(
                 mllm_config=MLLMConfigs(compute_dtype="fp32"),  # Qwen必须使用bf16以使用flash-attn
                 image_decoder=ImageDecoderConfigs(compute_dtype="fp32"),  # 分布式训练要求保持参数精度一致
                 point_decoder=PointDecoderConfigs(compute_dtype="fp32"),
             )
-        elif not isinstance(model_config, JointAffordanceConfig):
-            model_config = JointAffordanceConfig(model_config)
+        elif not isinstance(model_config, UniAffordConfig):
+            model_config = UniAffordConfig(model_config)
 
         deepspeed_config = (
             deepspeed_config
@@ -326,7 +326,7 @@ class TrainingConfig(Configs):
         # tokenizer 句柄不可从 JSON 恢复，统一置空并在运行时重建
         mllm_data["tokenizer"] = None
 
-        model_cfg = JointAffordanceConfig(
+        model_cfg = UniAffordConfig(
             mllm_config=MLLMConfigs(**mllm_data),
             image_decoder=ImageDecoderConfigs(**image_data),
             point_decoder=PointDecoderConfigs(**point_data),

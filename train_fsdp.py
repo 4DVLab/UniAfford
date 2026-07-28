@@ -1,5 +1,5 @@
 """
-Joint Affordance 训练脚本（FSDP 版本，基于 Qwen MLLM）
+UniAfford 训练脚本（FSDP 版本，基于 Qwen MLLM）
 
 与现有的 train.py 基本一致，唯一主要区别：
 - 使用 PyTorch FSDP 替代 DeepSpeed，用于模型分片（ZeRO-3 等价能力）
@@ -32,12 +32,12 @@ from transformers import get_cosine_schedule_with_warmup
 from tqdm import tqdm
 
 from configs import TrainingConfig
-from model.joint_affordance import JointAffordanceModel
+from model.UniAfford import UniAffordModel
 from utils.base_dataset import JointDataset
 from utils.dataset import (
-    JointAffordanceTorchDataset,
-    JointAffordanceTrainDataset,
-    joint_affordance_collate_fn,
+    UniAffordTorchDataset,
+    UniAffordTrainDataset,
+    UniAfford_collate_fn,
     build_functional_tokens_from_samples,
     build_functional_tokens_from_sample_ids,
 )
@@ -65,7 +65,7 @@ ENV_LOCAL_RANK = int(os.environ.get("LOCAL_RANK", 0))
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="JointAffordance (Qwen) training with FSDP")
+    parser = argparse.ArgumentParser(description="UniAfford (Qwen) training with FSDP")
     parser.add_argument("--qwen_model", type=str, default=None, help="Qwen 模型路径或名称")
     parser.add_argument("--vision_pretrained", type=str, default=None, help="SAM 权重路径")
     parser.add_argument("--point_backbone_pretrained", type=str, default=None, help="SONATA point backbone 预训练权重路径")
@@ -469,7 +469,7 @@ def main():
 
     logger = setup_logger(training_configs.log_dir, local_rank)
     logger.info("=" * 80)
-    logger.info("Joint Affordance Model - FSDP 训练开始")
+    logger.info("UniAfford Model - FSDP 训练开始")
     logger.info("=" * 80)
 
     writer = None
@@ -532,7 +532,7 @@ def main():
 
     # ---------- 初始化模型 ----------
     logger.info("正在初始化模型...")
-    model = JointAffordanceModel(model_config)
+    model = UniAffordModel(model_config)
     if getattr(model, "point_encoder", None) is not None and getattr(model.point_encoder, "pretrained_info", None):
         load_info = model.point_encoder.pretrained_info
         model_config.mllm.point_encoder_pretrained_config = load_info.get("config_path")
@@ -564,7 +564,7 @@ def main():
     # 直接复用模型内部的 processor（已含注入 functional tokens 的 tokenizer + image_processor），
     processor = model.processor
     data_collator = partial(
-        joint_affordance_collate_fn,
+        UniAfford_collate_fn,
         tokenizer=model.tokenizer,
         output_image_size=training_configs.image_size,
         output_point_nums=training_configs.num_points,
@@ -613,7 +613,7 @@ def main():
                 f"已加载断点模型: {resume_path} | missing={len(miss)} unexpected={len(unexp)}"
             )
 
-    train_ds_cls = JointAffordanceTrainDataset if training_configs.samples_per_epoch else JointAffordanceTorchDataset
+    train_ds_cls = UniAffordTrainDataset if training_configs.samples_per_epoch else UniAffordTorchDataset
     train_ds_kwargs = dict(
         processor=processor, image_size=training_configs.image_size, num_points=training_configs.num_points,
         mllm_precision=model_config.mllm.compute_dtype,
@@ -626,7 +626,7 @@ def main():
         train_ds_kwargs["samples_per_epoch"] = training_configs.samples_per_epoch
     train_dataset = train_ds_cls(train_samples, **train_ds_kwargs)
 
-    val_dataset = JointAffordanceTorchDataset(
+    val_dataset = UniAffordTorchDataset(
         val_samples,
         **{k: v for k, v in train_ds_kwargs.items() if k != "samples_per_epoch"}
     )

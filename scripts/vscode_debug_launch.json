@@ -9,7 +9,7 @@
             "request": "launch",
             "console": "integratedTerminal",
             "args": [
-                "-d", "/mnt/data/datasets/2D-3D-JointAffordance/merged1-2-3",
+                "-d", "/mnt/data/datasets/UniAfford/merged1-2-3",
                 "--save-split",
             ],
         },
@@ -23,9 +23,9 @@
             "args": [
                 "-m", "img", "ins",
                 "-i", "/mnt/data/datasets/RAGNet",
-                "-o", "/mnt/data/datasets/2D-3D-JointAffordance/3_RAGNet/",
+                "-o", "/mnt/data/datasets/UniAfford/3_RAGNet/",
                 "-d", "RAGNet",
-                "-info", "/mnt/data/datasets/2D-3D-JointAffordance/2_PIADv2/info.json"
+                "-info", "/mnt/data/datasets/UniAfford/2_PIADv2/info.json"
             ],
         },
         {
@@ -38,7 +38,7 @@
             "args": [
                 "-m", "pc",
                 "-i", "/mnt/data/datasets/AGPIL/AGPIL",
-                "-o", "/mnt/data/datasets/2D-3D-JointAffordance/1_AGPIL/",
+                "-o", "/mnt/data/datasets/UniAfford/1_AGPIL/",
                 "-d", "AGPIL",
             ],
         },  
@@ -52,9 +52,9 @@
             "args": [
                 "-m", "pc",
                 "-i", "/mnt/data/datasets/PIADv2 (GREAT)",
-                "-o", "/mnt/data/datasets/2D-3D-JointAffordance/2_PIADv2/",
+                "-o", "/mnt/data/datasets/UniAfford/2_PIADv2/",
                 "-d", "PIADv2",
-                "-info", "/mnt/data/datasets/2D-3D-JointAffordance/1_AGPIL/info.json"
+                "-info", "/mnt/data/datasets/UniAfford/1_AGPIL/info.json"
             ],
         }, 
         {

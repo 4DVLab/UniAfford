@@ -1,9 +1,9 @@
 """
-Joint Affordance 验证脚本（新版，适配 Qwen + JointAffordanceModel）
+UniAfford 验证脚本（新版，适配 Qwen + UniAffordModel）
 
 相对 validate_old.py 的主要变化：
-- 使用新的 JointAffordanceModel（Qwen3-VL + SAM + PointNet++），不再依赖 LISAForCausalLM / deepspeed.init_inference
-- 使用 JointDataset + JointAffordanceTorchDataset 作为数据来源（与 train.py 一致）
+- 使用新的 UniAffordModel（Qwen3-VL + SAM + PointNet++），不再依赖 LISAForCausalLM / deepspeed.init_inference
+- 使用 JointDataset + UniAffordTorchDataset 作为数据来源（与 train.py 一致）
 - 使用 utils.metrics 中的 torchmetrics 方案统一统计 2D / 3D 指标
 - 输出字典字段为 "image_logits" / "point_logits"，并据此保存预测结果
 """
@@ -24,8 +24,8 @@ from configs import TrainingConfig
 from configs.inference_config import InferenceConfig
 from utils.base_dataset import JointDataset
 from utils.dataset import (
-    JointAffordanceTorchDataset,
-    joint_affordance_collate_fn,
+    UniAffordTorchDataset,
+    UniAfford_collate_fn,
 )
 from utils.common import dict_to_cuda, resolve_dtype
 from utils.computational_cost import (
@@ -58,7 +58,7 @@ from collections import defaultdict
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="验证 JointAffordance 模型（新版）")
+    parser = argparse.ArgumentParser(description="验证 UniAfford 模型（新版）")
     parser.add_argument("--checkpoint_path", type=str, required=True,
                         help="训练好的模型 checkpoint 路径；支持单文件 .pth 或 HF 分片目录")
     parser.add_argument("--config_json", type=str, default=None,
@@ -132,7 +132,7 @@ def build_dataloader_for_split(
 ):
     """根据 split（train/val/test）构建对应的 DataLoader。"""
     collator = partial(
-        joint_affordance_collate_fn,
+        UniAfford_collate_fn,
         tokenizer=processor.tokenizer,
         output_image_size=training_cfg.image_size,
         output_point_nums=training_cfg.num_points,
@@ -147,7 +147,7 @@ def build_dataloader_for_split(
         lazy_load=lazy_load,
     )
     samples = joint_dataset if lazy_load else joint_dataset.load_all_data().samples
-    torch_dataset = JointAffordanceTorchDataset(
+    torch_dataset = UniAffordTorchDataset(
         samples,
         processor=processor,
         image_size=training_cfg.image_size,
@@ -180,7 +180,7 @@ def run_model_inference(
     """根据验证模式执行模型推理。
 
     Args:
-        model: JointAffordanceModel 实例。
+        model: UniAffordModel 实例。
         input_dict: 已经移动到目标设备上的 batch 输入。
         inference_mode: ``"generate"`` 使用 prompt-only 自回归推理；``"forward"`` 使用
             teacher-forcing 前向，仅用于诊断 forward 上限。

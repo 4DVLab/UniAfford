@@ -25,7 +25,7 @@ if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
 from configs import TrainingConfig
-from model.joint_affordance import JointAffordanceModel
+from model.UniAfford import UniAffordModel
 from peft import get_peft_model
 
 
@@ -102,7 +102,7 @@ def _load_rank_shard(sharded_dir: str, rank: int) -> Dict[str, Any]:
 
 def _build_model_for_merge(cfg: TrainingConfig, local_rank: int) -> FSDP:
     model_cfg = cfg.model_config
-    model = JointAffordanceModel(model_cfg)
+    model = UniAffordModel(model_cfg)
 
     if cfg.lora.lora_r > 0:
         model.mllm.model = get_peft_model(model.mllm.model, cfg.lora.to_peft_config())

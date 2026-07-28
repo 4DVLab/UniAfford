@@ -1,5 +1,5 @@
 #!/bin/bash
-# LISA 2D-3D Joint Affordance Demo 启动脚本
+# LISA 2D-3D UniAfford Demo 启动脚本
 
 # 设置环境变量
 export CUDA_VISIBLE_DEVICES=0

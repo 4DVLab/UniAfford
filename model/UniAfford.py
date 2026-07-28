@@ -1,12 +1,12 @@
 """
-JointAffordance模型骨架，子架构分布到其他model中并作为模块导入
+UniAfford模型骨架，子架构分布到其他model中并作为模块导入
 """
 from typing import Optional, Dict, List, Tuple
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from configs import JointAffordanceConfig
+from configs import UniAffordConfig
 from model.pointcept import PointCloudHiddenStateDecoder
 from model.segment_anything import ImageHiddenStateDecoder
 from model.qwenvl import MLLMBackbone
@@ -14,7 +14,7 @@ from model.HeadRouter import HeadRouter
 from utils.common import IGNORE_INDEX
 
 
-class JointAffordanceModel(nn.Module):
+class UniAffordModel(nn.Module):
     """模型管理基座，负责加载配置并组织各模块。"""
 
     @staticmethod
@@ -326,9 +326,9 @@ class JointAffordanceModel(nn.Module):
         _append_branch("pc", pc_route_idx, pc_fallback_mask)
         return pairs
 
-    def __init__(self, config: Optional[JointAffordanceConfig] = None):
+    def __init__(self, config: Optional[UniAffordConfig] = None):
         super().__init__()
-        self.config = config or JointAffordanceConfig()
+        self.config = config or UniAffordConfig()
 
         self.mllm = MLLMBackbone(self.config.mllm)
         self.functional_tokens = self.mllm.functional_tokens
@@ -932,7 +932,7 @@ class JointAffordanceModel(nn.Module):
 
 
 __all__ = [
-    "JointAffordanceModel",
+    "UniAffordModel",
     "MLLMBackbone",
     "ImageHiddenStateDecoder",
     "PointCloudHiddenStateDecoder",

@@ -228,7 +228,7 @@ class PointDecoderConfigs(Configs):
         super().__init__(raw)
 
 
-class JointAffordanceConfig(Configs):
+class UniAffordConfig(Configs):
     """联合可供性模型的配置类。"""
 
     def __init__(
@@ -280,5 +280,5 @@ __all__ = [
     "MLLMConfigs",
     "ImageDecoderConfigs",
     "PointDecoderConfigs",
-    "JointAffordanceConfig",
+    "UniAffordConfig",
 ]

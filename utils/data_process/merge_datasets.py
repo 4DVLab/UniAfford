@@ -189,7 +189,7 @@ def copy_obj(obj_path, obj_name):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="将dataset.py处理的不同位置数据整合为同一个数据集（合并所有的Ins.csv）")
     parser.add_argument('-i', '--input', type=str, nargs="+", help='输入数据集的根目录，按照物体-模态分类')
-    parser.add_argument('-o', '--output', type=str, help='输出位置', default='/mnt/data/datasets/2D-3D-JointAffordance/merged')
+    parser.add_argument('-o', '--output', type=str, help='输出位置', default='/mnt/data/datasets/UniAfford-Data/merged')
     parser.add_argument('-f', '--filter', action='store_true', help='仅保留包含三元组的数据', default=False)
     parser.add_argument('--save_split', action='store_true', default=True, help='合并后额外分割数据集并保存分割文件 json')
 

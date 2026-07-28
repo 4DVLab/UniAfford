@@ -4,7 +4,7 @@
 from .training_config import TrainingConfig
 from .inference_config import InferenceConfig
 from .base_config import (
-    JointAffordanceConfig,
+    UniAffordConfig,
     MLLMConfigs,
     ImageDecoderConfigs,
     PointDecoderConfigs,
@@ -14,7 +14,7 @@ from .base_config import (
 __all__ = [
     "TrainingConfig",
     "InferenceConfig",
-    "JointAffordanceConfig",
+    "UniAffordConfig",
     "MLLMConfigs",
     "ImageDecoderConfigs",
     "PointDecoderConfigs",

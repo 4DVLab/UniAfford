@@ -210,7 +210,7 @@ def write_readme(output_dir: Path, index_name: str, fmt: str, source: Path) -> P
                 "- Project metadata: `checkpoint_meta.pt`",
                 "",
                 "Upload the index file and all shard files to the Hugging Face model repository.",
-                "For this project, load the tensors as a normal state_dict and pass them to `JointAffordanceModel.load_state_dict`.",
+                "For this project, load the tensors as a normal state_dict and pass them to `UniAffordModel.load_state_dict`.",
                 "",
             ]
         ),

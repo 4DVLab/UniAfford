@@ -17,8 +17,8 @@ from utils.base_dataset import Instruction, Image, PointCloud, load_info, save_i
 from utils.common import resolve_path
 
 # 全局参数
-DEFAULT_OUTPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 输出的数据集位置（用于数据转换，训练推理时可忽略）
-DEFAULT_INPUT_DIR = "/mnt/data/datasets/2D-3DJointAffordance"  # 加载的数据集位置（输入数据位置，或转换数据集的输入位置）
+DEFAULT_OUTPUT_DIR = "/mnt/data/datasets/UniAfford-Data"  # 输出的数据集位置（用于数据转换，训练推理时可忽略）
+DEFAULT_INPUT_DIR = "/mnt/data/datasets/UniAfford-Data"  # 加载的数据集位置（输入数据位置，或转换数据集的输入位置）
 
 
 def normalize_readme_label(label, fallback='unknown'):

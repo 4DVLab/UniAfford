@@ -161,7 +161,7 @@ dataset = JointDataset(
 samples = dataset.load_all_data().samples
 ```
 
-训练时，原始样本会进一步由 `utils.dataset.JointAffordanceTorchDataset` 转换为模型输入，包括文本 token、Qwen-VL 图像输入、2D mask、点云与 3D mask。
+训练时，原始样本会进一步由 `utils.dataset.UniAffordTorchDataset` 转换为模型输入，包括文本 token、Qwen-VL 图像输入、2D mask、点云与 3D mask。
 
 ## 生成 Split
 

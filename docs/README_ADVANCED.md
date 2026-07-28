@@ -25,7 +25,7 @@
 
 ## 单样本与 Batch 输出
 
-`JointDataSample.get_data()` 返回原始数据，`utils/dataset.py` 中的 `JointAffordanceTorchDataset._build_sample()` 将其转为模型可用的单样本字典：
+`JointDataSample.get_data()` 返回原始数据，`utils/dataset.py` 中的 `UniAffordTorchDataset._build_sample()` 将其转为模型可用的单样本字典：
 
 ```python
 {
@@ -43,7 +43,7 @@
 }
 ```
 
-`joint_affordance_collate_fn()` 会进一步组织为 batch：
+`UniAfford_collate_fn()` 会进一步组织为 batch：
 
 ```python
 {
@@ -65,7 +65,7 @@
 
 ## 模型输入输出
 
-`JointAffordanceModel.forward` 接收与 collate 输出一致的字典，并返回：
+`UniAffordModel.forward` 接收与 collate 输出一致的字典，并返回：
 
 ```python
 {

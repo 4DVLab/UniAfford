@@ -104,7 +104,7 @@ class MLLMBackbone(nn.Module):
         这里不把 router 注册成 MLLM 子模块，避免影响权重保存、加载和 state_dict 结构。
         """
         # 这里只保存运行时引用，不能注册成 MLLM 子模块；否则 state_dict 会多出
-        # mllm._generation_feedback_router.*，与外层 JointAffordanceModel.router 重复。
+        # mllm._generation_feedback_router.*，与外层 UniAffordModel.router 重复。
         self._modules.pop("_generation_feedback_router", None)
         object.__setattr__(self, "_generation_feedback_router", router)
 

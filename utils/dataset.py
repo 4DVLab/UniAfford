@@ -1,4 +1,4 @@
-"""JointAffordanceModel 的 PyTorch Dataset 适配层。"""
+"""UniAffordModel 的 PyTorch Dataset 适配层。"""
 
 import random
 import warnings
@@ -50,7 +50,7 @@ def build_functional_tokens_from_sample_ids(sample_ids: Dict[str, Any]) -> Dict[
     }
 
 
-class JointAffordanceTorchDataset(Dataset):
+class UniAffordTorchDataset(Dataset):
     """将 JointDataSample 预构建为 CPU 张量样本。"""
 
     def __init__(
@@ -562,7 +562,7 @@ class JointAffordanceTorchDataset(Dataset):
 
     def _build_sample(self, sample: Any) -> Dict[str, Any]:
         """
-        构建 JointAffordanceModel 的单样本输入，并统一返回 CPU 张量。
+        构建 UniAffordModel 的单样本输入，并统一返回 CPU 张量。
 
         Returns:
             {
@@ -659,7 +659,7 @@ class JointAffordanceTorchDataset(Dataset):
         return result
 
 
-class JointAffordanceTrainDataset(JointAffordanceTorchDataset):
+class UniAffordTrainDataset(UniAffordTorchDataset):
     """训练阶段随机采样 epoch 子集。"""
 
     def __init__(
@@ -709,7 +709,7 @@ class JointAffordanceTrainDataset(JointAffordanceTorchDataset):
         return super().__getitem__(actual_index)
 
 
-def joint_affordance_collate_fn(
+def UniAfford_collate_fn(
     batch: List[Dict],
     tokenizer=None,
     output_image_size=(1024, 1024),
@@ -817,7 +817,7 @@ def joint_affordance_collate_fn(
         # 理论上不会发生（dataset 已提供占位图），若触发说明数据异常
         dummy_h, dummy_w = output_image_size
         warnings.warn(
-            "joint_affordance_collate_fn: pixel_values 全为空，已使用占位图回填。"
+            "UniAfford_collate_fn: pixel_values 全为空，已使用占位图回填。"
             "请检查数据集/预处理逻辑。",
             RuntimeWarning,
         )

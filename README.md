@@ -104,7 +104,7 @@ See [docs/rendering.md](docs/rendering.md) for rendering details.
 ## Repository Structure
 
 - `configs/`: training, model, and inference configurations.
-- `model/`: the joint affordance model and related Segment Anything, PointCept, and Qwen-VL modules.
+- `model/`: the UniAfford model and related Segment Anything, PointCept, and Qwen-VL modules.
 - `utils/`: dataset loading, metrics, checkpoints, data processing, and rendering utilities.
 - `scripts/`: training, demo, checkpoint, and visualization entry points.
 - `train_ds.py` / `train_fsdp.py` / `validate.py` / `app.py`: top-level training, validation, and demo scripts.

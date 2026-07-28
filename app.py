@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-Joint Affordance 在线演示应用。
+UniAfford 在线演示应用。
 
 用法示例：
 python app.py --checkpoint_path path/to/checkpoint.pt --device cuda --port 7860
@@ -21,7 +21,7 @@ from PIL import Image
 
 from configs import TrainingConfig
 from utils.common import DEFAULT_PC_TOKEN, dict_to_cuda, resolve_dtype
-from utils.dataset import JointAffordanceTorchDataset, joint_affordance_collate_fn
+from utils.dataset import UniAffordTorchDataset, UniAfford_collate_fn
 from utils.model_io import load_portable_model
 
 
@@ -133,7 +133,7 @@ def load_point_cloud(path: str) -> np.ndarray:
     return points
 
 
-class JointAffordanceDemoEngine:
+class UniAffordDemoEngine:
     """复用 validate.py 的模型加载方式和数据集侧输入构造逻辑。"""
 
     def __init__(
@@ -179,7 +179,7 @@ class JointAffordanceDemoEngine:
         self.image_precision = resolve_dtype(self.model_cfg.image_decoder.compute_dtype) or torch.float32
         self.point_precision = resolve_dtype(self.model_cfg.point_decoder.compute_dtype) or torch.float32
 
-        self._dataset_helper = JointAffordanceTorchDataset(
+        self._dataset_helper = UniAffordTorchDataset(
             [],
             processor=self.processor,
             image_size=self.image_size,
@@ -268,7 +268,7 @@ class JointAffordanceDemoEngine:
             }
         )
 
-        batch = joint_affordance_collate_fn(
+        batch = UniAfford_collate_fn(
             [sample],
             tokenizer=self.tokenizer,
             output_image_size=self.image_size,
@@ -377,7 +377,7 @@ class JointAffordanceDemoEngine:
         ax.set_zlim(centers[2] - radius, centers[2] + radius)
 
 
-def create_gradio_interface(engine: JointAffordanceDemoEngine):
+def create_gradio_interface(engine: UniAffordDemoEngine):
     def run_inference(image, point_cloud_file, prompt, obj_type, aff_type):
         prompt = (prompt or "").strip()
         obj_type = (obj_type or "object").strip()
@@ -396,10 +396,10 @@ def create_gradio_interface(engine: JointAffordanceDemoEngine):
         except TypeError:
             return gr.Image(**image_kwargs)
 
-    with gr.Blocks(title="2D-3D Joint Affordance Demo", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="2D-3D UniAfford Demo", theme=gr.themes.Soft()) as demo:
         gr.Markdown(
             """
-            # 2D-3D Joint Affordance Demo
+            # 2D-3D UniAfford Demo
             上传或粘贴图片、拖入点云文件，并输入文本提示。模型会对可用模态执行推理，并在网页中显示高亮结果。
             """
         )
@@ -444,7 +444,7 @@ def create_gradio_interface(engine: JointAffordanceDemoEngine):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Joint Affordance Gradio Demo")
+    parser = argparse.ArgumentParser(description="UniAfford Gradio Demo")
     parser.add_argument("--checkpoint_path", "--model_path", dest="checkpoint_path", required=True, help="训练好的 checkpoint 路径")
     parser.add_argument("--config_json", type=str, default=None, help="训练配置 JSON；默认在 checkpoint 同目录查找")
     parser.add_argument("--qwen_model", type=str, default=None, help="Qwen 模型路径或名称，覆盖训练配置")
@@ -455,7 +455,7 @@ def main():
     parser.add_argument("--share", action="store_true", help="创建 Gradio 公共链接")
     args = parser.parse_args()
 
-    engine = JointAffordanceDemoEngine(
+    engine = UniAffordDemoEngine(
         checkpoint_path=args.checkpoint_path,
         config_json=args.config_json,
         qwen_model=args.qwen_model,

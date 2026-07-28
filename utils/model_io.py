@@ -266,9 +266,9 @@ def load_portable_model(
     model_cfg = training_cfg.model_config
     _inject_portable_assets(model_cfg, ckpt_payload)
 
-    from model.joint_affordance import JointAffordanceModel
+    from model.UniAfford import UniAffordModel
 
-    model = JointAffordanceModel(model_cfg)
+    model = UniAffordModel(model_cfg)
     if training_cfg.lora.lora_r > 0:
         from peft import get_peft_model
         model.mllm.model = get_peft_model(model.mllm.model, training_cfg.lora.to_peft_config())

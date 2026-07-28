@@ -546,7 +546,7 @@ class HeadRouter(nn.Module):
         base_token_ids: Optional[torch.Tensor] = None,
     ) -> Dict[str, Any]:
         """
-        路由统一前向入口（供 JointAffordance 直接调用）。
+        路由统一前向入口（供 UniAfford 直接调用）。
 
         一次调用完成：
         1) token 路由计算；
