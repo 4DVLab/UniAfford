@@ -300,14 +300,66 @@ class MLLMBackbone(nn.Module):
             file_path.parent.mkdir(parents=True, exist_ok=True)
             file_path.write_bytes(content)
 
+    @staticmethod
+    def _sanitize_restored_tokenizer_config(root_dir: str) -> None:
+        """兼容 transformers v5 序列化的 tokenizer_config 到 v4 加载路径。
+
+        v5 可能把 extra_special_tokens 存成 list；v4 的
+        `_set_model_specific_special_tokens` 会对其调用 .keys() 并崩溃。
+        """
+        import json
+
+        cfg_path = Path(root_dir) / "tokenizer_config.json"
+        if not cfg_path.exists():
+            return
+        try:
+            data = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            print(f"[Warning] 读取 tokenizer_config.json 失败，跳过兼容修补: {exc}")
+            return
+        if not isinstance(data, dict):
+            return
+
+        changed = False
+        extra = data.get("extra_special_tokens")
+        if isinstance(extra, list):
+            # tokens 仍保留在 added_tokens / tokenizer.json 中；这里转成 v4 期望的 dict，
+            # 或在无丢弃时直接删除，避免 .keys() 报错。
+            data["extra_special_tokens"] = {
+                str(tok): str(tok) for tok in extra if isinstance(tok, str)
+            }
+            changed = True
+        elif extra is not None and not isinstance(extra, dict):
+            data.pop("extra_special_tokens", None)
+            changed = True
+
+        if changed:
+            cfg_path.write_text(
+                json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
     def _build_processor(self, config: MLLMConfigs):
         serialized_files = config.serialized_processor_files
         if config.restore_from_checkpoint and serialized_files:
             with tempfile.TemporaryDirectory(prefix="ja_processor_restore_") as tmpdir:
                 self._write_temp_assets(tmpdir, serialized_files)
-                return AutoProcessor.from_pretrained(tmpdir, local_files_only=True)
+                self._sanitize_restored_tokenizer_config(tmpdir)
+                try:
+                    return AutoProcessor.from_pretrained(
+                        tmpdir,
+                        local_files_only=True,
+                        use_fast=False,
+                    )
+                except Exception as exc:
+                    qwen_path = self.config.qwen_model_name_or_path
+                    print(
+                        f"[Warning] 从 checkpoint 恢复 processor 失败 ({exc})，"
+                        f"回退到本地 Qwen 路径: {qwen_path}"
+                    )
         return AutoProcessor.from_pretrained(
             self.config.qwen_model_name_or_path,
+            use_fast=False,
         )
 
     @staticmethod

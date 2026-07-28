@@ -151,60 +151,17 @@ def _build_sam(
         pixel_std=[58.395, 57.12, 57.375],
     )
     sam.eval()  # 设置为评估模式
-    # 如果提供了检查点，加载权重
+    # 验证/便携 checkpoint 场景下，SAM 权重通常已在 UniAfford state_dict 中；
+    # 本地 sam_vit_*.pth 缺失时不应阻断模型构建。
     if checkpoint is not None:
-        with open(checkpoint, "rb") as f:
-            state_dict = torch.load(f)
-        sam.load_state_dict(state_dict, strict=False)
-    return sam
-
-    vit_patch_size = 16  # ViT patch 大小
-    image_embedding_size = image_size // vit_patch_size  # 图像嵌入尺寸
-    # 构建 SAM 模型
-    sam = Sam(
-        # 图像编码器：ViT 架构
-        image_encoder=ImageEncoderViT(
-            depth=encoder_depth,
-            embed_dim=encoder_embed_dim,
-            img_size=image_size,
-            mlp_ratio=4,
-            norm_layer=partial(torch.nn.LayerNorm, eps=1e-6),
-            num_heads=encoder_num_heads,
-            patch_size=vit_patch_size,
-            qkv_bias=True,
-            use_rel_pos=True,
-            global_attn_indexes=encoder_global_attn_indexes,
-            window_size=14,
-            out_chans=prompt_embed_dim,
-        ),
-        # Prompt 编码器：编码点、框、掩码等提示
-        prompt_encoder=PromptEncoder(
-            embed_dim=prompt_embed_dim,
-            image_embedding_size=(image_embedding_size, image_embedding_size),
-            input_image_size=(image_size, image_size),
-            mask_in_chans=16,
-        ),
-        # 掩码解码器：从图像嵌入和提示生成分割掩码
-        mask_decoder=MaskDecoder(
-            num_multimask_outputs=3,  # 多掩码输出数量
-            transformer=TwoWayTransformer(
-                depth=2,
-                embedding_dim=prompt_embed_dim,
-                mlp_dim=2048,
-                num_heads=8,
-            ),
-            transformer_dim=prompt_embed_dim,
-            iou_head_depth=3,  # IoU 预测头深度
-            iou_head_hidden_dim=256,
-        ),
-        # 像素归一化参数（ImageNet 统计值）
-        pixel_mean=[123.675, 116.28, 103.53],
-        pixel_std=[58.395, 57.12, 57.375],
-    )
-    sam.eval()  # 设置为评估模式
-    # 如果提供了检查点，加载权重
-    if checkpoint is not None:
-        with open(checkpoint, "rb") as f:
-            state_dict = torch.load(f)
-        sam.load_state_dict(state_dict, strict=False)
+        import os
+        if not os.path.exists(checkpoint):
+            print(
+                f"[Warning] SAM 预训练权重不存在: {checkpoint}；"
+                "将跳过本地加载，等待后续 UniAfford checkpoint 覆盖。"
+            )
+        else:
+            with open(checkpoint, "rb") as f:
+                state_dict = torch.load(f)
+            sam.load_state_dict(state_dict, strict=False)
     return sam

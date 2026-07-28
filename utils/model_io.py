@@ -266,6 +266,15 @@ def load_portable_model(
     model_cfg = training_cfg.model_config
     _inject_portable_assets(model_cfg, ckpt_payload)
 
+    # training_config 里常残留训练机绝对/相对 SAM 路径；便携加载时以 UniAfford ckpt 为准。
+    vision_ckpt = getattr(model_cfg.image_decoder, "vision_pretrained", None)
+    if vision_ckpt and not os.path.exists(vision_ckpt):
+        print(
+            f"[Warning] 本地 SAM 权重不存在: {vision_ckpt}；"
+            "构建时跳过，改由 UniAfford checkpoint 中的 image_decoder 权重填充。"
+        )
+        model_cfg.image_decoder.vision_pretrained = None
+
     from model.UniAfford import UniAffordModel
 
     model = UniAffordModel(model_cfg)
