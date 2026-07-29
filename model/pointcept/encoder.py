@@ -452,7 +452,10 @@ class PointCloudEncoder(nn.Module):
 
         # Step 3. Pointcept encoder-only 前向，避免引入 PTv3 decoder 路径。
         data_dict = self._build_pointcept_batch(point_clouds, in_channels=self.in_channels)
-        enc_point = self._forward_encoder_only(data_dict)
+        # spconv 在部分环境不支持 BF16/FP16；即使权重已回退 FP32，外层 autocast
+        # 仍可能把前一层输出转成低精度并传给下一层 sparse conv，因此这里显式关闭。
+        with torch.autocast(device_type=point_clouds.device.type, enabled=False):
+            enc_point = self._forward_encoder_only(data_dict)
 
         # Step 4. enc_point -> 投影成 MLLM token。
         # 逐点特征通过 SONATA README 推荐的 inverse 规则恢复。

@@ -234,8 +234,11 @@ class _IndependentPointFeatureEncoder(nn.Module):
             grid_size=self.config.grid_size,
             in_channels=self.in_channels,
         )
-        point = self.point_backbone(data_dict)
-        point_feat = self._unflatten_by_batch(point.feat, point.batch).to(self.compute_dtype)
+        # 独立 backbone 同样包含 spconv，必须阻止外层 FP16/BF16 autocast
+        # 将中间特征再次降精度后传给后续 sparse conv。
+        with torch.autocast(device_type=point_clouds.device.type, enabled=False):
+            point = self.point_backbone(data_dict)
+            point_feat = self._unflatten_by_batch(point.feat, point.batch).to(self.compute_dtype)
         point_mask = torch.ones(
             point_feat.shape[:2],
             dtype=torch.bool,
