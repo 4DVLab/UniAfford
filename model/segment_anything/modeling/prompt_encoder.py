@@ -163,7 +163,9 @@ class PromptEncoder(nn.Module):
         """
         bs = self._get_batch_size(points, boxes, masks, text_embeds)
         sparse_embeddings = torch.empty(
-            (bs, 0, self.embed_dim), device=self._get_device()
+            (bs, 0, self.embed_dim),
+            device=self._get_device(),
+            dtype=self.point_embeddings[0].weight.dtype,
         )
         if points is not None:
             coords, labels = points

@@ -119,9 +119,12 @@ class ImageHiddenStateDecoder(nn.Module):
             masks=mask_prompt,
             text_embeds=None,
         )
+        sparse_embeddings = sparse_embeddings.to(dtype=image_embeddings.dtype)
+        dense_embeddings = dense_embeddings.to(dtype=image_embeddings.dtype)
+        image_pe = self.visual_model.prompt_encoder.get_dense_pe().to(dtype=image_embeddings.dtype)
         low_res_masks, _ = self.visual_model.mask_decoder(
             image_embeddings=flat_image_embeddings,
-            image_pe=self.visual_model.prompt_encoder.get_dense_pe(),
+            image_pe=image_pe,
             sparse_prompt_embeddings=sparse_embeddings,
             dense_prompt_embeddings=dense_embeddings,
             multimask_output=False,

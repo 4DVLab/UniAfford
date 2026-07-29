@@ -197,21 +197,30 @@ def run_model_inference(
     Returns:
         Dict: 模型输出字典，字段与指标计算逻辑保持兼容。
     """
-    if inference_mode == "generate":
-        # 独立验证默认真实评估 router；仅显式打开开关时启用 query fallback。
-        return model.generate_forward(
-            **input_dict,
-            return_hidden_states=return_hidden_states,
-            generate_query_fallback=generate_query_fallback,
-        )
-        # 默认真实推理路径：不把 GT answer 输入 MLLM。
-        return model.generate_forward(**input_dict, return_hidden_states=return_hidden_states)
-    if inference_mode == "forward":
-        # 诊断路径：GT answer 会进入 MLLM，只用于定位 generate/forward 差异。
-        return model(**input_dict, return_hidden_states=return_hidden_states)
-        # 诊断路径：GT answer 会进入 MLLM，只用于定位 generate/forward 差异。
-        return model(**input_dict, return_hidden_states=return_hidden_states)
-    raise ValueError(f"Unsupported inference_mode: {inference_mode}")
+    def _run() -> Dict:
+        if inference_mode == "generate":
+            # 独立验证默认真实评估 router；仅显式打开开关时启用 query fallback。
+            return model.generate_forward(
+                **input_dict,
+                return_hidden_states=return_hidden_states,
+                generate_query_fallback=generate_query_fallback,
+            )
+        if inference_mode == "forward":
+            # 诊断路径：GT answer 会进入 MLLM，只用于定位 generate/forward 差异。
+            return model(**input_dict, return_hidden_states=return_hidden_states)
+        raise ValueError(f"Unsupported inference_mode: {inference_mode}")
+
+    runtime_dtype = getattr(getattr(model.config, "mllm", None), "compute_dtype", None)
+    model_param = next(model.parameters(), None)
+    use_autocast = (
+        model_param is not None
+        and model_param.device.type == "cuda"
+        and runtime_dtype in (torch.float16, torch.bfloat16)
+    )
+    if use_autocast:
+        with torch.autocast(device_type="cuda", dtype=runtime_dtype):
+            return _run()
+    return _run()
 
 
 def save_batch_predictions(
