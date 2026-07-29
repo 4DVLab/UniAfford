@@ -1,5 +1,7 @@
 """推理阶段的耗时、FLOPs、显存与参数规模统计工具。"""
 
+# ===== INFERENCE COST METRICS: START =====
+
 import time
 from collections import defaultdict
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -245,7 +247,7 @@ def profile_flops_once(
     model: nn.Module,
     inference_fn: Callable[[], Any],
 ) -> Optional[Dict[str, int]]:
-    """在一次真实推理上统计 PyTorch FlopCounter 支持的算子 FLOPs。"""
+    """同时统计可跨项目比较的 profiler FLOPs 和本项目模块归因 FLOPs。"""
     try:
         from torch.utils.flop_counter import FlopCounterMode
     except (ImportError, ModuleNotFoundError) as exc:
@@ -256,10 +258,17 @@ def profile_flops_once(
     try:
         counter = FlopCounterMode(display=False, depth=None)
         attributor = ModuleFlopAttributor(model, counter)
-        with counter:
-            profile_output = inference_fn()
+        activities = [torch.profiler.ProfilerActivity.CPU]
+        if torch.cuda.is_available():
+            activities.append(torch.profiler.ProfilerActivity.CUDA)
+        with torch.profiler.profile(activities=activities, with_flops=True) as profiler:
+            with counter:
+                profile_output = inference_fn()
         del profile_output
-        module_flops = {"Total": int(counter.get_total_flops())}
+        module_flops = {
+            "Total": int(counter.get_total_flops()),
+            "ComparableTotal": int(sum(event.flops or 0 for event in profiler.key_averages())),
+        }
         module_flops.update({name: int(value) for name, value in attributor.flops.items()})
         return module_flops
     except Exception as exc:
@@ -275,12 +284,20 @@ def print_flops_summary(module_flops: Optional[Dict[str, int]], batch_size: int)
     if not module_flops:
         return
     total = int(module_flops.get("Total", 0))
+    comparable_total = int(module_flops.get("ComparableTotal", 0))
     print("\n[Computational Cost] FLOPs（单个代表性 batch）")
     if total <= 0:
         print("  未统计到受支持算子的 FLOPs。")
         return
     batch_size = max(1, int(batch_size))
-    print(f"  {'Total':<12}: {total / 1e9:.3f} GFLOPs/batch, {total / batch_size / 1e9:.3f} GFLOPs/sample")
+    print(
+        f"  FLOPs (supported PyTorch ops): {comparable_total / 1e9:.3f} GFLOPs/batch, "
+        f"{comparable_total / batch_size / 1e9:.3f} GFLOPs/sample"
+    )
+    print(
+        f"  {'FlopCounter total':<20}: {total / 1e9:.3f} GFLOPs/batch, "
+        f"{total / batch_size / 1e9:.3f} GFLOPs/sample（用于下列模块归因）"
+    )
     groups = ("MLLM", "Router", "2D decoder", "3D encoder", "3D decoder")
     for group in groups:
         value = int(module_flops.get(group, 0))
@@ -291,7 +308,7 @@ def print_flops_summary(module_flops: Optional[Dict[str, int]], batch_size: int)
     assigned = sum(int(module_flops.get(group, 0)) for group in groups)
     other = max(0, total - assigned)
     print(f"  {'其他/未归因':<12}: {other / 1e9:.3f} GFLOPs/batch, 占总量 {100.0 * other / total:.2f}%")
-    print("  注：仅统计 PyTorch FlopCounter 已支持的算子；自定义 CUDA、稀疏算子和部分插值操作可能被低估。")
+    print("  注：跨项目比较应使用第一行 torch.profiler FLOPs；自定义 CUDA、稀疏算子等仍可能被低估。")
 
 
 def print_gpu_memory_summary(device: torch.device, baseline_allocated: int) -> None:
@@ -306,3 +323,5 @@ def print_gpu_memory_summary(device: torch.device, baseline_allocated: int) -> N
     print(f"  推理峰值 allocated       : {format_bytes(peak_allocated)}")
     print(f"  推理增量峰值             : {format_bytes(max(0, peak_allocated - baseline_allocated))}")
     print(f"  推理峰值 reserved        : {format_bytes(peak_reserved)}")
+
+# ===== INFERENCE COST METRICS: END =====

@@ -28,6 +28,7 @@ from utils.dataset import (
     UniAfford_collate_fn,
 )
 from utils.common import dict_to_cuda, resolve_dtype
+# ===== INFERENCE COST METRICS: START =====
 from utils.computational_cost import (
     InferenceTimingProfiler,
     print_flops_summary,
@@ -35,6 +36,7 @@ from utils.computational_cost import (
     print_model_parameter_stats,
     profile_flops_once,
 )
+# ===== INFERENCE COST METRICS: END =====
 from utils.model_io import (
     load_checkpoint_payload,
     load_portable_model,
@@ -105,10 +107,12 @@ def parse_args():
                         help="记录 task token hidden/vocab embedding，并在验证结束后尝试生成 t-SNE 可视化")
     parser.add_argument("--tsne_max_points", type=int, default=4000,
                         help="t-SNE 最多采样点数，避免验证集过大导致内存和耗时过高")
+    # ===== INFERENCE COST METRICS: START =====
     parser.add_argument("--disable_cost_profile", action="store_true",
                         help="关闭推理耗时、FLOPs、显存和参数量统计（默认开启）")
     parser.add_argument("--cost_warmup_batches", type=int, default=1,
                         help="耗时统计跳过的 warm-up batch 数（默认：1；仍正常参与指标计算）")
+    # ===== INFERENCE COST METRICS: END =====
     return parser.parse_args()
 
 
@@ -591,7 +595,22 @@ def main():
         ckpt_payload=ckpt_payload,
     )
     model_cfg = training_cfg.model_config
+    runtime_dtype = model_cfg.mllm.compute_dtype
+    if infer_cfg.precision is not None:
+        if runtime_dtype == torch.float16 and device.type != "cuda":
+            raise RuntimeError("FP16 推理需要 CUDA 设备。")
+        if (
+            runtime_dtype == torch.bfloat16
+            and device.type == "cuda"
+            and not torch.cuda.is_bf16_supported()
+        ):
+            raise RuntimeError("当前 CUDA 设备不支持 BF16，请改用 --precision fp16 或 fp32。")
+        # checkpoint 可以保持 FP32；显式覆盖精度时统一转换整个模型，确保后创建的
+        # Router 与 MLLM、2D/3D decoder dtype 一致，避免 mat1/mat2 类型不匹配。
+        model = model.to(device=device, dtype=runtime_dtype)
     model.eval()
+    print(f"推理精度: {runtime_dtype}{'（命令行覆盖）' if infer_cfg.precision is not None else ''}")
+    # ===== INFERENCE COST METRICS: START =====
     cost_profile_enabled = not args.disable_cost_profile
     timing_profiler = InferenceTimingProfiler(model, device) if cost_profile_enabled else None
     module_flops = None
@@ -600,6 +619,7 @@ def main():
     gpu_memory_baseline = 0
     if cost_profile_enabled:
         print_model_parameter_stats(model)
+    # ===== INFERENCE COST METRICS: END =====
 
     # DataLoader
     val_loader, torch_dataset, processor = build_dataloader_for_split(
@@ -662,6 +682,7 @@ def main():
             )
         )
 
+    # ===== INFERENCE COST METRICS: START =====
     cost_warmup_batches = min(
         max(0, int(args.cost_warmup_batches)),
         max(0, len(val_loader) - 1),
@@ -670,14 +691,17 @@ def main():
         torch.cuda.synchronize(device)
         gpu_memory_baseline = int(torch.cuda.memory_allocated(device))
         torch.cuda.reset_peak_memory_stats(device)
+    # ===== INFERENCE COST METRICS: END =====
 
     print("开始验证...")
     with torch.no_grad():
         for batch_idx, input_dict in enumerate(tqdm(val_loader, desc="验证中")):
             input_dict = dict_to_cuda(input_dict, device=device)
             batch_size = int(input_dict["input_ids"].shape[0])
+            # ===== INFERENCE COST METRICS: START =====
             if timing_profiler is not None:
                 timing_profiler.start_batch(measured=batch_idx >= cost_warmup_batches)
+            # ===== INFERENCE COST METRICS: END =====
             # validate 推理必须只使用 prompt 进行 generate，GT answer 仅用于指标与文本对齐记录。
             output_dict = run_model_inference(
                 model,
@@ -686,6 +710,7 @@ def main():
                 return_hidden_states=args.save_tsne,
                 generate_query_fallback=args.generate_query_fallback,
             )
+            # ===== INFERENCE COST METRICS: START =====
             if timing_profiler is not None:
                 timing_profiler.finish_batch(batch_size=batch_size)
 
@@ -703,6 +728,7 @@ def main():
                         generate_query_fallback=args.generate_query_fallback,
                     ),
                 )
+            # ===== INFERENCE COST METRICS: END =====
 
             # 计算损失 + 更新指标（包括 2D IoU/KLD/SIM/NSS 与 3D IoU/MAE/AUC/SIM）
             loss_dict = calc.compute_losses(output_dict, input_dict, **loss_kwargs)
@@ -893,12 +919,14 @@ def main():
             if device.type == "cuda" and (batch_idx + 1) % 100 == 0:
                 torch.cuda.empty_cache()
 
+    # ===== INFERENCE COST METRICS: START =====
     if timing_profiler is not None:
         timing_profiler.print_summary(warmup_batches=cost_warmup_batches)
         timing_profiler.close()
     print_flops_summary(module_flops, batch_size=flop_profile_batch_size)
     if cost_profile_enabled:
         print_gpu_memory_summary(device, baseline_allocated=gpu_memory_baseline)
+    # ===== INFERENCE COST METRICS: END =====
 
     results = compute_and_reset_torchmetrics(metrics)
     threshold_search_results = {}
