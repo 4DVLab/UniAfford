@@ -718,6 +718,7 @@ def UniAfford_collate_fn(
     mllm_precision="bf16",
     image_precision="fp32",
     point_precision="fp32",
+    pad_missing_modalities: bool = True,
 ) -> Dict[str, Any]:
     """
     Returns:
@@ -730,13 +731,13 @@ def UniAfford_collate_fn(
             "image_grid_thw"       : [B, 3]           # Qwen3-VL 图像网格 (T, H, W)
             
             # 2D 分割输入
-            "images"               : [B, 3, H, W]     # 2D 分割输入图像（统一 padding）
+            "images"               : [B, 3, H, W] | None  # 整批无图且关闭补齐时为 None
             "img_gt_tensor"        : [B, H, W]        # 2D 分割 GT（无效样本为 0）
             "original_size_list"   : list[(h, w)]     # 原始 GT 尺寸（与图像一致）
             "img_valid_mask"       : [B]              # 是否有有效图像分割监督
 
             # 3D 分割输入
-            "point_clouds"         : [B, N, 3]        # 点云输入（统一 padding）
+            "point_clouds"         : [B, N, 3] | None # 整批无点云且关闭补齐时为 None
             "pc_gt_tensor"         : [B, N]           # 点云分割 GT（无效样本为 0）
             "pc_valid_lengths"     : [B]              # 有效点数量（0 表示无效样本）
         }
@@ -844,10 +845,15 @@ def UniAfford_collate_fn(
     # -------- 4) 2D 图像与 GT padding --------
     valid_images = [img for img in images_list if img is not None]
     if len(valid_images) == 0:
-        dummy_h, dummy_w = output_image_size
-        batch_out["images"] = torch.zeros(batch_size, 3, dummy_h, dummy_w, dtype=image_precision)
-        batch_out["img_gt_tensor"] = torch.zeros(batch_size, dummy_h, dummy_w, dtype=image_precision)
-        batch_out["original_size_list"] = [(dummy_h, dummy_w)] * batch_size
+        if pad_missing_modalities:
+            dummy_h, dummy_w = output_image_size
+            batch_out["images"] = torch.zeros(batch_size, 3, dummy_h, dummy_w, dtype=image_precision)
+            batch_out["img_gt_tensor"] = torch.zeros(batch_size, dummy_h, dummy_w, dtype=image_precision)
+            batch_out["original_size_list"] = [(dummy_h, dummy_w)] * batch_size
+        else:
+            batch_out["images"] = None
+            batch_out["img_gt_tensor"] = None
+            batch_out["original_size_list"] = None
     else:
         max_h, max_w = output_image_size
         padded_images = []
@@ -904,8 +910,12 @@ def UniAfford_collate_fn(
     # -------- 5) 3D 点云与 GT padding --------
     valid_pcs = [pc for pc in point_clouds_list if pc is not None]
     if len(valid_pcs) == 0:
-        batch_out["point_clouds"] = torch.zeros(batch_size, output_point_nums, 3, dtype=point_precision)
-        batch_out["pc_gt_tensor"] = torch.zeros(batch_size, output_point_nums, dtype=point_precision)
+        if pad_missing_modalities:
+            batch_out["point_clouds"] = torch.zeros(batch_size, output_point_nums, 3, dtype=point_precision)
+            batch_out["pc_gt_tensor"] = torch.zeros(batch_size, output_point_nums, dtype=point_precision)
+        else:
+            batch_out["point_clouds"] = None
+            batch_out["pc_gt_tensor"] = None
         batch_out["pc_valid_lengths"] = torch.zeros(batch_size, dtype=torch.long)
     else:
         point_nums = []

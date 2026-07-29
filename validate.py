@@ -103,6 +103,8 @@ def parse_args():
                         help="日志名/实验名（用于输出目录命名）")
     parser.add_argument("--lazy_load", dest="lazy_load", action="store_true",
                         help="启用数据懒加载（默认启用）", default=True)
+    parser.add_argument("--pad_missing_modalities", action="store_true",
+                        help="整批缺失某模态时仍输出全零占位张量；推理默认关闭以跳过无效分支")
     parser.add_argument("--save_tsne", action="store_true",
                         help="记录 task token hidden/vocab embedding，并在验证结束后尝试生成 t-SNE 可视化")
     parser.add_argument("--tsne_max_points", type=int, default=4000,
@@ -133,6 +135,7 @@ def build_dataloader_for_split(
     infer_cfg: InferenceConfig,
     processor,
     lazy_load: bool = True,
+    pad_missing_modalities: bool = False,
 ):
     """根据 split（train/val/test）构建对应的 DataLoader。"""
     collator = partial(
@@ -143,6 +146,7 @@ def build_dataloader_for_split(
         mllm_precision=model_cfg.mllm.compute_dtype,
         image_precision=model_cfg.image_decoder.compute_dtype,
         point_precision=model_cfg.point_decoder.compute_dtype,
+        pad_missing_modalities=pad_missing_modalities,
     )
 
     joint_dataset = JointDataset(
@@ -628,8 +632,10 @@ def main():
         infer_cfg,
         processor=model.mllm.processor,
         lazy_load=args.lazy_load,
+        pad_missing_modalities=args.pad_missing_modalities,
     )
     print(f"数据加载模式: {'lazy load' if args.lazy_load else 'eager load'}")
+    print(f"缺失模态全零补齐: {'开启' if args.pad_missing_modalities else '关闭'}")
     tokenizer = processor.tokenizer
     lm_head = model.mllm.model.get_output_embeddings()
     IGNORE_INDEX = -100

@@ -276,6 +276,7 @@ class UniAffordDemoEngine:
             mllm_precision=self.mllm_precision,
             image_precision=self.image_precision,
             point_precision=self.point_precision,
+            pad_missing_modalities=False,
         )
         return batch, original_image, sampled_points
 
