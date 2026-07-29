@@ -370,7 +370,9 @@ def save_batch_predictions(
             points = None
             pc_tensor = input_dict.get("point_clouds")
             if isinstance(pc_tensor, torch.Tensor) and pc_tensor.shape[0] > i:
-                points = pc_tensor[i].detach().cpu().numpy()
+                # NumPy 不支持 torch.bfloat16；先以原 dtype 搬到 CPU，减少传输量，
+                # 再转 FP32 用于 CSV 保存。
+                points = pc_tensor[i].detach().cpu().float().numpy()
             if points is None:
                 continue
 
