@@ -621,6 +621,13 @@ def main():
         # checkpoint 可以保持 FP32；显式覆盖精度时统一转换整个模型，确保后创建的
         # Router 与 MLLM、2D/3D decoder dtype 一致，避免 mat1/mat2 类型不匹配。
         model = model.to(device=device, dtype=runtime_dtype)
+        if runtime_dtype == torch.bfloat16 and model.point_encoder is not None:
+            # 当前 spconv 不支持 BF16（会在 torch_tensor_to_tv 中触发 KeyError）。
+            # 稀疏点云编码器保留 FP32；其 token 注入 MLLM、逐点特征进入 decoder
+            # 时均已有显式 dtype 转换，因此其余模块仍可使用 BF16。
+            model.point_encoder = model.point_encoder.to(device=device, dtype=torch.float32)
+            model.point_encoder.compute_dtype = torch.float32
+            print("Point encoder 精度回退: torch.float32（当前 spconv 不支持 BF16）")
     model.eval()
     print(f"推理精度: {runtime_dtype}{'（命令行覆盖）' if infer_cfg.precision is not None else ''}")
     # ===== INFERENCE COST METRICS: START =====
