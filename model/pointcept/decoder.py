@@ -173,6 +173,7 @@ class _IndependentPointFeatureEncoder(nn.Module):
     def __init__(self, config: PointDecoderConfigs):
         super().__init__()
         self.config = config
+        self.compute_dtype = config.compute_dtype
         self.point_backbone = PointTransformerV3(**config.backbone_kwargs)
         self.in_channels = int(config.backbone_kwargs.get("in_channels", POINT_XYZ_CHANNELS))
 
@@ -227,14 +228,14 @@ class _IndependentPointFeatureEncoder(nn.Module):
         return feat.reshape(bsz, num_points, feat.shape[-1])
 
     def forward(self, point_clouds: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        point_clouds = self._normalize_point_clouds(point_clouds).to(self.config.compute_dtype)
+        point_clouds = self._normalize_point_clouds(point_clouds).to(self.compute_dtype)
         data_dict = self._build_pointcept_batch(
             point_clouds=point_clouds,
             grid_size=self.config.grid_size,
             in_channels=self.in_channels,
         )
         point = self.point_backbone(data_dict)
-        point_feat = self._unflatten_by_batch(point.feat, point.batch).to(self.config.compute_dtype)
+        point_feat = self._unflatten_by_batch(point.feat, point.batch).to(self.compute_dtype)
         point_mask = torch.ones(
             point_feat.shape[:2],
             dtype=torch.bool,

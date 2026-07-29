@@ -628,6 +628,11 @@ def main():
             model.point_encoder = model.point_encoder.to(device=device, dtype=torch.float32)
             model.point_encoder.compute_dtype = torch.float32
             print("Point encoder 精度回退: torch.float32（当前 spconv 不支持 BF16）")
+        independent_point_encoder = getattr(model.point_decoder, "point_feature_encoder", None)
+        if runtime_dtype == torch.bfloat16 and independent_point_encoder is not None:
+            independent_point_encoder.to(device=device, dtype=torch.float32)
+            independent_point_encoder.compute_dtype = torch.float32
+            print("Point decoder backbone 精度回退: torch.float32（当前 spconv 不支持 BF16）")
     model.eval()
     print(f"推理精度: {runtime_dtype}{'（命令行覆盖）' if infer_cfg.precision is not None else ''}")
     # ===== INFERENCE COST METRICS: START =====
