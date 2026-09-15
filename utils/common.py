@@ -136,10 +136,56 @@ def resolve_dtype(dtype_name):
     return None
 
 
+_CODE_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PROJECT_ROOT = os.path.dirname(_CODE_ROOT)
+
+
 def resolve_path(path_str: str):
     """兼容相对/绝对路径，返回绝对路径。"""
     if path_str is None: return None
     return path_str if os.path.isabs(path_str) else os.path.abspath(os.path.join(os.getcwd(), path_str))
+
+
+def resolve_user_path(path_str: str, *, must_exist: bool = False) -> str:
+    """解析用户输入路径，兼容 cwd、项目根和 code 根下的相对路径。
+
+    查找顺序：绝对路径 -> 当前工作目录 -> UniAfford 项目根 -> ``code/`` 根。
+    已存在的候选优先；新建输出目录则选第一个已有父目录的候选。
+    """
+
+    if path_str is None:
+        return None
+    expanded = os.path.expanduser(os.path.expandvars(str(path_str).strip()))
+    if not expanded:
+        raise ValueError("路径不能为空")
+    if os.path.isabs(expanded):
+        resolved = os.path.abspath(expanded)
+        if must_exist and not os.path.exists(resolved):
+            raise FileNotFoundError(resolved)
+        return resolved
+
+    bases = []
+    for base in (os.getcwd(), _PROJECT_ROOT, _CODE_ROOT):
+        abs_base = os.path.abspath(base)
+        if abs_base not in bases:
+            bases.append(abs_base)
+    candidates = [os.path.abspath(os.path.join(base, expanded)) for base in bases]
+    for candidate in candidates:
+        if os.path.exists(candidate):
+            return candidate
+    if must_exist:
+        tried = ", ".join(candidates)
+        raise FileNotFoundError(f"找不到路径 {path_str!r}，已尝试: {tried}")
+
+    for candidate in candidates:
+        parent = os.path.dirname(candidate)
+        while parent and parent not in bases and parent != os.path.dirname(parent):
+            if os.path.exists(parent):
+                return candidate
+            parent = os.path.dirname(parent)
+        if os.path.exists(os.path.dirname(candidate)):
+            return candidate
+    return candidates[0]
 
 
 def clean_quotes(value:str):

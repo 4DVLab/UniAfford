@@ -197,8 +197,14 @@ def _prepare_point_cloud_render_data(
     max_points: Optional[int] = 20000,
     base_color_rgb: Tuple[int, int, int] = (190, 190, 190),
     affordance_color_rgb: Tuple[int, int, int] = (255, 0, 0),
+    overlay_threshold: Optional[float] = None,
+    overlay_color_rgb: Tuple[int, int, int] = (0, 0, 255),
+    overlay_alpha: float = 1.0,
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """归一化点云并生成 IAGNet 风格红/浅灰 affordance 颜色。"""
+    """归一化点云并按 0~1 概率生成灰到红的连续颜色。
+
+    若提供 ``overlay_threshold``，再把概率大于阈值的点用蓝色覆盖。
+    """
     points = np.asarray(points, dtype=np.float32)
     mask = np.asarray(mask, dtype=np.float32).reshape(-1)
     valid = np.isfinite(points).all(axis=1)
@@ -220,13 +226,19 @@ def _prepare_point_cloud_render_data(
         scale = 1.0
     points = (points - center) / scale
 
-    mask = np.clip(mask, 0.0, None)
-    if mask.max() > 1.0:
-        mask = mask / mask.max()
-    mask = np.sqrt(np.clip(mask, 0.0, 1.0))
+    prob = np.clip(mask, 0.0, None)
+    if prob.max() > 1.0:
+        prob = prob / prob.max()
+    prob = np.clip(prob, 0.0, 1.0)
+    vis = np.sqrt(prob)
     base_color = np.array(base_color_rgb, dtype=np.float32) / 255.0
     affordance_color = np.array(affordance_color_rgb, dtype=np.float32) / 255.0
-    colors = base_color + (affordance_color - base_color) * mask[:, None]
+    colors = base_color + (affordance_color - base_color) * vis[:, None]
+    if overlay_threshold is not None:
+        overlay = np.array(overlay_color_rgb, dtype=np.float32) / 255.0
+        alpha = float(np.clip(overlay_alpha, 0.0, 1.0))
+        positive = prob > float(overlay_threshold)
+        colors[positive] = colors[positive] * (1.0 - alpha) + overlay * alpha
     return points, colors
 
 
@@ -248,6 +260,143 @@ def _apply_iagnet_pose(points: np.ndarray) -> np.ndarray:
     return np.stack([posed[:, 2], posed[:, 0], posed[:, 1]], axis=1)
 
 
+_MPL_RENDER_STATE = {}
+_FAST_PROJ_CACHE = {}
+
+
+def _matplotlib_style_projection_matrix(
+    elev: float = 35.264,
+    azim: float = 45.0,
+    dist: float = 10.0,
+    focal_length: float = 1.0,
+    xlim: Tuple[float, float] = (-0.55, 0.55),
+    ylim: Tuple[float, float] = (-0.55, 0.55),
+    zlim: Tuple[float, float] = (-0.55, 0.55),
+) -> np.ndarray:
+    """复现 matplotlib Axes3D 默认透视投影矩阵，避免每帧创建 Figure。"""
+
+    xmin, xmax = xlim
+    ymin, ymax = ylim
+    zmin, zmax = zlim
+    world_m = np.array(
+        [
+            [1.0 / (xmax - xmin), 0.0, 0.0, -xmin / (xmax - xmin)],
+            [0.0, 1.0 / (ymax - ymin), 0.0, -ymin / (ymax - ymin)],
+            [0.0, 0.0, 1.0 / (zmax - zmin), -zmin / (zmax - zmin)],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    center = np.array([0.5, 0.5, 0.5], dtype=np.float64)
+    elev_rad = np.deg2rad(float(elev))
+    azim_rad = np.deg2rad(float(azim))
+    direction = np.array(
+        [
+            np.cos(elev_rad) * np.cos(azim_rad),
+            np.cos(elev_rad) * np.sin(azim_rad),
+            np.sin(elev_rad),
+        ],
+        dtype=np.float64,
+    )
+    eye = center + float(dist) * direction
+    vertical = np.array([0.0, 0.0, -1.0 if abs(elev_rad) > np.pi / 2.0 else 1.0], dtype=np.float64)
+    out = eye - center
+    out = out / np.linalg.norm(out)
+    right = np.cross(vertical, out)
+    right = right / np.linalg.norm(right)
+    up = np.cross(out, right)
+    eye_focal = center + float(dist) * direction * float(focal_length)
+    view_rot = np.eye(4, dtype=np.float64)
+    view_rot[:3, :3] = np.stack([right, up, out], axis=0)
+    view_tr = np.eye(4, dtype=np.float64)
+    view_tr[:3, 3] = -eye_focal
+    view_m = view_rot @ view_tr
+    zfront, zback = -float(dist), float(dist)
+    proj_m = np.array(
+        [
+            [float(focal_length), 0.0, 0.0, 0.0],
+            [0.0, float(focal_length), 0.0, 0.0],
+            [0.0, 0.0, (zfront + zback) / (zfront - zback), -2.0 * zfront * zback / (zfront - zback)],
+            [0.0, 0.0, -1.0, 0.0],
+        ],
+        dtype=np.float64,
+    )
+    return proj_m @ view_m @ world_m
+
+
+def _project_points_matplotlib_style(points: np.ndarray, proj_m: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """把点云投影到 matplotlib 风格的归一化平面。"""
+
+    ones = np.ones((points.shape[0], 1), dtype=np.float64)
+    homo = np.concatenate([points.astype(np.float64, copy=False), ones], axis=1)
+    clip = proj_m @ homo.T
+    w = np.where(np.abs(clip[3]) < 1e-12, 1e-12, clip[3])
+    return clip[0] / w, clip[1] / w, clip[2] / w
+
+
+def _render_point_cloud_fast(
+    points: np.ndarray,
+    colors: np.ndarray,
+    size: int = 800,
+    elev: float = 35.264,
+    azim: float = 45.0,
+    point_size: float = 12,
+    background_rgb: Tuple[int, int, int] = (255, 255, 255),
+) -> np.ndarray:
+    """用 OpenCV 绘制与 matplotlib 3D 同视角的点云，避免反复建 Figure。"""
+
+    posed = _apply_iagnet_pose(np.asarray(points, dtype=np.float32))
+    cache_key = (float(elev), float(azim), int(size))
+    proj_m = _FAST_PROJ_CACHE.get(cache_key)
+    if proj_m is None:
+        proj_m = _matplotlib_style_projection_matrix(elev=float(elev), azim=float(azim))
+        _FAST_PROJ_CACHE[cache_key] = proj_m
+
+    xs, ys, zs = _project_points_matplotlib_style(posed, proj_m)
+    corners = np.array(
+        [[x, y, z] for x in (-0.55, 0.55) for y in (-0.55, 0.55) for z in (-0.55, 0.55)],
+        dtype=np.float64,
+    )
+    cx, cy, _ = _project_points_matplotlib_style(corners, proj_m)
+    x_min, x_max = float(cx.min()), float(cx.max())
+    y_min, y_max = float(cy.min()), float(cy.max())
+    pad_x = 0.04 * (x_max - x_min + 1e-8)
+    pad_y = 0.04 * (y_max - y_min + 1e-8)
+    x_min -= pad_x
+    x_max += pad_x
+    y_min -= pad_y
+    y_max += pad_y
+
+    width = height = max(8, int(size))
+    px = ((xs - x_min) / (x_max - x_min + 1e-8) * (width - 1)).astype(np.int32)
+    py = ((1.0 - (ys - y_min) / (y_max - y_min + 1e-8)) * (height - 1)).astype(np.int32)
+    valid = (px >= 0) & (px < width) & (py >= 0) & (py < height)
+    px, py, zs = px[valid], py[valid], zs[valid]
+    colors = np.asarray(colors, dtype=np.float32)[valid]
+
+    image = np.full(
+        (height, width, 3),
+        np.array([background_rgb[2], background_rgb[1], background_rgb[0]], dtype=np.uint8),
+        dtype=np.uint8,
+    )
+    if px.size == 0:
+        return image
+
+    order = np.argsort(zs)
+    px, py = px[order], py[order]
+    bgr = np.clip(colors[order][:, ::-1] * 255.0, 0, 255).astype(np.uint8)
+    radius = max(1, int(round(np.sqrt(max(float(point_size), 1.0) / np.pi))))
+    for dy in range(-radius, radius + 1):
+        for dx in range(-radius, radius + 1):
+            if dx * dx + dy * dy > radius * radius:
+                continue
+            ny = py + dy
+            nx = px + dx
+            inside = (nx >= 0) & (nx < width) & (ny >= 0) & (ny < height)
+            image[ny[inside], nx[inside]] = bgr[inside]
+    return image
+
+
 def _render_point_cloud_matplotlib(
     points: np.ndarray,
     colors: np.ndarray,
@@ -262,10 +411,22 @@ def _render_point_cloud_matplotlib(
     import matplotlib.pyplot as plt
 
     dpi = 100
-    fig = plt.figure(figsize=(size / dpi, size / dpi), dpi=dpi, facecolor="white")
-    ax = fig.add_subplot(111, projection="3d", facecolor="white")
+    state = _MPL_RENDER_STATE
+    fig = state.get("fig")
+    ax = state.get("ax")
+    if fig is None or ax is None or state.get("size") != int(size):
+        if fig is not None:
+            plt.close(fig)
+        fig = plt.figure(figsize=(size / dpi, size / dpi), dpi=dpi, facecolor="white")
+        ax = fig.add_subplot(111, projection="3d", facecolor="white")
+        state["fig"] = fig
+        state["ax"] = ax
+        state["size"] = int(size)
+    else:
+        ax.cla()
+
     points = _apply_iagnet_pose(points)
-    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=colors, s=point_size, depthshade=True)
+    ax.scatter(points[:, 0], points[:, 1], points[:, 2], c=colors, s=point_size, depthshade=False, linewidths=0)
     ax.view_init(elev=35.264, azim=45.0)
     ax.set_xlim(-0.55, 0.55)
     ax.set_ylim(-0.55, 0.55)
@@ -276,7 +437,6 @@ def _render_point_cloud_matplotlib(
     fig.canvas.draw()
     rgba = np.asarray(fig.canvas.buffer_rgba())
     rgb = rgba[:, :, :3].copy()
-    plt.close(fig)
     return cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
 
 
@@ -372,6 +532,9 @@ def _render_point_cloud_static(
     ground_plane: bool = True,
     base_color_rgb: Tuple[int, int, int] = (190, 190, 190),
     affordance_color_rgb: Tuple[int, int, int] = (255, 0, 0),
+    overlay_threshold: Optional[float] = None,
+    overlay_color_rgb: Tuple[int, int, int] = (0, 0, 255),
+    overlay_alpha: float = 1.0,
     fov: float = 25.0,
     camera_origin: Tuple[float, float, float] = (3.0, 3.0, 3.0),
 ) -> np.ndarray:
@@ -382,8 +545,21 @@ def _render_point_cloud_static(
         max_points=max_points,
         base_color_rgb=base_color_rgb,
         affordance_color_rgb=affordance_color_rgb,
+        overlay_threshold=overlay_threshold,
+        overlay_color_rgb=overlay_color_rgb,
+        overlay_alpha=overlay_alpha,
     )
     backend = str(backend or "realistic").lower()
+    if backend in {"fast", "cv2", "numpy"}:
+        return _render_point_cloud_fast(
+            points,
+            colors,
+            size=size,
+            elev=35.264,
+            azim=45.0,
+            point_size=point_size,
+            background_rgb=background_rgb,
+        )
     if backend in {"realistic", "open3d", "sphere"}:
         try:
             return _render_point_cloud_realistic(
@@ -400,9 +576,27 @@ def _render_point_cloud_static(
                 camera_origin=camera_origin,
             )
         except Exception as exc:
-            warnings.warn(f"Open3D realistic 渲染失败，回退到 matplotlib: {exc}")
-    elif backend != "matplotlib":
-        warnings.warn(f"未知 3D 渲染 backend={backend}，回退到 matplotlib")
+            warnings.warn(f"Open3D realistic 渲染失败，回退到 fast: {exc}")
+            return _render_point_cloud_fast(
+                points,
+                colors,
+                size=size,
+                elev=35.264,
+                azim=45.0,
+                point_size=point_size,
+                background_rgb=background_rgb,
+            )
+    if backend != "matplotlib":
+        warnings.warn(f"未知 3D 渲染 backend={backend}，回退到 fast")
+        return _render_point_cloud_fast(
+            points,
+            colors,
+            size=size,
+            elev=35.264,
+            azim=45.0,
+            point_size=point_size,
+            background_rgb=background_rgb,
+        )
 
     return _render_point_cloud_matplotlib(
         points,

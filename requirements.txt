@@ -2,7 +2,7 @@
 # 目标环境：Python 3.10+，CUDA 12.4，PyTorch 2.6。
 #
 # 安装示例：
-#   pip install -r requirements_minimal.txt
+#   pip install -r requirements.txt
 #
 # 说明：
 # - torch / torchvision 使用 PyTorch CUDA 12.4 wheel。
@@ -17,6 +17,7 @@
 torch==2.6.0+cu124
 torchvision==0.21.0+cu124
 numpy>=1.26,<2.3
+torchmetrics
 
 # Qwen-VL / LoRA
 transformers>=4.57.0

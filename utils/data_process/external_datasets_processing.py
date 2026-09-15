@@ -1076,14 +1076,15 @@ class ReasonAff_IMG(Image):
     HuggingFace save_to_disk 的 DatasetDict，分别包含 train/test split。
 
     需要加载哪个 split 直接改类变量 split_names，例如 ("train",) 或 ("test",)。
+    作者已修复 train/test 内容重复，转换时不再做重叠过滤。
+    train 中的 image 仍可能被压到 840x840，而 mask 保持原图尺寸，
+    因此默认把 image 还原到 mask 分辨率。
     """
     split_names = ("train",)
     split_dirs = {
         "train": ("train_new", "train"),
         "test": ("test_new", "test"),
     }
-    filter_train_test_overlap = True
-    overlap_reference_split = "test"
     restore_image_to_mask_size = True
     progress_interval = 200
 
@@ -1099,8 +1100,7 @@ class ReasonAff_IMG(Image):
 
     @staticmethod
     def _normalize_name(name, fallback='reasonaff'):
-        name = "" if name is None else str(name).strip()
-        return name if name else fallback
+        return normalize_readme_label(name, fallback=fallback)
 
     @staticmethod
     def _to_bgr_image(image: np.ndarray):
@@ -1137,24 +1137,6 @@ class ReasonAff_IMG(Image):
         # mask 在原数据中是大尺寸 bool Sequence；numpy 格式避免逐样本 Python list 转换，速度提升明显。
         return data.with_format("numpy", columns=["image", "mask"], output_all_columns=True)
 
-    @staticmethod
-    def _row_signature(row):
-        """临时用于过滤 train/test 泄漏；id 在两个 split 内会重复，不能作为签名。"""
-        return (
-            str(row["problem"]),
-            str(row["solution"]),
-            str(row["aff_name"]),
-            str(row["part_name"]),
-            int(row["img_height"]),
-            int(row["img_width"]),
-        )
-
-    @classmethod
-    def _build_overlap_signatures(cls, dataset_root_path):
-        rows = cls._load_raw_split(dataset_root_path, cls.overlap_reference_split)
-        rows = rows.remove_columns(["image", "mask"])
-        return {cls._row_signature(row) for row in rows}
-
     @classmethod
     def load_all(cls, dataset_root_path, obj_type=None, aff_type=None, **kwargs):
         """
@@ -1168,21 +1150,9 @@ class ReasonAff_IMG(Image):
 
         def iterator():
             loaded = 0
-            skipped_overlap = 0
-            overlap_signatures = None
             for split_name in cls.split_names:
-                if split_name == "train" and cls.filter_train_test_overlap:
-                    overlap_signatures = cls._build_overlap_signatures(root)
-                    print(
-                        f"ReasonAff_IMG: 将从 train 中过滤 {len(overlap_signatures)} 条 "
-                        f"{cls.overlap_reference_split} 重叠签名"
-                    )
                 rows = cls._load_split(root, split_name)
                 for row in rows:
-                    if overlap_signatures is not None and cls._row_signature(row) in overlap_signatures:
-                        skipped_overlap += 1
-                        continue
-
                     img = cls._to_bgr_image(row["image"])
                     mask = cls._to_gray_mask(row["mask"], target_shape=(int(row["img_height"]), int(row["img_width"])))
                     if cls.restore_image_to_mask_size and img.shape[:2] != mask.shape[:2]:
@@ -1211,10 +1181,7 @@ class ReasonAff_IMG(Image):
                         )
                     loaded += 1
                     if cls.progress_interval and loaded % cls.progress_interval == 0:
-                        print(
-                            f"loading ReasonAff IMG: {loaded} samples"
-                            + (f", skipped_overlap={skipped_overlap}" if skipped_overlap else "")
-                        )
+                        print(f"loading ReasonAff IMG: {loaded} samples")
                     yield img_obj
 
         return iterator()
