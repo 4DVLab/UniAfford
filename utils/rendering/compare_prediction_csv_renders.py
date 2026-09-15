@@ -2,8 +2,10 @@
 根据多个 validation_samples.csv 对齐预测结果，并按输入样本逐行保存渲染对比图。
 
 对齐规则：
-- 只能使用 CSV 中的原始 ``img_id`` / ``pc_id`` 关联不同 run。
+- 跨 run 只用原始 ``img_id`` / ``pc_id`` 查找 GT 和其他方法的预测。
+- 参考 CSV 的每一行都输出一张对比图；同一 ``pc_id`` 上的不同 ``sample_id`` 不算重复。
 - 预测文件仍按 validate.py 保存时的 ``sample_id`` 查找。
+- 输出文件名保持 ``{obj}_{aff}_{img|pc}{原始ID}``；同一原始 ID 的额外样本才追加 ``_{sample_id}``。
 - 原始 RGB、原始点云和 GT mask 均从 ``--dataset-root`` 指定的数据集目录读取。
 """
 
@@ -16,7 +18,7 @@ import sys
 import warnings
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 import cv2
 import numpy as np
@@ -162,63 +164,120 @@ def _read_csv_rows(csv_path: str) -> List[Dict[str, str]]:
         return [dict(row) for row in reader]
 
 
+def _row_render_key(
+    csv_path: str,
+    modality: str,
+    row: Dict[str, str],
+    row_idx: int,
+) -> Optional[RenderKey]:
+    """从 CSV 行解析跨 run 对齐键；无效行返回 None。"""
+
+    obj_type = _normalize_label(row.get("obj_type"))
+    aff_type = _normalize_label(row.get("aff_type"))
+    if not obj_type or not aff_type:
+        warnings.warn(f"{csv_path}: row={row_idx} 缺少 obj_type 或 aff_type，已跳过。")
+        return None
+    id_column = "img_id" if modality == "image" else "pc_id"
+    source_id = _parse_int_id(row.get(id_column), csv_path=csv_path, row_idx=row_idx, column=id_column)
+    if source_id is None:
+        return None
+    if _is_missing(row.get("sample_id")):
+        warnings.warn(f"{csv_path}: row={row_idx} 缺少 sample_id，无法定位预测文件，已跳过。")
+        return None
+    return RenderKey(obj_type=obj_type, aff_type=aff_type, source_id=source_id)
+
+
+def _iter_valid_rows(
+    csv_path: str,
+    modality: str,
+    rows: Sequence[Dict[str, str]],
+) -> List[Tuple[RenderKey, Dict[str, str]]]:
+    """保留 CSV 中每一条有效样本，即使原始 img_id/pc_id 重复。"""
+
+    items: List[Tuple[RenderKey, Dict[str, str]]] = []
+    for row_idx, row in enumerate(rows, start=2):
+        key = _row_render_key(csv_path, modality, row, row_idx)
+        if key is None:
+            continue
+        items.append((key, row))
+    return items
+
+
 def _build_row_index(csv_path: str, modality: str, rows: Sequence[Dict[str, str]]) -> Dict[RenderKey, Dict[str, str]]:
-    """用原始 ID 建立 CSV 行索引。
+    """用原始 ID 建立 CSV 行索引，供其他方法按 GT 资产对齐。
 
-    Args:
-        csv_path: CSV 文件路径。
-        modality: ``image`` 或 ``point``。
-        rows: CSV 行列表。
-
-    Returns:
-        RenderKey 到 CSV 行的映射。
+    同一 ``img_id`` / ``pc_id`` 可对应多条 ``sample_id``（不同 prompt）。
+    这里只保留首次出现，用于查找 GREAT/IAGNet 等按原始 ID 唯一的预测。
     """
 
-    id_column = "img_id" if modality == "image" else "pc_id"
     index: Dict[RenderKey, Dict[str, str]] = {}
-    for row_idx, row in enumerate(rows, start=2):
-        obj_type = _normalize_label(row.get("obj_type"))
-        aff_type = _normalize_label(row.get("aff_type"))
-        if not obj_type or not aff_type:
-            warnings.warn(f"{csv_path}: row={row_idx} 缺少 obj_type 或 aff_type，已跳过。")
-            continue
-        source_id = _parse_int_id(row.get(id_column), csv_path=csv_path, row_idx=row_idx, column=id_column)
-        if source_id is None:
-            continue
-        if _is_missing(row.get("sample_id")):
-            warnings.warn(f"{csv_path}: row={row_idx} 缺少 sample_id，无法定位预测文件，已跳过。")
-            continue
-        key = RenderKey(obj_type=obj_type, aff_type=aff_type, source_id=source_id)
-        if key in index:
-            warnings.warn(f"{csv_path}: row={row_idx} 出现重复原始键 {key}，保留首次出现记录。")
-            continue
-        index[key] = row
+    for key, row in _iter_valid_rows(csv_path, modality, rows):
+        index.setdefault(key, row)
     return index
 
 
-def _choose_keys(indices: Sequence[Dict[RenderKey, Dict[str, str]]], join: str) -> List[RenderKey]:
-    """按 join 策略选择要输出的原始样本。
+def _choose_aligned_rows(
+    ref_items: Sequence[Tuple[RenderKey, Dict[str, str]]],
+    indices: Sequence[Dict[RenderKey, Dict[str, str]]],
+    join: str,
+) -> List[Tuple[RenderKey, Optional[Dict[str, str]]]]:
+    """按 join 策略选择要输出的参考样本行。
 
     Args:
-        indices: 每个 run 的索引。
+        ref_items: 第一个 CSV 的全部有效行。
+        indices: 每个 run 按原始 ID 的首次出现索引。
         join: ``reference``、``inner`` 或 ``outer``。
 
     Returns:
-        RenderKey 列表。
+        ``(RenderKey, 参考行)`` 列表；outer 中仅存在于其他 run 的样本参考行为 None。
     """
 
     if not indices:
         return []
     if join == "reference":
-        return list(indices[0].keys())
+        return [(key, row) for key, row in ref_items]
     key_sets = [set(index.keys()) for index in indices]
     if join == "inner":
-        keys = set.intersection(*key_sets) if key_sets else set()
-    elif join == "outer":
-        keys = set.union(*key_sets) if key_sets else set()
-    else:
-        raise ValueError(f"未知 join 策略: {join}")
-    return sorted(keys, key=lambda item: (item.obj_type, item.aff_type, item.source_id))
+        common = set.intersection(*key_sets) if key_sets else set()
+        return [(key, row) for key, row in ref_items if key in common]
+    if join == "outer":
+        selected: List[Tuple[RenderKey, Optional[Dict[str, str]]]] = [(key, row) for key, row in ref_items]
+        seen = {key for key, _ in selected}
+        extras = sorted(
+            (set.union(*key_sets) if key_sets else set()) - seen,
+            key=lambda item: (item.obj_type, item.aff_type, item.source_id),
+        )
+        selected.extend((key, None) for key in extras)
+        return selected
+    raise ValueError(f"未知 join 策略: {join}")
+
+
+def _unique_output_stem(
+    key: RenderKey,
+    ref_row: Optional[Dict[str, str]],
+    prefix: str,
+    used_names: Set[str],
+) -> str:
+    """生成对比图文件名。默认仍是 ``{obj}_{aff}_{prefix}{source_id}``。"""
+
+    base = _safe_name(f"{key.obj_type}_{key.aff_type}_{prefix}{key.source_id}")
+    if base not in used_names:
+        used_names.add(base)
+        return base
+    sample_id = ""
+    if ref_row is not None and not _is_missing(ref_row.get("sample_id")):
+        sample_id = str(ref_row.get("sample_id")).strip()
+    candidate = _safe_name(f"{base}_{sample_id}") if sample_id else base
+    if candidate not in used_names:
+        used_names.add(candidate)
+        return candidate
+    suffix = 2
+    while True:
+        alt = f"{candidate}_{suffix}"
+        if alt not in used_names:
+            used_names.add(alt)
+            return alt
+        suffix += 1
 
 
 @functools.lru_cache(maxsize=None)
@@ -377,6 +436,50 @@ def _read_point_csv(path: str, aff_type: Optional[str] = None) -> Tuple[np.ndarr
         raise ValueError(f"点云 CSV 中找不到 aff 列: aff={aff_norm}, file={path}")
     mask_idx = labels.index(aff_norm)
     return data[:, :3], data[:, 3 + mask_idx]
+
+
+def _canonicalize_points(points: np.ndarray) -> np.ndarray:
+    """复现训练时的点云中心化 + 半径归一化，便于和模型输入坐标对齐。"""
+
+    pts = np.asarray(points, dtype=np.float32)
+    if pts.size == 0:
+        return pts
+    pts = pts - pts.mean(axis=0, keepdims=True)
+    radius = np.linalg.norm(pts, axis=1).max()
+    if radius > 0:
+        pts = pts / radius
+    return pts
+
+
+def _remap_pred_mask_to_gt_points(
+    gt_points: np.ndarray,
+    pred_points: np.ndarray,
+    pred_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """把预测分数映射回 GT 点序，并使用 GT 坐标。
+
+    已保存的 Ours CSV 是随机抽样后的单位球坐标；先两边做相同归一化，再按最近邻对齐。
+    """
+
+    gt_points = np.asarray(gt_points, dtype=np.float32)
+    pred_points = np.asarray(pred_points, dtype=np.float32)
+    pred_mask = np.asarray(pred_mask, dtype=np.float32).reshape(-1)
+    if gt_points.shape[0] == 0 or pred_points.shape[0] == 0 or pred_mask.shape[0] == 0:
+        return pred_points, pred_mask
+    if pred_mask.shape[0] != pred_points.shape[0]:
+        n = min(pred_mask.shape[0], pred_points.shape[0])
+        pred_points = pred_points[:n]
+        pred_mask = pred_mask[:n]
+    if gt_points.shape[0] == pred_points.shape[0] and np.allclose(gt_points, pred_points, atol=1e-4):
+        return gt_points, pred_mask
+
+    gt_can = _canonicalize_points(gt_points)
+    pred_can = _canonicalize_points(pred_points)
+    gt_sq = np.einsum("ij,ij->i", gt_can, gt_can)[:, None]
+    pred_sq = np.einsum("ij,ij->i", pred_can, pred_can)[None, :]
+    dist2 = np.maximum(gt_sq + pred_sq - 2.0 * (gt_can @ pred_can.T), 0.0)
+    nn = np.argmin(dist2, axis=1)
+    return gt_points, pred_mask[nn]
 
 
 def _mask_to_prob(mask: np.ndarray) -> np.ndarray:
@@ -712,6 +815,7 @@ def _render_point_cells(
 
     original_pc_path = _find_point_csv_path(dataset_root, key.obj_type, key.source_id)
     gt_mask = None
+    points = None
     row_info: Dict[str, Any] = {
         "modality": "point",
         "obj_type": key.obj_type,
@@ -767,6 +871,8 @@ def _render_point_cells(
             else:
                 try:
                     pred_points, pred_mask = _read_point_csv(pred_path, row.get("aff_type") or key.aff_type)
+                    if points is not None:
+                        pred_points, pred_mask = _remap_pred_mask_to_gt_points(points, pred_points, pred_mask)
                     pred_prob = _mask_to_prob(pred_mask)
                     pred_binary = _binarize_mask(pred_prob, run.threshold_3d)
                     pred_cell = _render_point_cloud_static(
@@ -775,7 +881,7 @@ def _render_point_cells(
                         overlay_threshold=run.overlay_threshold_3d,
                         **point_kwargs,
                     )
-                    gt_for_metrics = gt_mask if original_pc_path is not None else None
+                    gt_for_metrics = gt_mask if points is not None else None
                     if gt_for_metrics is not None and gt_for_metrics.shape[0] == pred_binary.shape[0]:
                         metrics = _binary_seg_metrics(pred_binary, gt_for_metrics, gt_threshold=gt_threshold_3d)
                     elif original_pc_path is not None:
@@ -1120,10 +1226,11 @@ def render_comparison(
     saved: Dict[str, List[str]] = {}
     for one_modality in modalities:
         indices = [_build_row_index(run.csv_path, one_modality, rows_by_run[run.name]) for run in runs]
-        keys = _choose_keys(indices, join=join)
+        ref_items = _iter_valid_rows(runs[0].csv_path, one_modality, rows_by_run[runs[0].name])
+        aligned_rows = _choose_aligned_rows(ref_items, indices, join=join)
         if max_rows is not None:
-            keys = keys[:max(0, int(max_rows))]
-        if not keys:
+            aligned_rows = aligned_rows[:max(0, int(max_rows))]
+        if not aligned_rows:
             warnings.warn(f"{one_modality}: 没有可对齐的原始 ID 记录。")
             continue
 
@@ -1142,12 +1249,16 @@ def render_comparison(
 
         jobs: List[Dict[str, Any]] = []
         keep_cols = ("sample_id", "obj_type", "aff_type", "img_id", "pc_id")
-        for idx, key in enumerate(keys):
-            prefix = "img" if one_modality == "image" else "pc"
-            name = _safe_name(f"{key.obj_type}_{key.aff_type}_{prefix}{key.source_id}")
+        used_names: Set[str] = set()
+        prefix = "img" if one_modality == "image" else "pc"
+        for idx, (key, ref_row) in enumerate(aligned_rows):
+            name = _unique_output_stem(key, ref_row, prefix, used_names)
             slim_rows = []
-            for index in indices:
-                row = index.get(key)
+            for run_idx, index in enumerate(indices):
+                if run_idx == 0 and ref_row is not None:
+                    row = ref_row
+                else:
+                    row = index.get(key)
                 slim_rows.append(None if row is None else {col: row.get(col) for col in keep_cols})
             jobs.append(
                 {
@@ -1202,7 +1313,7 @@ def parse_args() -> argparse.Namespace:
         "--join",
         default="reference",
         choices=("reference", "inner", "outer"),
-        help="对齐策略：reference 使用第一个 CSV 的原始 ID 顺序；inner 只保留交集；outer 输出并集。",
+        help="对齐策略：reference 输出第一个 CSV 的每一行（含同一 pc_id 的多条 sample）；inner 只保留原始 ID 交集；outer 输出并集。",
     )
     parser.add_argument("--max-rows", type=int, default=None, help="最多输出多少个原始 ID 样本。")
     parser.add_argument("--render-config", default=None, help="复用 batch_render 风格的渲染 JSON 配置。")

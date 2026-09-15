@@ -10,12 +10,16 @@ UniAfford 验证脚本（新版，适配 Qwen + UniAffordModel）
 
 import argparse
 import csv
+import datetime
 import json
 import os
+import socket
 from functools import partial
 from typing import Dict, List, Optional, Tuple, Any
 import torch
-from torch.utils.data import DataLoader
+import torch.distributed as dist
+import torch.multiprocessing as mp
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 import numpy as np
 import cv2
@@ -76,7 +80,9 @@ def parse_args():
     parser.add_argument("--generate_query_fallback", action="store_true",
                         help="generate 模式下若缺少 img/pc query，则用对应 route 概率最高的 hidden state 兜底；默认关闭以真实评估 router。")
     parser.add_argument("--device", type=str, default=None,
-                        help="使用的设备（默认：cuda，若不可用则 CPU）")
+                        help="推理设备：cpu / cuda / 单卡编号，或多卡如 0,1,2,3。多卡时自动按样本并行。")
+    parser.add_argument("--local_rank", type=int, default=int(os.environ.get("LOCAL_RANK", "0")),
+                        help="torchrun 传入的本地 rank；通常无需手动指定。")
     parser.add_argument("--num_workers", type=int, default=None,
                         help="DataLoader worker 数量（默认使用 TrainingConfig.workers）")
     parser.add_argument("--save_predictions", action="store_true",
@@ -118,6 +124,73 @@ def parse_args():
     return parser.parse_args()
 
 
+def _parse_device_ids(device_arg: Optional[str]) -> List[int]:
+    """解析 --device 中的 GPU 编号列表。"""
+
+    if device_arg is None:
+        return []
+    text = str(device_arg).strip().lower()
+    if text in {"", "cpu", "cuda"}:
+        return []
+    ids: List[int] = []
+    for part in text.replace("cuda:", "").split(","):
+        part = part.strip()
+        if part.isdigit():
+            ids.append(int(part))
+    return ids
+
+
+def _find_free_port() -> str:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("", 0))
+        return str(sock.getsockname()[1])
+
+
+def _setup_distributed(local_rank: int) -> Tuple[int, int, torch.device]:
+    """初始化进程组并绑定当前 GPU。单卡时直接返回 rank=0。"""
+
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        if torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            return 0, 1, torch.device("cuda", local_rank)
+        return 0, 1, torch.device("cpu")
+
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend="nccl" if torch.cuda.is_available() else "gloo",
+            timeout=datetime.timedelta(seconds=3600),
+        )
+    rank = dist.get_rank()
+    world_size = dist.get_world_size()
+    torch.cuda.set_device(local_rank)
+    return rank, world_size, torch.device("cuda", local_rank)
+
+
+def _is_main(rank: int) -> bool:
+    return rank == 0
+
+
+def _gather_object_list(items: List[Any]) -> List[Any]:
+    """收集各 rank 的 Python 列表到所有进程。"""
+
+    if not (dist.is_available() and dist.is_initialized()) or dist.get_world_size() == 1:
+        return list(items)
+    gathered: List[Optional[List[Any]]] = [None] * dist.get_world_size()
+    dist.all_gather_object(gathered, items)
+    merged: List[Any] = []
+    for part in gathered:
+        if part:
+            merged.extend(part)
+    return merged
+
+
+def _cleanup_distributed() -> None:
+    if dist.is_available() and dist.is_initialized():
+        dist.barrier()
+        dist.destroy_process_group()
+
+
 def _resolve_config_json_path(checkpoint_path: str, config_json_arg: Optional[str]) -> Optional[str]:
     """优先使用显式参数，否则自动在 checkpoint 同目录查找 training_config.json。"""
     if config_json_arg:
@@ -136,6 +209,8 @@ def build_dataloader_for_split(
     processor,
     lazy_load: bool = True,
     pad_missing_modalities: bool = False,
+    rank: int = 0,
+    world_size: int = 1,
 ):
     """根据 split（train/val/test）构建对应的 DataLoader。"""
     collator = partial(
@@ -167,10 +242,20 @@ def build_dataloader_for_split(
         use_simple_answer_template=training_cfg.use_simple_answer_template,
     )
 
+    sampler = None
+    if world_size > 1:
+        sampler = DistributedSampler(
+            torch_dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            drop_last=False,
+        )
     loader = DataLoader(
         torch_dataset,
         batch_size=infer_cfg.batch_size,
         shuffle=False,
+        sampler=sampler,
         num_workers=infer_cfg.num_workers,
         pin_memory=True,
         collate_fn=collator,
@@ -221,6 +306,26 @@ def run_model_inference(
         with torch.autocast(device_type="cuda", dtype=runtime_dtype):
             return _run()
     return _run()
+
+
+def _get_optional_batch_item(values: Any, index: int) -> Any:
+    """从 batch 字段中取出第 index 项；缺失时返回 None。"""
+
+    if values is None:
+        return None
+    if isinstance(values, torch.Tensor):
+        if values.shape[0] <= index:
+            return None
+        item = values[index]
+        return item.detach().cpu().numpy() if item is not None else None
+    if isinstance(values, (list, tuple)):
+        if index >= len(values):
+            return None
+        item = values[index]
+        if isinstance(item, torch.Tensor):
+            return item.detach().cpu().numpy()
+        return item
+    return None
 
 
 def save_batch_predictions(
@@ -392,6 +497,18 @@ def save_batch_predictions(
 
             points = points[:num_points]
             mask_3d = mask_3d[:num_points]
+            source_xyz = _get_optional_batch_item(input_dict.get("pc_source_xyz"), i)
+            sample_idx = _get_optional_batch_item(input_dict.get("pc_sample_idx"), i)
+            if source_xyz is not None and sample_idx is not None:
+                source_xyz = np.asarray(source_xyz, dtype=np.float32)
+                sample_idx = np.asarray(sample_idx, dtype=np.int64).reshape(-1)
+                if source_xyz.ndim == 2 and source_xyz.shape[1] == 3 and source_xyz.shape[0] > 0:
+                    mapped = np.zeros(source_xyz.shape[0], dtype=np.float32)
+                    n_map = min(num_points, int(sample_idx.shape[0]))
+                    valid = (sample_idx[:n_map] >= 0) & (sample_idx[:n_map] < source_xyz.shape[0])
+                    np.maximum.at(mapped, sample_idx[:n_map][valid], mask_3d[:n_map][valid])
+                    points = source_xyz
+                    mask_3d = mapped
 
             pc_dir = os.path.join(output_dir, obj_type, "PointCloud")
             os.makedirs(pc_dir, exist_ok=True)
@@ -543,21 +660,36 @@ def _aggregate_by_label(sample_records: List[Dict]) -> Dict:
     }
 
 
-def main():
-    args = parse_args()
+def run_validate(args: argparse.Namespace) -> None:
+    local_rank = int(os.environ.get("LOCAL_RANK", getattr(args, "local_rank", 0)))
+    env_world = int(os.environ.get("WORLD_SIZE", "1"))
+    device_ids = _parse_device_ids(args.device)
+    if str(args.device).strip().lower() == "cpu" or not torch.cuda.is_available():
+        rank, world_size, device = 0, 1, torch.device("cpu")
+    elif env_world > 1:
+        rank, world_size, device = _setup_distributed(local_rank)
+    elif device_ids:
+        gpu = device_ids[0]
+        gpu = gpu if gpu < torch.cuda.device_count() else 0
+        torch.cuda.set_device(gpu)
+        rank, world_size, device = 0, 1, torch.device("cuda", gpu)
+    else:
+        torch.cuda.set_device(0)
+        rank, world_size, device = 0, 1, torch.device("cuda", 0)
+    log = print if _is_main(rank) else (lambda *a, **k: None)
 
     # 训练 & 推理配置
     cfg_json_path = _resolve_config_json_path(args.checkpoint_path, args.config_json)
     ckpt_payload = load_checkpoint_payload(args.checkpoint_path, map_location="cpu")
     if cfg_json_path is not None and os.path.exists(cfg_json_path):
         training_cfg = TrainingConfig.from_json(cfg_json_path)
-        print(f"已加载训练配置: {cfg_json_path}")
+        log(f"已加载训练配置: {cfg_json_path}")
     else:
         training_cfg = resolve_training_config_from_payload(ckpt_payload)
         if isinstance(ckpt_payload.get("training_config"), dict):
-            print("已从 checkpoint 元信息加载训练配置。")
+            log("已从 checkpoint 元信息加载训练配置。")
         else:
-            print("未找到训练配置 JSON 或 checkpoint 内嵌配置，使用 TrainingConfig 默认值。")
+            log("未找到训练配置 JSON 或 checkpoint 内嵌配置，使用 TrainingConfig 默认值。")
     # 覆盖优先级：命令行参数（非 None） > InferenceConfig.defaults > training_config.json。
     infer_cfg = InferenceConfig(
         precision=args.precision,
@@ -592,8 +724,7 @@ def main():
     if args.gt_threshold_3d is not None:
         training_cfg.gt_threshold_3d = float(args.gt_threshold_3d)
 
-    device = torch.device(infer_cfg.device if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}\n")
+    log(f"使用设备: {device}  rank={rank}/{world_size}\n")
 
     if args.qwen_model:
         training_cfg.model_config.mllm.qwen_model_name_or_path = args.qwen_model
@@ -629,14 +760,14 @@ def main():
             # 时均已有显式 dtype 转换，因此其余模块仍可使用目标低精度。
             model.point_encoder = model.point_encoder.to(device=device, dtype=torch.float32)
             model.point_encoder.compute_dtype = torch.float32
-            print("Point encoder 精度回退: torch.float32（当前 spconv 不支持目标低精度）")
+            log("Point encoder 精度回退: torch.float32（当前 spconv 不支持目标低精度）")
         independent_point_encoder = getattr(model.point_decoder, "point_feature_encoder", None)
         if runtime_dtype in (torch.float16, torch.bfloat16) and independent_point_encoder is not None:
             independent_point_encoder.to(device=device, dtype=torch.float32)
             independent_point_encoder.compute_dtype = torch.float32
-            print("Point decoder backbone 精度回退: torch.float32（当前 spconv 不支持目标低精度）")
+            log("Point decoder backbone 精度回退: torch.float32（当前 spconv 不支持目标低精度）")
     model.eval()
-    print(f"推理精度: {runtime_dtype}{'（命令行覆盖）' if infer_cfg.precision is not None else ''}")
+    log(f"推理精度: {runtime_dtype}{'（命令行覆盖）' if infer_cfg.precision is not None else ''}")
     # ===== INFERENCE COST METRICS: START =====
     cost_profile_enabled = not args.disable_cost_profile
     timing_profiler = InferenceTimingProfiler(model, device) if cost_profile_enabled else None
@@ -644,7 +775,7 @@ def main():
     flop_profile_attempted = False
     flop_profile_batch_size = 0
     gpu_memory_baseline = 0
-    if cost_profile_enabled:
+    if cost_profile_enabled and _is_main(rank):
         print_model_parameter_stats(model)
     # ===== INFERENCE COST METRICS: END =====
 
@@ -656,9 +787,12 @@ def main():
         processor=model.mllm.processor,
         lazy_load=args.lazy_load,
         pad_missing_modalities=args.pad_missing_modalities,
+        rank=rank,
+        world_size=world_size,
     )
-    print(f"数据加载模式: {'lazy load' if args.lazy_load else 'eager load'}")
-    print(f"缺失模态全零补齐: {'开启' if args.pad_missing_modalities else '关闭'}")
+    log(f"数据加载模式: {'lazy load' if args.lazy_load else 'eager load'}")
+    log(f"缺失模态全零补齐: {'开启' if args.pad_missing_modalities else '关闭'}")
+    log(f"验证样本数: {len(torch_dataset)}，本 rank batch 数: {len(val_loader)}")
     tokenizer = processor.tokenizer
     lm_head = model.mllm.model.get_output_embeddings()
     IGNORE_INDEX = -100
@@ -688,7 +822,7 @@ def main():
 
     if infer_cfg.save_predictions and infer_cfg.output_dir:
         os.makedirs(infer_cfg.output_dir, exist_ok=True)
-        print(f"预测结果将保存到: {infer_cfg.output_dir}")
+        log(f"预测结果将保存到: {infer_cfg.output_dir}")
 
     sample_records: List[Dict] = []
     tsne_vectors: List[np.ndarray] = []
@@ -722,9 +856,13 @@ def main():
         torch.cuda.reset_peak_memory_stats(device)
     # ===== INFERENCE COST METRICS: END =====
 
-    print("开始验证...")
+    log("开始验证...")
+    val_iter = (
+        tqdm(val_loader, desc="验证中", dynamic_ncols=True)
+        if _is_main(rank) else val_loader
+    )
     with torch.no_grad():
-        for batch_idx, input_dict in enumerate(tqdm(val_loader, desc="验证中")):
+        for batch_idx, input_dict in enumerate(val_iter):
             input_dict = dict_to_cuda(input_dict, device=device)
             batch_size = int(input_dict["input_ids"].shape[0])
             # ===== INFERENCE COST METRICS: START =====
@@ -744,7 +882,7 @@ def main():
                 timing_profiler.finish_batch(batch_size=batch_size)
 
             # FLOPs profiler 会重复执行一次真实推理；与耗时统计分开，避免 profiler 开销污染延迟。
-            if cost_profile_enabled and not flop_profile_attempted:
+            if cost_profile_enabled and _is_main(rank) and not flop_profile_attempted:
                 flop_profile_attempted = True
                 flop_profile_batch_size = batch_size
                 module_flops = profile_flops_once(
@@ -795,9 +933,6 @@ def main():
 
             # ---- 逐样本记录 ----
             for i in range(batch_size):
-                sample_idx = batch_idx * infer_cfg.batch_size + i
-                if sample_idx >= len(torch_dataset):
-                    break
                 src_ids_batch = input_dict.get("data_source_id", [])
                 src_ids = src_ids_batch[i] if isinstance(src_ids_batch, (list, tuple)) and i < len(src_ids_batch) else {}
 
@@ -950,11 +1085,13 @@ def main():
 
     # ===== INFERENCE COST METRICS: START =====
     if timing_profiler is not None:
-        timing_profiler.print_summary(warmup_batches=cost_warmup_batches)
+        if _is_main(rank):
+            timing_profiler.print_summary(warmup_batches=cost_warmup_batches)
         timing_profiler.close()
-    print_flops_summary(module_flops, batch_size=flop_profile_batch_size)
-    if cost_profile_enabled:
-        print_gpu_memory_summary(device, baseline_allocated=gpu_memory_baseline)
+    if _is_main(rank):
+        print_flops_summary(module_flops, batch_size=flop_profile_batch_size)
+        if cost_profile_enabled:
+            print_gpu_memory_summary(device, baseline_allocated=gpu_memory_baseline)
     # ===== INFERENCE COST METRICS: END =====
 
     results = compute_and_reset_torchmetrics(metrics)
@@ -962,104 +1099,149 @@ def main():
     if threshold_stats is not None:
         threshold_search_results = finalize_threshold_search(threshold_stats)
 
-    # 打印摘要（重用 log_epoch_summary 的输出格式）
-    log_epoch_summary(
-        logger=type("DummyLogger", (), {"info": print})(),
-        epoch=1,
-        total_epochs=1,
-        phase="val",
-        results=results,
-        lr_dict=None,
-    )
-    if threshold_search_results:
-        parts = []
-        if "best_mask_threshold_2d" in threshold_search_results:
-            parts.append(
-                f"2D={threshold_search_results['best_mask_threshold_2d']:.4f} "
-                f"(gIoU={threshold_search_results.get('best_giou_2d', 0.0):.4f}, "
-                f"cIoU={threshold_search_results.get('best_ciou_2d', 0.0):.4f})"
-            )
-        if "best_mask_threshold_3d" in threshold_search_results:
-            parts.append(
-                f"3D={threshold_search_results['best_mask_threshold_3d']:.4f} "
+    sample_records = _gather_object_list(sample_records)
+    if args.save_tsne:
+        tsne_vectors = _gather_object_list(tsne_vectors)
+        tsne_records = _gather_object_list(tsne_records)
+
+    if _is_main(rank):
+        # 打印摘要（重用 log_epoch_summary 的输出格式）
+        log_epoch_summary(
+            logger=type("DummyLogger", (), {"info": print})(),
+            epoch=1,
+            total_epochs=1,
+            phase="val",
+            results=results,
+            lr_dict=None,
+        )
+        if threshold_search_results:
+            parts = []
+            if "best_mask_threshold_2d" in threshold_search_results:
+                parts.append(
+                    f"2D={threshold_search_results['best_mask_threshold_2d']:.4f} "
+                    f"(gIoU={threshold_search_results.get('best_giou_2d', 0.0):.4f}, "
+                    f"cIoU={threshold_search_results.get('best_ciou_2d', 0.0):.4f})"
+                )
+            if "best_mask_threshold_3d" in threshold_search_results:
+                parts.append(
+                    f"3D={threshold_search_results['best_mask_threshold_3d']:.4f} "
                     f"(mIoU={threshold_search_results.get('best_miou_3d', 0.0):.4f}, "
                     f"cumIoU={threshold_search_results.get('best_cumulative_iou_3d', 0.0):.4f})"
-            )
-        if parts:
-            print("验证集参考最优预测阈值（不写回配置）: " + ", ".join(parts))
-        if threshold_search_results.get("threshold_search_2d_tie", 0.0) or threshold_search_results.get("threshold_search_3d_tie", 0.0):
-            print("阈值搜索出现并列或无区分结果；对应分支没有可靠的参考最佳阈值。")
+                )
+            if parts:
+                print("验证集参考最优预测阈值（不写回配置）: " + ", ".join(parts))
+            if threshold_search_results.get("threshold_search_2d_tie", 0.0) or threshold_search_results.get("threshold_search_3d_tie", 0.0):
+                print("阈值搜索出现并列或无区分结果；对应分支没有可靠的参考最佳阈值。")
 
-    # ---- 保存评估结果（人类可读格式）----
-    out_dir = infer_cfg.output_dir if (infer_cfg.save_predictions or args.save_tsne) else "."
-    os.makedirs(out_dir, exist_ok=True)
-    if args.save_tsne:
-        _save_tsne_artifacts(tsne_vectors, tsne_records, out_dir)
+        # ---- 保存评估结果（人类可读格式）----
+        out_dir = infer_cfg.output_dir if (infer_cfg.save_predictions or args.save_tsne) else "."
+        os.makedirs(out_dir, exist_ok=True)
+        if args.save_tsne:
+            _save_tsne_artifacts(tsne_vectors, tsne_records, out_dir)
 
-    # 1) 逐样本 CSV（按 sample_id 升序）
-    sample_records.sort(key=lambda r: r["sample_id"])
-    csv_fields = [
-        "sample_id", "obj_type", "aff_type",
-        "text_id", "img_id", "pc_id",
-        "text_prompt", "pred_token_ids", "pred_text", "gt_text",
-        "aff_token_names",
-        "img_query_count", "pc_query_count", "img_query_fallback_count", "pc_query_fallback_count",
-        "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d",
-        "iou_3d", "auc_3d", "mae_3d", "sim_3d",
-    ]
-    csv_path = os.path.join(out_dir, "validation_samples.csv")
-    with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows(sample_records)
-    print(f"\n逐样本评估结果已保存到: {csv_path}")
-
-    # 2) 按 obj-aff / obj / aff / 总体 聚合指标，便于分析各标签表现
-    label_agg = _aggregate_by_label(sample_records)
-
-    def _row_for_csv(d: Dict[str, Any]) -> Dict[str, Any]:
-        return {k: (v if v is not None else "") for k, v in d.items()}
-
-    # 2a) 按 obj-aff 的 CSV（便于表格分析）
-    obj_aff_rows = []
-    for obj in sorted(label_agg["by_obj_aff"].keys()):
-        for aff in sorted(label_agg["by_obj_aff"][obj].keys()):
-            row = {"obj_type": obj, "aff_type": aff, **_row_for_csv(label_agg["by_obj_aff"][obj][aff])}
-            obj_aff_rows.append(row)
-    obj_aff_csv = os.path.join(out_dir, "validation_by_obj_aff.csv")
-    if obj_aff_rows:
-        with open(obj_aff_csv, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["obj_type", "aff_type", "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+        # 1) 逐样本 CSV（按 sample_id 升序）
+        sample_records.sort(key=lambda r: r["sample_id"])
+        csv_fields = [
+            "sample_id", "obj_type", "aff_type",
+            "text_id", "img_id", "pc_id",
+            "text_prompt", "pred_token_ids", "pred_text", "gt_text",
+            "aff_token_names",
+            "img_query_count", "pc_query_count", "img_query_fallback_count", "pc_query_fallback_count",
+            "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d",
+            "iou_3d", "auc_3d", "mae_3d", "sim_3d",
+        ]
+        csv_path = os.path.join(out_dir, "validation_samples.csv")
+        with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=csv_fields, extrasaction="ignore")
             writer.writeheader()
-            writer.writerows(obj_aff_rows)
-        print(f"按 obj-aff 聚合结果已保存到: {obj_aff_csv}")
+            writer.writerows(sample_records)
+        print(f"\n逐样本评估结果已保存到: {csv_path}")
 
-    # 2b) 按 obj 的 CSV
-    obj_rows = [{"obj_type": k, **_row_for_csv(v)} for k, v in sorted(label_agg["by_obj"].items())]
-    obj_csv = os.path.join(out_dir, "validation_by_obj.csv")
-    if obj_rows:
-        with open(obj_csv, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["obj_type", "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
-            writer.writeheader()
-            writer.writerows(obj_rows)
-        print(f"按 obj 聚合结果已保存到: {obj_csv}")
+        # 2) 按 obj-aff / obj / aff / 总体 聚合指标，便于分析各标签表现
+        label_agg = _aggregate_by_label(sample_records)
 
-    # 2c) 按 aff 的 CSV
-    aff_rows = [{"aff_type": k, **_row_for_csv(v)} for k, v in sorted(label_agg["by_aff"].items())]
-    aff_csv = os.path.join(out_dir, "validation_by_aff.csv")
-    if aff_rows:
-        with open(aff_csv, "w", newline="", encoding="utf-8-sig") as f:
-            writer = csv.DictWriter(f, fieldnames=["aff_type", "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
-            writer.writeheader()
-            writer.writerows(aff_rows)
-        print(f"按 aff 聚合结果已保存到: {aff_csv}")
+        def _row_for_csv(d: Dict[str, Any]) -> Dict[str, Any]:
+            return {k: (v if v is not None else "") for k, v in d.items()}
 
-    # 3) 汇总指标 JSON（含 label 聚合）
-    json_path = os.path.join(out_dir, "validation_results.json")
-    results_with_labels = {**results, "by_label": label_agg}
-    with open(json_path, "w", encoding="utf-8") as f:
-        json.dump(results_with_labels, f, indent=2, ensure_ascii=False)
-    print(f"汇总评估指标（含 label 聚合）已保存到: {json_path}")
+        # 2a) 按 obj-aff 的 CSV（便于表格分析）
+        obj_aff_rows = []
+        for obj in sorted(label_agg["by_obj_aff"].keys()):
+            for aff in sorted(label_agg["by_obj_aff"][obj].keys()):
+                row = {"obj_type": obj, "aff_type": aff, **_row_for_csv(label_agg["by_obj_aff"][obj][aff])}
+                obj_aff_rows.append(row)
+        obj_aff_csv = os.path.join(out_dir, "validation_by_obj_aff.csv")
+        if obj_aff_rows:
+            with open(obj_aff_csv, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=["obj_type", "aff_type", "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+                writer.writeheader()
+                writer.writerows(obj_aff_rows)
+            print(f"按 obj-aff 聚合结果已保存到: {obj_aff_csv}")
+
+        # 2b) 按 obj 的 CSV
+        obj_rows = [{"obj_type": k, **_row_for_csv(v)} for k, v in sorted(label_agg["by_obj"].items())]
+        obj_csv = os.path.join(out_dir, "validation_by_obj.csv")
+        if obj_rows:
+            with open(obj_csv, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=["obj_type", "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+                writer.writeheader()
+                writer.writerows(obj_rows)
+            print(f"按 obj 聚合结果已保存到: {obj_csv}")
+
+        # 2c) 按 aff 的 CSV
+        aff_rows = [{"aff_type": k, **_row_for_csv(v)} for k, v in sorted(label_agg["by_aff"].items())]
+        aff_csv = os.path.join(out_dir, "validation_by_aff.csv")
+        if aff_rows:
+            with open(aff_csv, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.DictWriter(f, fieldnames=["aff_type", "giou_2d", "ciou_2d", "p50_2d", "p50_95_2d", "kld_2d", "sim_2d", "nss_2d", "iou_3d", "auc_3d", "mae_3d", "sim_3d", "n_2d", "n_3d"])
+                writer.writeheader()
+                writer.writerows(aff_rows)
+            print(f"按 aff 聚合结果已保存到: {aff_csv}")
+
+        # 3) 汇总指标 JSON（含 label 聚合）
+        json_path = os.path.join(out_dir, "validation_results.json")
+        results_with_labels = {**results, "by_label": label_agg}
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(results_with_labels, f, indent=2, ensure_ascii=False)
+        print(f"汇总评估指标（含 label 聚合）已保存到: {json_path}")
+
+    _cleanup_distributed()
+
+
+def _spawn_worker(local_rank: int, world_size: int, args: argparse.Namespace) -> None:
+    os.environ["RANK"] = str(local_rank)
+    os.environ["LOCAL_RANK"] = str(local_rank)
+    os.environ["WORLD_SIZE"] = str(world_size)
+    try:
+        run_validate(args)
+    finally:
+        _cleanup_distributed()
+
+
+def main() -> None:
+    args = parse_args()
+    env_world = int(os.environ.get("WORLD_SIZE", "1"))
+    if env_world > 1:
+        try:
+            run_validate(args)
+        finally:
+            _cleanup_distributed()
+        return
+
+    device_ids = _parse_device_ids(args.device)
+    if str(args.device or "").strip().lower() != "cpu" and len(device_ids) > 1:
+        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in device_ids)
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", _find_free_port())
+        world_size = len(device_ids)
+        print(f"检测到 {world_size} 张 GPU，启动多卡数据并行验证。")
+        mp.spawn(
+            _spawn_worker,
+            args=(world_size, args),
+            nprocs=world_size,
+            join=True,
+        )
+        return
+    run_validate(args)
 
 
 if __name__ == "__main__":
