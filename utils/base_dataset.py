@@ -1673,40 +1673,47 @@ class JointDataset:
 
         return grouped_entries
 
-    def _build_lazy_sample_index(self) -> List[Dict[str, Any]]:
-        """根据 sample_ids 构建轻量样本索引，不加载图像/点云本体。"""
-        sample_index: List[Dict[str, Any]] = []
+    def _iter_obj_aff_types(self):
+        """按稳定顺序遍历 obj/aff，保证多进程/多卡下 sample index 一致。
+
+        ``set()`` 的迭代顺序依赖进程哈希种子，DistributedSampler 按全局下标切分时
+        各 rank 会对到不同样本，表现为同一 pc_id 重复、另一部分原始 ID 缺失。
+        """
         all_obj_types = set()
         for modality in ['ins', 'img', 'pc']:
             if modality in self.sample_ids:
                 all_obj_types.update(self.sample_ids[modality].keys())
-
-        for obj_type in all_obj_types:
+        for obj_type in sorted(all_obj_types):
             all_aff_types = set()
             for modality in ['ins', 'img', 'pc']:
                 if modality in self.sample_ids and obj_type in self.sample_ids[modality]:
                     all_aff_types.update(self.sample_ids[modality][obj_type].keys())
+            for aff_type in sorted(all_aff_types):
+                yield obj_type, aff_type
 
-            for aff_type in all_aff_types:
-                ins_ids = self.sample_ids.get('ins', {}).get(obj_type, {}).get(aff_type, [])
-                img_ids = self.sample_ids.get('img', {}).get(obj_type, {}).get(aff_type, [])
-                pc_ids = self.sample_ids.get('pc', {}).get(obj_type, {}).get(aff_type, [])
-                group_entries = self._compose_group_entries(ins_ids, img_ids, pc_ids)
-                for entry_group in group_entries:
-                    ins_entry = entry_group["ins_entry"]
-                    img_entry = entry_group["img_entry"]
-                    pc_entry = entry_group["pc_entry"]
-                    if ins_entry is None and img_entry is None and pc_entry is None:
-                        continue
-                    sample_index.append(
-                        {
-                            "obj_type": obj_type,
-                            "aff_type": aff_type,
-                            "ins_entry": ins_entry,
-                            "img_entry": img_entry,
-                            "pc_entry": pc_entry,
-                        }
-                    )
+    def _build_lazy_sample_index(self) -> List[Dict[str, Any]]:
+        """根据 sample_ids 构建轻量样本索引，不加载图像/点云本体。"""
+        sample_index: List[Dict[str, Any]] = []
+        for obj_type, aff_type in self._iter_obj_aff_types():
+            ins_ids = self.sample_ids.get('ins', {}).get(obj_type, {}).get(aff_type, [])
+            img_ids = self.sample_ids.get('img', {}).get(obj_type, {}).get(aff_type, [])
+            pc_ids = self.sample_ids.get('pc', {}).get(obj_type, {}).get(aff_type, [])
+            group_entries = self._compose_group_entries(ins_ids, img_ids, pc_ids)
+            for entry_group in group_entries:
+                ins_entry = entry_group["ins_entry"]
+                img_entry = entry_group["img_entry"]
+                pc_entry = entry_group["pc_entry"]
+                if ins_entry is None and img_entry is None and pc_entry is None:
+                    continue
+                sample_index.append(
+                    {
+                        "obj_type": obj_type,
+                        "aff_type": aff_type,
+                        "ins_entry": ins_entry,
+                        "img_entry": img_entry,
+                        "pc_entry": pc_entry,
+                    }
+                )
         return sample_index
 
     def _load_instruction_by_id(self, obj_type: str, ins_id: Optional[int], aff_type: str) -> Optional[str]:
@@ -2061,93 +2068,78 @@ class JointDataset:
             JointDataSample 列表
         """
         samples = []
-        
-        # 获取所有 obj_type（从三种模态中取并集）
-        all_obj_types = set()
-        for modality in ['ins', 'img', 'pc']:
-            if modality in self.sample_ids:
-                all_obj_types.update(self.sample_ids[modality].keys())
-        
-        for obj_type in all_obj_types:
-            # 获取该 obj_type 下所有 aff_type（从三种模态中取并集）
-            all_aff_types = set()
-            for modality in ['ins', 'img', 'pc']:
-                if modality in self.sample_ids and obj_type in self.sample_ids[modality]:
-                    all_aff_types.update(self.sample_ids[modality][obj_type].keys())
-            
-            for aff_type in all_aff_types:
-                # 获取各模态的索引列表
-                ins_ids = self.sample_ids.get('ins', {}).get(obj_type, {}).get(aff_type, [])
-                img_ids = self.sample_ids.get('img', {}).get(obj_type, {}).get(aff_type, [])
-                pc_ids = self.sample_ids.get('pc', {}).get(obj_type, {}).get(aff_type, [])
-                group_entries = self._compose_group_entries(ins_ids, img_ids, pc_ids)
+        for obj_type, aff_type in self._iter_obj_aff_types():
+            ins_ids = self.sample_ids.get('ins', {}).get(obj_type, {}).get(aff_type, [])
+            img_ids = self.sample_ids.get('img', {}).get(obj_type, {}).get(aff_type, [])
+            pc_ids = self.sample_ids.get('pc', {}).get(obj_type, {}).get(aff_type, [])
+            group_entries = self._compose_group_entries(ins_ids, img_ids, pc_ids)
 
-                for entry_group in group_entries:
-                    ins_entry = entry_group["ins_entry"]
-                    img_entry = entry_group["img_entry"]
-                    pc_entry = entry_group["pc_entry"]
-                    linked_img_id = self._entry_linked_id(ins_entry, "img_id")
-                    linked_pc_id = self._entry_linked_id(ins_entry, "pc_id")
+            for entry_group in group_entries:
+                ins_entry = entry_group["ins_entry"]
+                img_entry = entry_group["img_entry"]
+                pc_entry = entry_group["pc_entry"]
+                linked_img_id = self._entry_linked_id(ins_entry, "img_id")
+                linked_pc_id = self._entry_linked_id(ins_entry, "pc_id")
 
-                    ins_id = self._entry_primary_id(ins_entry)
-                    ins = Instruction.get_by_id(obj_type, ins_id) if ins_id is not None else None
+                ins_id = self._entry_primary_id(ins_entry)
+                ins = Instruction.get_by_id(obj_type, ins_id) if ins_id is not None else None
 
-                    # 获取 Image（按 aff_type 检查是否包含该 affordance）
-                    image = None
-                    if img_entry is not None:
-                        img_id = self._entry_primary_id(img_entry)
-                        image = Image.get_by_id(obj_type, img_id) if img_id is not None else None
-                        if image is not None:
-                            has_aff = image.get_aff_index(aff_type) is not None
-                            if not has_aff and isinstance(img_entry, (list, tuple)) and len(img_entry) > 1:
-                                fallback_idx = int(img_entry[1])
-                                if 0 <= fallback_idx < len(image.get_aff_types()) and image.get_aff_type_by_index(fallback_idx) == aff_type:
-                                    has_aff = True  # 旧格式兼容
-                                else:
-                                    warnings.warn(
-                                        f"Image 旧格式索引与 aff_type 不一致，已跳过: "
-                                        f"{obj_type}-{aff_type}, image_id={img_id}"
-                                    )
-                            if not has_aff:
-                                image = None
+                # 获取 Image（按 aff_type 检查是否包含该 affordance）
+                image = None
+                if img_entry is not None:
+                    img_id = self._entry_primary_id(img_entry)
+                    image = Image.get_by_id(obj_type, img_id) if img_id is not None else None
+                    if image is not None:
+                        has_aff = image.get_aff_index(aff_type) is not None
+                        if not has_aff and isinstance(img_entry, (list, tuple)) and len(img_entry) > 1:
+                            fallback_idx = int(img_entry[1])
+                            if 0 <= fallback_idx < len(image.get_aff_types()) and image.get_aff_type_by_index(fallback_idx) == aff_type:
+                                has_aff = True  # 旧格式兼容
+                            else:
+                                warnings.warn(
+                                    f"Image 旧格式索引与 aff_type 不一致，已跳过: "
+                                    f"{obj_type}-{aff_type}, image_id={img_id}"
+                                )
+                        if not has_aff:
+                            image = None
 
-                    # 获取 PointCloud（按 aff_type 检查是否包含该 affordance）
-                    pc = None
-                    if pc_entry is not None:
-                        pc_id = self._entry_primary_id(pc_entry)
-                        pc = PointCloud.get_by_id(obj_type, pc_id) if pc_id is not None else None
-                        if pc is not None:
-                            has_aff = pc.get_aff_index(aff_type) is not None
-                            if not has_aff and isinstance(pc_entry, (list, tuple)) and len(pc_entry) > 1:
-                                # 兼容旧格式 (pc_id, mask_idx)：验证索引对应 aff_type
-                                mask_idx = int(pc_entry[1])
-                                if 0 <= mask_idx < len(pc.get_aff_types()) and pc.get_aff_type_by_index(mask_idx) == aff_type:
-                                    has_aff = True
-                                else:
-                                    warnings.warn(
-                                        f"PointCloud 旧格式索引与 aff_type 不一致，已跳过: "
-                                        f"{obj_type}-{aff_type}, pc_id={pc_id}"
-                                    )
-                            if not has_aff:
-                                pc = None
+                # 获取 PointCloud（按 aff_type 检查是否包含该 affordance）
+                pc = None
+                if pc_entry is not None:
+                    pc_id = self._entry_primary_id(pc_entry)
+                    pc = PointCloud.get_by_id(obj_type, pc_id) if pc_id is not None else None
+                    if pc is not None:
+                        has_aff = pc.get_aff_index(aff_type) is not None
+                        if not has_aff and isinstance(pc_entry, (list, tuple)) and len(pc_entry) > 1:
+                            # 兼容旧格式 (pc_id, mask_idx)：验证索引对应 aff_type
+                            mask_idx = int(pc_entry[1])
+                            if 0 <= mask_idx < len(pc.get_aff_types()) and pc.get_aff_type_by_index(mask_idx) == aff_type:
+                                has_aff = True
+                            else:
+                                warnings.warn(
+                                    f"PointCloud 旧格式索引与 aff_type 不一致，已跳过: "
+                                    f"{obj_type}-{aff_type}, pc_id={pc_id}"
+                                )
+                        if not has_aff:
+                            pc = None
 
-                    # 至少有一个模态有数据才创建样本
-                    if (ins or image or pc) is not None:
-                        data_source_id = {
-                            'ins_id': ins.id if ins is not None else None,
-                            'img_id': image.id if image is not None else linked_img_id,
-                            'pc_id': pc.id if pc is not None else linked_pc_id,
-                            'aff_type': aff_type,
-                        }
-                        sample = JointDataSample(
-                            ins=ins,
-                            img=image,
-                            pc=pc,
-                            aff_type=aff_type,
-                            data_source_id=data_source_id,
-                        )
-                        samples.append(sample)
-            
+                # 至少有一个模态有数据才创建样本
+                if (ins or image or pc) is not None:
+                    data_source_id = {
+                        'ins_id': ins.id if ins is not None else None,
+                        'img_id': image.id if image is not None else linked_img_id,
+                        'pc_id': pc.id if pc is not None else linked_pc_id,
+                        'aff_type': aff_type,
+                    }
+                    sample = JointDataSample(
+                        ins=ins,
+                        img=image,
+                        pc=pc,
+                        aff_type=aff_type,
+                        data_source_id=data_source_id,
+                    )
+                    samples.append(sample)
+
         return samples
  
     def random_mask(self, samples: List[JointDataSample], mask_prob=(0, 0.01, 0.003)) -> List[JointDataSample]:

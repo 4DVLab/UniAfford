@@ -646,6 +646,9 @@ class UniAffordTorchDataset(Dataset):
             if md > 0:
                 pc_tensor = pc_tensor / md
             result["point_clouds"] = pc_tensor.contiguous().cpu()
+            # 供 validate 把预测 mask 写回原始点序/原始坐标
+            result["pc_source_xyz"] = np.asarray(pts, dtype=np.float32)
+            result["pc_sample_idx"] = np.asarray(idx, dtype=np.int64)
 
             if data["pc_gt"] is not None:
                 pc_gt = data["pc_gt"]
@@ -755,6 +758,7 @@ def UniAfford_collate_fn(
 
     images_list, img_gt_masks = [], []
     point_clouds_list, pc_gt_masks = [], []
+    pc_source_xyz_list, pc_sample_idx_list = [], []
     sample_ids, obj_types, aff_types, data_source_ids = [], [], [], []
     text_prompts, gt_answers = [], []
     original_size_per_sample = []
@@ -776,6 +780,8 @@ def UniAfford_collate_fn(
         img_gt_masks.append(sample.get("img_gt"))
         point_clouds_list.append(sample.get("point_clouds"))
         pc_gt_masks.append(sample.get("pc_gt"))
+        pc_source_xyz_list.append(sample.get("pc_source_xyz"))
+        pc_sample_idx_list.append(sample.get("pc_sample_idx"))
         sample_ids.append(sample.get("sample_id"))
         obj_types.append(sample.get("obj_type"))
         aff_types.append(sample.get("aff_type"))
@@ -956,5 +962,7 @@ def UniAfford_collate_fn(
         batch_out["pc_gt_tensor"] = torch.stack(padded_pc_masks)
         batch_out["pc_valid_lengths"] = torch.tensor(point_nums, dtype=torch.long)
 
+    batch_out["pc_source_xyz"] = pc_source_xyz_list
+    batch_out["pc_sample_idx"] = pc_sample_idx_list
     return batch_out
 

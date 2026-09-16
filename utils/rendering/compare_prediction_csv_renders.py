@@ -5,6 +5,7 @@
 - 跨 run 只用原始 ``img_id`` / ``pc_id`` 查找 GT 和其他方法的预测。
 - 参考 CSV 的每一行都输出一张对比图；同一 ``pc_id`` 上的不同 ``sample_id`` 不算重复。
 - 预测文件仍按 validate.py 保存时的 ``sample_id`` 查找。
+- 输出目录为 ``{output}/{image|point}_rows/{obj}/{aff}/{obj}_{aff}_{img|pc}{原始ID}.jpg``。
 - 输出文件名保持 ``{obj}_{aff}_{img|pc}{原始ID}``；同一原始 ID 的额外样本才追加 ``_{sample_id}``。
 - 原始 RGB、原始点云和 GT mask 均从 ``--dataset-root`` 指定的数据集目录读取。
 """
@@ -278,6 +279,39 @@ def _unique_output_stem(
             used_names.add(alt)
             return alt
         suffix += 1
+
+
+def _row_output_path(row_dir: str, key: RenderKey, name: str) -> str:
+    """对比图路径：``{row_dir}/{obj}/{aff}/{name}.jpg``。"""
+
+    return os.path.join(row_dir, _safe_name(key.obj_type), _safe_name(key.aff_type), f"{name}.jpg")
+
+
+def _legacy_flat_output_path(row_dir: str, name: str) -> str:
+    """旧版扁平路径：``{row_dir}/{name}.jpg``。"""
+
+    return os.path.join(row_dir, f"{name}.jpg")
+
+
+def _prepare_row_output_path(output_path: str, legacy_path: Optional[str], skip_existing: bool) -> bool:
+    """准备嵌套输出路径；若仅存在旧扁平文件则先搬过去。
+
+    Returns:
+        True 表示应跳过渲染。
+    """
+
+    if os.path.exists(output_path):
+        if legacy_path and os.path.abspath(legacy_path) != os.path.abspath(output_path) and os.path.exists(legacy_path):
+            try:
+                os.remove(legacy_path)
+            except OSError:
+                pass
+        return bool(skip_existing)
+    if legacy_path and os.path.exists(legacy_path):
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        os.replace(legacy_path, output_path)
+        return bool(skip_existing)
+    return False
 
 
 @functools.lru_cache(maxsize=None)
@@ -1098,7 +1132,7 @@ def _render_one_comparison_row(payload: Dict[str, Any]) -> Tuple[int, str, Dict[
     output_path = payload["output_path"]
     try:
         cv2.setNumThreads(1)
-        if payload["skip_existing"] and os.path.exists(output_path):
+        if _prepare_row_output_path(output_path, payload.get("legacy_output_path"), payload["skip_existing"]):
             return payload["index"], output_path, {"output_path": output_path, "skipped": True}, None
         key = payload["key"]
         rows = payload["rows"]
@@ -1143,14 +1177,24 @@ def _run_row_jobs(
 
     total = len(jobs)
     results: List[Optional[Tuple[str, Dict[str, Any], Optional[str]]]] = [None] * total
-    old_by_path = {str(row.get("output_path")): row for row in old_manifest if row.get("output_path")}
+    old_by_path = {}
+    for row in old_manifest:
+        output_path = str(row.get("output_path") or "")
+        if not output_path:
+            continue
+        old_by_path[output_path] = row
+        old_by_path[os.path.basename(output_path)] = row
     progress = tqdm(total=total, desc=f"渲染{modality}", dynamic_ncols=True, mininterval=0.2)
 
     def _store(index: int, output_path: str, row_info: Dict[str, Any], error: Optional[str]) -> None:
         if error:
             warnings.warn(f"{modality}: 渲染失败 {output_path}: {error}")
         if row_info.get("skipped") and output_path in old_by_path:
-            row_info = old_by_path[output_path]
+            row_info = dict(old_by_path[output_path])
+            row_info["output_path"] = output_path
+        elif row_info.get("skipped") and os.path.basename(output_path) in old_by_path:
+            row_info = dict(old_by_path[os.path.basename(output_path)])
+            row_info["output_path"] = output_path
         elif row_info.get("skipped"):
             row_info = {"output_path": output_path, "skipped": True}
         results[index] = (output_path, row_info, error)
@@ -1275,7 +1319,8 @@ def render_comparison(
                     "gt_threshold_2d": gt_threshold_2d,
                     "gt_threshold_3d": gt_threshold_3d,
                     "gt_overlay_threshold_3d": gt_overlay_threshold_3d,
-                    "output_path": os.path.join(row_dir, f"{name}.jpg"),
+                    "output_path": _row_output_path(row_dir, key, name),
+                    "legacy_output_path": _legacy_flat_output_path(row_dir, name),
                     "skip_existing": bool(skip_existing),
                 }
             )
